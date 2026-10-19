@@ -1,0 +1,104 @@
+"""企业业务本体平台 — FastAPI 应用入口（VS0 运行基座）。
+
+- 挂载所有 /api 路由
+- 统一响应信封与 ApiError 异常处理器（强制规则 7）
+- /health 健康检查（后端 + 依赖可达性）
+- 结构化请求日志（JSON 行）
+- /mcp（MCP Server 挂载点）在 VS6 切片由 mcp_server 模块接入
+"""
+from __future__ import annotations
+
+import time
+import uuid
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from api.router_actions import router as actions_router
+from api.router_graph import router as graph_router
+from api.router_ingest import router as ingest_router
+from api.router_mcp import router as mcp_router
+from api.router_ontologies import router as ontologies_router
+from api.router_system import router as system_router
+from api.router_templates import router as templates_router
+from config import get_settings
+from core.responses import ApiError, fail, success
+from jena_adapter.client import health as jena_health
+from logging_setup import get_logger, log_event
+from mcp_server import McpServer
+from neo4j_sync import Neo4jSync
+
+settings = get_settings()
+logger = get_logger("api.main")
+
+app = FastAPI(title=settings.app_name, version=settings.version)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.middleware("http")
+async def request_logging(request: Request, call_next):
+    start = time.time()
+    req_id = uuid.uuid4().hex[:8]
+    log_event(logger, 20, "request_start", req_id=req_id, method=request.method, path=request.url.path)
+    try:
+        response = await call_next(request)
+    except Exception as exc:  # noqa: BLE001
+        log_event(logger, 40, "request_error", req_id=req_id, error=str(exc))
+        raise
+    elapsed_ms = int((time.time() - start) * 1000)
+    log_event(logger, 20, "request_end", req_id=req_id, status=response.status_code, elapsed_ms=elapsed_ms)
+    return response
+
+
+@app.exception_handler(ApiError)
+async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
+    log_event(logger, 30, "api_error", code=exc.code, detail=exc.message, path=request.url.path)
+    return fail(exc)
+
+
+@app.exception_handler(Exception)
+async def unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
+    log_event(logger, 50, "unhandled_exception", error=str(exc), path=request.url.path)
+    return fail(ApiError("INTERNAL_ERROR", "未预期的内部错误", http_status=500))
+
+
+@app.get("/health")
+def health():
+    deps = jena_health()
+    deps.update(Neo4jSync().health())
+    deps["postgres"] = "unavailable"  # 可选
+    all_ok = all(v == "healthy" for v in deps.values())
+    return success({"status": "ok" if all_ok else "degraded", "version": settings.version, "dependencies": deps})
+
+
+# 挂载业务路由
+app.include_router(ontologies_router)
+app.include_router(ingest_router)
+app.include_router(graph_router)
+app.include_router(mcp_router)
+app.include_router(actions_router)
+app.include_router(templates_router)
+app.include_router(system_router)
+
+
+# VS6: 由 mcp_server 模块通过 FastMCP 挂载 /mcp（SSE）
+_mcp_server = McpServer()
+_mcp_server.mount(app)
+
+
+@app.get("/mcp/status")
+def mcp_status():
+    return success(_mcp_server.status())
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

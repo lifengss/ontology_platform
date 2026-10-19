@@ -1,0 +1,33 @@
+# 企业业务本体平台 — 后端依赖（MVP，本地 Docker Compose）
+# 核心 Web 框架
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+python-multipart==0.0.12
+
+# 本体 / 推理（Jena 以独立 HTTP 服务调用，不直接依赖 Java 库）
+rdflib==7.0.0
+# SHACL 校验引擎（纯 Python，离线可用；VS2 权威校验）
+pyshacl==0.40.1
+
+# 图数据库
+neo4j==5.20.0
+
+# MCP 双向（Server 端自动生成工具，Client 端接入外部）
+mcp==1.4.1
+
+# 向量（Postgres + pgvector，MVP 可选使用）
+psycopg2-binary==2.9.9
+pgvector==0.3.1
+
+# 凭据加密落盘（生产建议项，Demo 可不用）
+cryptography==43.0.1
+
+# 文档/表格解析（逆向生成用）
+openpyxl==3.1.5
+python-docx==1.1.2
+PyPDF2==3.0.1
+
+# 测试
+pytest==8.3.2
+httpx==0.27.0

@@ -1,0 +1,32 @@
+# MCP 对外工具契约（P-02 借鉴补丁）
+# 由 mcp_server 注册时参考生成；外部 Agent 调用前可静态判断读写与副作用。
+# 字段：reads / writes / preconditions / postconditions / side_effect
+
+ontology_query:
+  reads: [本体TBox, 实例ABox]
+  writes: []
+  preconditions: ["本体已加载且非空"]
+  postconditions: ["仅返回被授权命名图内的结果"]
+  side_effect: false
+
+inference_trace:
+  reads: [推理结论, 推导路径]
+  writes: []
+  preconditions: ["已执行过推理快照"]
+  postconditions: ["返回可追溯的推导链"]
+  side_effect: false
+
+instance_get:
+  reads: [实例ABox]
+  writes: []
+  preconditions: ["实例存在"]
+  postconditions: ["返回实例及其溯源标记（含外部MCP来源着色）"]
+  side_effect: false
+
+# 以下为 VS8 Action 回写类（有副作用，需 human_required）
+action_invoke:
+  reads: [Action定义, 目标外部系统]
+  writes: [外部系统, 本地执行日志]
+  preconditions: ["Action 已定义", "本次执行已人工确认"]
+  postconditions: ["幂等键已写入", "执行结果已留痕"]
+  side_effect: true

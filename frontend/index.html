@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>企业业务本体平台 · MVP</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    :root { --bg:#0b1020; --panel:#121a2e; --card:#161f36; --border:#2a365e; --accent:#4f8cff; --ok:#34d399; --bad:#f87171; --text:#e6ecff; --muted:#94a3b8; }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, "PingFang SC", sans-serif; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
+    .btn { background: var(--accent); color: #fff; padding: 6px 12px; border-radius: 8px; font-size: 13px; border: none; cursor: pointer; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn.secondary { background: #1e293b; border: 1px solid var(--border); }
+    .btn.success { background: #059669; }
+    .ok { color: var(--ok); } .bad { color: var(--bad); }
+    .tab { padding: 8px 14px; border-bottom: 2px solid transparent; color: var(--muted); cursor: pointer; }
+    .tab.active { color: var(--text); border-color: var(--accent); }
+    pre { background: #0b1222; border: 1px solid var(--border); border-radius: 8px; padding: 10px; overflow: auto; max-height: 320px; font-size: 12px; }
+    input, textarea, select { background: #0b1222; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+    label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+    .graph-tooltip { position: absolute; background: rgba(15,23,42,.95); border: 1px solid var(--border); padding: 6px 10px; border-radius: 6px; font-size: 12px; pointer-events: none; opacity: 0; transition: opacity .15s; }
+    .toast { position: fixed; bottom: 16px; right: 16px; min-width: 260px; max-width: 360px; padding: 12px 14px; border-radius: 10px; color: #fff; font-size: 13px; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,.35); animation: slideIn .25s ease; border: 1px solid var(--border); }
+    @keyframes slideIn { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    .toast.info { background: #1e3a8a; } .toast.ok { background: #065f46; } .toast.err { background: #991b1b; }
+    .subtab { padding: 6px 12px; border-radius: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+    .subtab.active { background: var(--accent); color: #fff; }
+    .object-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; background: #0f1627; }
+    .remove-btn { color: var(--bad); font-size: 12px; cursor: pointer; }
+    .badge { font-size: 10px; padding: 2px 6px; border-radius: 10px; background: #1e293b; border: 1px solid var(--border); }
+    .badge.draft { color: #fbbf24; border-color: #78350f; background: #451a03; }
+    .badge.active { color: #34d399; border-color: #065f46; background: #064e3b; }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+  <header class="panel mx-4 mt-4 px-5 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-bold">O</div>
+      <h1 class="text-base font-semibold">企业业务本体平台 <span class="text-xs text-slate-400 font-normal">MVP</span></h1>
+    </div>
+    <div class="flex items-center gap-3 text-xs">
+      <span id="healthDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
+      <span id="healthText" class="text-slate-400">检查中…</span>
+      <span id="ver" class="text-slate-500"></span>
+    </div>
+  </header>
+
+  <nav class="mx-4 mt-3 flex gap-1 border-b border-slate-700/50">
+    <div class="tab active" data-tab="modeling" onclick="switchTab('modeling')">建模</div>
+    <div class="tab" data-tab="ingest" onclick="switchTab('ingest')">归化</div>
+    <div class="tab" data-tab="graph" onclick="switchTab('graph')">图谱</div>
+    <div class="tab" data-tab="inference" onclick="switchTab('inference')">推理</div>
+  </nav>
+
+  <main class="flex-1 p-4 overflow-auto">
+    <!-- 建模页 -->
+    <section id="modeling" class="tab-content grid grid-cols-12 gap-4">
+      <div class="col-span-12 lg:col-span-4 flex flex-col gap-4">
+        <div class="card p-4">
+          <div class="flex justify-between items-center mb-3">
+            <h3 class="font-medium">本体列表</h3>
+            <button class="btn" onclick="startCreate()">+ 新建</button>
+          </div>
+          <div class="flex gap-2 mb-3">
+            <button class="subtab active" id="filterAll" onclick="setFilter('all')">全部</button>
+            <button class="subtab" id="filterActive" onclick="setFilter('active')">已发布</button>
+            <button class="subtab" id="filterDraft" onclick="setFilter('draft')">草稿</button>
+          </div>
+          <div id="ontologyList" class="space-y-2 max-h-[520px] overflow-auto pr-1"></div>
+        </div>
+      </div>
+      <div class="col-span-12 lg:col-span-8 flex flex-col gap-4">
+        <div id="editorCard" class="card p-4 hidden">
+          <div class="flex justify-between items-center mb-3">
+            <h3 class="font-medium" id="editorTitle">新建本体</h3>
+            <div class="flex gap-2">
+              <button class="btn success" onclick="saveOntology()">保存</button>
+              <button class="btn secondary" onclick="closeEditor()">取消</button>
+            </div>
+          </div>
+          <div class="flex gap-2 mb-3 bg-slate-900/50 p-1 rounded-lg inline-flex">
+            <button class="subtab active" id="subtabForm" onclick="setEditorMode('form')">表单建模</button>
+            <button class="subtab" id="subtabAi" onclick="setEditorMode('ai')">AI 生成</button>
+            <button class="subtab" id="subtabDoc" onclick="setEditorMode('doc')">文档逆向</button>
+          </div>
+
+          <div id="modeForm">
+            <div class="grid grid-cols-3 gap-3 mb-3">
+              <div><label>名称</label><input id="formName" class="w-full" placeholder="客户本体" /></div>
+              <div><label>版本</label><input id="formVersion" class="w-full" value="1" /></div>
+              <div><label>建模方式</label>
+                <select id="formModelingType"><option value="manual">手工</option><option value="reverse">逆向</option></select>
+              </div>
+            </div>
+            <div class="mb-3"><label>描述</label><textarea id="formDesc" rows="2" class="w-full" placeholder="简要描述本体的业务范围"></textarea></div>
+            <div class="form-section-title"><span>对象定义</span><button class="btn" onclick="addObject()">+ 添加对象</button></div>
+            <div id="objectForms"></div>
+          </div>
+
+          <div id="modeAi" class="hidden">
+            <label>用自然语言描述业务场景，AI 自动生成本体</label>
+            <textarea id="aiText" rows="5" class="w-full" placeholder="例如：客户可以下多个订单，每个订单包含若干商品，商品有 SKU 和库存。"></textarea>
+            <div class="flex gap-2 mt-3">
+              <button class="btn" onclick="generateFromText()" id="btnAiGen">开始生成</button>
+              <span class="text-xs text-slate-500 self-center">生成结果为草稿，可编辑后发布</span>
+            </div>
+          </div>
+
+          <div id="modeDoc" class="hidden">
+            <label>上传 PRD / Word / Excel / PDF / 文本</label>
+            <input type="file" id="docFile" class="w-full" accept=".txt,.md,.docx,.xlsx,.pdf" />
+            <div class="flex gap-2 mt-3">
+              <button class="btn" onclick="uploadDoc()" id="btnDocParse">开始解析</button>
+              <span class="text-xs text-slate-500 self-center">解析为异步任务，右下角提示状态</span>
+            </div>
+          </div>
+        </div>
+
+        <div id="detailPanel" class="card p-4 hidden">
+          <div class="flex justify-between items-start mb-3">
+            <div>
+              <div class="flex items-center gap-2">
+                <h3 id="detailTitle" class="font-medium text-lg"></h3>
+                <span id="detailBadge" class="badge"></span>
+              </div>
+              <p id="detailMeta" class="text-xs text-slate-400 mt-1"></p>
+            </div>
+            <div class="flex gap-2 flex-wrap">
+              <button class="btn secondary" onclick="editCurrentOntology()">编辑</button>
+              <button class="btn success" id="btnPublish" onclick="publishCurrent()">发布</button>
+              <button class="btn secondary" onclick="validateOntology()">校验</button>
+              <button class="btn secondary" onclick="exportOntology()">导出 TTL</button>
+              <button class="btn secondary" onclick="viewGraph()">看图谱</button>
+            </div>
+          </div>
+          <pre id="detailBody" class="text-xs"></pre>
+          <pre id="validateResult" class="mt-3 hidden"></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- 归化页 -->
+    <section id="ingest" class="tab-content hidden grid grid-cols-12 gap-4">
+      <div class="col-span-12 lg:col-span-4 card p-4">
+        <h3 class="font-medium mb-3">选择本体</h3>
+        <select id="ingestOntology" class="w-full mb-3" onchange="renderIngestTarget()"></select>
+        <div id="ingestTarget" class="text-xs text-slate-400"></div>
+      </div>
+      <div class="col-span-12 lg:col-span-8 flex flex-col gap-4">
+        <div class="card p-4">
+          <h3 class="font-medium mb-3">字段映射 Preview</h3>
+          <div class="grid grid-cols-2 gap-3 mb-3">
+            <div><label>目标对象类型</label><input id="ingestObjectType" class="w-full" /></div>
+            <div><label>字段映射 JSON</label><input id="ingestFieldMap" class="w-full" value='{"name":"attr_name"}' /></div>
+          </div>
+          <label>源记录 JSON 数组</label>
+          <textarea id="ingestRecords" rows="5" class="w-full font-mono text-xs">[{"name":"腾讯"},{"name":"宝钢"}]</textarea>
+          <button class="btn mt-3" onclick="previewIngest()">Preview</button>
+          <pre id="ingestPreviewResult" class="mt-3 hidden"></pre>
+        </div>
+        <div class="card p-4">
+          <div class="flex justify-between items-center mb-3">
+            <h3 class="font-medium">候选列表</h3>
+            <button class="btn secondary" onclick="loadCandidates()">刷新</button>
+          </div>
+          <div id="candidateList" class="space-y-2 max-h-[360px] overflow-auto"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 图谱页 -->
+    <section id="graph" class="tab-content hidden flex flex-col gap-4 h-full">
+      <div class="flex items-center gap-3">
+        <select id="graphOntology" class="min-w-[200px]" onchange="loadGraph()"></select>
+        <div class="flex bg-slate-800/60 rounded-lg p-1 text-xs">
+          <button id="tabSchema" class="px-3 py-1 rounded-md bg-slate-700" onclick="setGraphTab('schema')">本体视图</button>
+          <button id="tabKnowledge" class="px-3 py-1 rounded-md" onclick="setGraphTab('knowledge')">知识图谱</button>
+        </div>
+      </div>
+      <div class="card flex-1 relative min-h-[500px]" id="graphContainer">
+        <div class="graph-tooltip" id="graphTooltip"></div>
+      </div>
+    </section>
+
+    <!-- 推理页 -->
+    <section id="inference" class="tab-content hidden grid grid-cols-12 gap-4">
+      <div class="col-span-12 lg:col-span-4 card p-4">
+        <h3 class="font-medium mb-3">选择本体</h3>
+        <select id="inferOntology" class="w-full mb-3" onchange="loadInference()"></select>
+        <p class="text-xs text-slate-400">展示 OWL2-RL 风格推理链路。</p>
+      </div>
+      <div class="col-span-12 lg:col-span-8 card p-4">
+        <h3 class="font-medium mb-3">推理步骤</h3>
+        <div id="inferenceSteps" class="space-y-2 max-h-[600px] overflow-auto"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

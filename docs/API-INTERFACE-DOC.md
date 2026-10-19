@@ -1,0 +1,430 @@
+# 企业业务本体平台 — 接口设计文档（API-INTERFACE-DOC）
+
+> 版本：v1.0-draft ｜ 日期：2026-10-19 ｜ 状态：设计基线（单一数据源）
+> 配套：《技术实现方案》《开发进度规划》。本文件是**后端 REST API 与对外 MCP 工具的单一权威来源**；任何代码侧的路径/参数/响应字段变更，必须同步本文档（遵循 script-check-skill 规则 6/7）。
+> 形态基线：本地网页服务 + Docker Compose（FastAPI + Jena/Fuseki + Neo4j + Postgres/pgvector + 浏览器前端）。
+
+---
+
+## 1. 通用约定（强制，所有端点适用）
+
+### 1.1 基础路径
+- REST 前缀：`/api`（健康检查 `/health` 在根路径，无前缀）。
+- MCP 工具端点：随 FastAPI 挂载于 `/mcp`（streamable_http），不在此 REST 列表内（见 §9）。
+
+### 1.2 统一响应信封
+所有接口返回同一信封结构，**禁止**裸数据/裸数组直接返回：
+
+```json
+{
+  "success": true,
+  "data": { },
+  "error": null
+}
+```
+
+失败（含 4xx/5xx）返回：
+
+```json
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "字段 field_map 不能为空",
+    "details": { "field": "field_map" }
+  }
+}
+```
+
+- `success`：`boolean`，必填。
+- `data`：成功时承载业务数据；列表/分页时见 §1.4；失败时为 `null`。
+- `error`：失败时承载 `{ code, message, details }`；成功时为 `null`。`details` 可空。
+
+### 1.3 错误码（error.code）
+| code | HTTP 状态 | 含义 |
+|---|---|---|
+| `BAD_REQUEST` | 400 | 参数缺失/格式错误（非校验类） |
+| `VALIDATION_ERROR` | 422 | 请求体/参数校验失败 |
+| `NOT_FOUND` | 404 | 资源不存在 |
+| `CONFLICT` | 409 | 冲突（如重复创建、幂等键已存在） |
+| `UPSTREAM_UNAVAILABLE` | 502 | 外部依赖（Jena/Neo4j/外部 MCP）不可达 |
+| `FORBIDDEN_WRITE` | 403 | 受控写操作被护栏拦截（如 LLM 直落库、未确认回写） |
+| `INTERNAL_ERROR` | 500 | 未预期内部错误 |
+
+> 注意：`FORBIDDEN_WRITE`(403) 用于语义护栏（如归化候选未审核不得落库、Action 未确认不得回写），与鉴权无关（平台自身不鉴权，见 PRD §12）。
+
+### 1.4 列表 / 分页信封（强制）
+凡"列表/分页"类接口，`data` **必须**为对象：
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [ { }, { } ],
+    "total": 42,
+    "page": 1,
+    "pageSize": 20
+  }
+}
+```
+
+- **禁止裸数组**：`data` 不得直接是 `[...]`。
+- 分页查询参数（**以本表为准，禁止跨接口套用**）：
+  - `page`：页码，1 基，默认 `1`，整数 ≥ 1。
+  - `pageSize`：每页条数，默认 `20`，最大 `100`。**禁止使用 `limit`**。
+- 前端读取：`res.data.items` / `res.data.total`；后端返回裸数组或用 `limit` 参数 → 标记为 `RESPONSE_SHAPE_MISMATCH` / `PARAM_NAME_MISMATCH`（error）。
+
+### 1.5 字段命名
+- 统一 `snake_case`；时间戳统一 `created_at` / `updated_at`（ISO-8601 带时区），**不得**用 `createdAt`。
+- 响应字段名须与本文档各端点的 `responseExample` **逐字段一致**（含大小写/下划线）。
+- 列表记录与详情记录用同一组字段名，避免同一概念两套命名。
+
+### 1.6 其它
+- 所有写接口接受 `application/json`；时间字段服务端生成，客户端不传。
+- 资源 ID 一律用字符串（UUID v4）。
+
+---
+
+## 2. 本体建模（ontologies，对应 UC1 / VS1）
+
+### 2.1 业务层模型数据结构（请求与响应共用）
+```json
+{
+  "id": "uuid",
+  "name": "客户本体",
+  "description": "部门客户域模型",
+  "modeling_type": "manual",
+  "version": "1",
+  "objects": [
+    {
+      "id": "obj_customer",
+      "name": "客户",
+      "description": "签约客户",
+      "parent": null,
+      "attributes": [
+        {
+          "id": "attr_name",
+          "name": "名称",
+          "data_type": "string",
+          "required": true,
+          "constraints": { "min_length": 1, "max_length": 128, "pattern": null }
+        }
+      ],
+      "relations": [
+        {
+          "id": "rel_belongs",
+          "name": "归属部门",
+          "target_object": "obj_dept",
+          "cardinality": "many_to_one",
+          "inverse_name": "拥有客户"
+        }
+      ]
+    }
+  ],
+  "constraints": [
+    { "id": "cst_unique_name", "name": "客户名称唯一", "scope": "obj_customer", "rule": "unique", "params": { "attribute": "attr_name" } }
+  ],
+  "created_at": "2026-10-19T10:00:00+08:00",
+  "updated_at": "2026-10-19T10:00:00+08:00"
+}
+```
+- `modeling_type` 取值：`manual`(手工) / `reverse`(逆向) / `schema`(Schema 约束) / `hybrid`(混合)。
+- `data_type` 取值：`string` / `integer` / `float` / `boolean` / `date` / `datetime`。
+- `cardinality` 取值：`one_to_one` / `one_to_many` / `many_to_one` / `many_to_many`。
+
+### 2.2 端点
+| 方法 | 路径 | 说明 | 关键参数 / 请求体 |
+|---|---|---|---|
+| POST | `/api/ontologies` | 创建/保存业务本体（翻译落 Jena，本地回退文件持久化） | body=§2.1 模型（不含 id/时间戳） |
+| GET | `/api/ontologies` | 本体列表（分页） | query=`page`,`pageSize`,`keyword`(可选) |
+| GET | `/api/ontologies/{id}` | 读取业务层模型 | path=`id` |
+| PUT | `/api/ontologies/{id}` | 更新模型 | body=§2.1（可部分字段） |
+| DELETE | `/api/ontologies/{id}` | 删除本体 | path=`id` |
+| POST | `/api/ontologies/{id}/validate` | SHACL 一致性校验（VS2 真实校验） | path=`id`；body=`{ "level": "full", "sample_instances": [ { "object_type": "obj_customer", "attr_name": "张三" } ] }`（两者皆可选，不传 sample_instances 则对模型自身做结构+空数据 SHACL） |
+| POST | `/api/ontologies/{id}/export` | 导出 OWL/TTL（标准层） | path=`id`；body=`{ "format": "turtle" }`（默认 turtle） |
+| POST | `/api/ontologies/{id}/snapshot` | 版本快照 | path=`id`；body=`{ "note": "..." }`（可选） |
+| GET | `/api/ontologies/{id}/snapshots` | 历史快照列表（分页） | path=`id`；query=`page`,`pageSize` |
+
+- `POST /api/ontologies` 响应：`data` = 完整模型（带回填 `id`/`created_at`/`updated_at`），HTTP 201。
+- **创建前轻量校验门（P-01/P-03）**：`POST /api/ontologies` 在翻译为 OWL **之前**先跑业务层门（id 唯一、父级无环、data_type/基数合法、枚举定义合法、属性/关系名禁用敏感词如 `password/secret/token`），不通过返回 `VALIDATION_ERROR`（HTTP 422，`error.details.violations` 同结构）；通过才进入翻译 + Jena + SHACL，省一次推理调用。
+- `POST /api/ontologies/{id}/validate` 响应（VS2：业务层门 + pyshacl 真实 SHACL 校验；violations 含 `focus_node` 指向违规实例节点）：
+```json
+{ "success": true, "data": { "valid": false, "violations": [ { "severity": "violation", "path": "attr_name", "focus_node": "inst_0", "message": "Less than 1 values on attr_name" } ] }, "error": null }
+```
+- `POST /api/ontologies/{id}/export` 响应：`data = { "format": "turtle", "content": "@prefix ...", "filename": "customer.ttl" }`。
+
+---
+
+## 3. 实例归化流水线（ingest，对应 UC2 / VS3）
+
+> 铁律：LLM 输出**禁止直落库**。候选经人工审核卡点 + SHACL 校验后方可落 Neo4j。
+
+### 3.1 候选实例数据结构
+```json
+{
+  "id": "uuid",
+  "ontology_id": "uuid",
+  "source_type": "llm|field_map|external_mcp",
+  "source_ref": "connection_id 或 文档名",
+  "object_type": "obj_customer",
+  "instances": [
+    { "name": "示例客户", "industry": "制造", "_source": { "connection_id": "crm-sf-mcp", "read_at": "2026-10-19T10:00:00+08:00" } }
+  ],
+  "status": "pending",
+  "created_at": "2026-10-19T10:00:00+08:00"
+}
+```
+- `status`：`pending`(待审核) / `approved`(已通过) / `rejected`(已拒绝) / `imported`(已落库)。
+
+### 3.2 端点
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/ingest/preview` | 生成候选（LLM/字段映射/外部读取），**不入库** |
+| GET | `/api/ingest/candidates` | 候选列表（分页，query=`ontology_id`,`status`,`page`,`pageSize`） |
+| GET | `/api/ingest/candidates/{id}` | 候选详情 |
+| POST | `/api/ingest/candidates/{id}/approve` | 人工审核通过 → SHACL → 落 Neo4j（返回落库结果） |
+| POST | `/api/ingest/candidates/{id}/reject` | 人工拒绝 |
+
+- `POST /api/ingest/preview` 请求体（三选一来源）：
+```json
+{
+  "ontology_id": "uuid",
+  "object_type": "obj_customer",
+  "source": { "kind": "llm", "text": "文档内容…", "llm_endpoint": "http://localhost:11434/v1", "model": "qwen" },
+  "mapping": null
+}
+```
+或字段映射（纯本地，离线可用）：
+```json
+{
+  "ontology_id": "uuid",
+  "object_type": "obj_customer",
+  "source": { "kind": "field_map", "records": [{"account_name":"腾讯", "industry":"互联网"}] },
+  "mapping": { "field_map": { "account_name": "name", "industry": "industry" }, "source_ref": "crm-sf-mcp" }
+}
+```
+或外部 MCP（VS7 实现）：`{ "ontology_id":"uuid", "source": { "kind":"external_mcp", "connection_id":"crm-sf-mcp", "tool":"query_account" }, "mapping": { "field_map": { "account_name":"name" } } }`
+- `mapping.field_map` 方向：**源字段名 → 本体属性 id**（如 `"account_name": "name"`）。
+- 响应：`data` = 候选实例对象（§3.1，`status=pending`）。
+- `preview` 会先校验本体业务层门；不通过返回 422。
+- `POST .../approve` 响应：`data = { "imported": 5, "rejected": 0, "violations": [], "neoTxId": "..." }`；若 SHACL 校验失败返回 `data={ "imported":0, "violations":[...] }` 且 HTTP 200（业务级失败，非 5xx）。
+- approve 流程：先跑业务层门 → 再跑 SHACL（pyshacl）→ 通过则写 Neo4j；Neo4j 不可用时降级为本地 `data/instances.jsonl`，仍可被后续 VS4 图谱读取。
+- **护栏**：任何试图绕过审核直接落库的入口返回 `FORBIDDEN_WRITE`；已落库候选不可拒绝。
+
+---
+
+## 4. 可视化（graph / inference，对应 UC6 / VS2,VS4）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/graph/{id}` | 图谱数据（含 `source` 溯源着色字段） |
+| GET | `/api/inference/trace/{id}` | 推理链路 steps |
+
+- `GET /api/graph/{id}` 响应：
+```json
+{ "success": true, "data": {
+    "nodes": [
+      { "id":"obj_customer", "label":"客户", "kind":"object", "source":"internal" },
+      { "id":"inst_xxx", "label":"腾讯", "kind":"instance", "object_type":"obj_customer", "source":"external_mcp" }
+    ],
+    "edges": [
+      { "id":"e1", "source":"obj_customer", "target":"obj_dept", "label":"归属部门", "kind":"relation", "origin":"internal" },
+      { "id":"instance_of_xxx", "source":"inst_xxx", "target":"obj_customer", "label":"instance_of", "kind":"instance_of", "origin":"external_mcp" }
+    ],
+    "tabs": {
+      "schema": { "nodes": [...], "edges": [...] },
+      "knowledge": { "nodes": [...], "edges": [...] }
+    },
+    "source_legend": [ { "source":"internal", "label":"内部建模", "color":"#4f8cff" }, { "source":"external_mcp", "label":"外部归化", "color":"#ff8a4f" } ]
+}, "error": null }
+```
+  - 字段约定：**节点**的 `source` = 数据来源（着色）；**边**的 `source`/`target` = 图方向，`origin` = 数据来源。
+  - `tabs.schema` 仅含本体 TBox；`tabs.knowledge` 合并 TBox + ABox（VS3 落库实例，来自 `instances.jsonl` 或 Neo4j）。
+- `GET /api/inference/trace/{id}` 响应（VS2：基于生成的 OWL 图应用 OWL2-RL 风格规则推导隐含公理，返回可解释步骤）：
+```json
+{ "success": true, "data": {
+    "ontology_id": "uuid",
+    "focus": null,
+    "steps": [
+      { "order":1, "rule":"owl:inverseOf 对称性", "premises":["rel_belongs inverseOf rel_belongsInv"], "conclusion":"rel_belongsInv inverseOf rel_belongs" }
+    ]
+}, "error": null }
+```
+
+---
+
+## 5. MCP 接入（mcp，对应 UC3/UC4 / VS6,VS7,VS9）
+
+### 5.1 连接配置数据结构（请求/响应共用，与《技术实现方案》§3 对齐）
+```json
+{
+  "connection_id": "crm-sf-mcp",
+  "display_name": "销售易 CRM（MCP）",
+  "transport": "streamable_http",
+  "endpoint": "https://mcp.crm-vendor.com/mcp",
+  "auth": { "type": "oauth2_client_credentials", "token_url": "https://.../token",
+            "client_id_ref": "${CRM_CLIENT_ID}", "client_secret_ref": "${CRM_CLIENT_SECRET}", "scopes": ["mcp.read","mcp.write"] },
+  "tool_allowlist": ["query_account","upsert_contact"],
+  "maps_to_ontology": { "object_type": "Customer", "field_map": { "account_name": "name", "industry": "industry" } },
+  "read_schedule": "manual",
+  "created_at": "2026-10-19T10:00:00+08:00",
+  "updated_at": "2026-10-19T10:00:00+08:00"
+}
+```
+> 凭据仅存引用（如 `${CRM_CLIENT_ID}`），**明文不落库、不打印**（见 §8 / VS9）。
+
+### 5.2 端点
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/mcp/connections` | 新建外部连接配置（HTTP 201） |
+| GET | `/api/mcp/connections` | 连接列表（分页） |
+| GET | `/api/mcp/connections/{id}` | 读取连接（**不含**凭据明文） |
+| PUT | `/api/mcp/connections/{id}` | 更新连接 |
+| DELETE | `/api/mcp/connections/{id}` | 删除连接 |
+| POST | `/api/mcp/connections/{id}/test` | 连通性测试（含鉴权握手） |
+| POST | `/api/mcp/connections/{id}/read` | 触发读取 → 生成候选实例（转 §3 候选，status=pending） |
+| POST | `/api/mcp/server/publish` | 由本体一键发布 MCP Server |
+| GET | `/api/mcp/server/status` | MCP Server 运行状态 |
+
+- `POST .../test` 响应：`data = { "reachable": true, "auth_ok": true, "latency_ms": 120, "error": null }`（不可达时 `reachable=false` + `error` 说明，HTTP 200 业务级）。
+- `POST .../read` 响应：`data = { "candidate_id": "uuid", "record_count": 12 }`。
+- 健壮性要求（P1）：超时 10s、指数退避重试 ≤3、401/403 阻断告警不降级、schema 漂移停自动入库转人工。
+
+---
+
+## 6. Action 受控回写（actions，对应 UC5 / VS8）
+
+### 6.1 Action 定义数据结构
+```json
+{
+  "action_id": "sync_customer_to_crm",
+  "target_connection": "crm-sf-mcp",
+  "invoke": { "kind": "mcp_tool", "tool": "upsert_contact" },
+  "input_map": { "name": "$.Customer.name", "email": "$.Customer.email" },
+  "idempotency_key": "customer::{Customer.id}",
+  "confirmation": "human_required",
+  "dry_run_supported": true,
+  "created_at": "2026-10-19T10:00:00+08:00",
+  "updated_at": "2026-10-19T10:00:00+08:00"
+}
+```
+- `invoke.kind`：`mcp_tool` / `webhook` / `rest`。`confirmation`：当前仅 `human_required`。
+
+### 6.2 端点
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/actions` | 定义 Action（HTTP 201） |
+| GET | `/api/actions` | Action 列表（分页） |
+| GET | `/api/actions/{id}` | 读取 Action |
+| PUT | `/api/actions/{id}` | 更新 |
+| DELETE | `/api/actions/{id}` | 删除 |
+| POST | `/api/actions/{id}/execute` | 触发执行（返回确认令牌，未确认不真正回写） |
+| POST | `/api/actions/{id}/confirm` | 人工确认后真正回写 |
+
+- `POST .../execute` 请求体：`{ "input": { "Customer": { "id":"c1","name":"张三" } }, "dry_run": false }`。
+- `POST .../execute` 响应：`data = { "confirmation_token": "uuid", "dry_run": false, "planned_payload": { "tool":"upsert_contact", "args": { "name":"张三" } }, "idempotency_key": "customer::c1" }`。**此时未回写**。
+- `POST .../confirm` 请求体：`{ "confirmation_token": "uuid" }`；响应：`data = { "executed": true, "external_response": { ... }, "log_id": "uuid" }`。
+- 护栏：相同 `idempotency_key` 重复确认不产生重复回写（幂等）；`dry_run=true` 时 `execute` 直接返回 `planned_payload` 且 `confirmation_token=null`，不发起外部调用。
+
+---
+
+## 7. 系统 / 健康检查
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/health` | 健康检查（后端 + 依赖服务可达性） |
+| GET | `/api/system/info` | 平台元信息（版本、模块就绪状态） |
+
+- `GET /health` 响应（HTTP 200 表示服务存活；依赖不可达时仍 200 但 `dependencies` 标 unhealthy，便于告警）：
+```json
+{ "success": true, "data": {
+    "status": "ok",
+    "version": "1.0.0",
+    "dependencies": { "jena": "healthy", "neo4j": "healthy", "postgres": "healthy" }
+}, "error": null }
+```
+
+---
+
+## 8. 凭据管理（VS9，约定性，无写密接口）
+
+- 外部凭据**不落库**：以本地配置文件（`./secrets/*.json`，`chmod 600`）或环境变量管理；引用以 `${ENV_NAME}` 形式出现在连接配置中。凭据实体**只存 `secret_ref` 间接引用**（指向 env 变量名或本地加密文件路径），**绝不在本体/配置里出现明文值**（P-03 借鉴补丁：把"口头约定"落成结构化约束）。
+- **不提供**任何返回凭据明文的接口。仅提供：
+  - `GET /api/credentials/status` → `data = { "configured": ["CRM_CLIENT_ID","CRM_CLIENT_SECRET"], "missing": [] }`（仅列引用名，不列值）。
+
+---
+
+## 9. 对外 MCP 工具（挂载 `/mcp`，非 REST）
+
+由本体 Schema **自动生成**，供外部智能体平台注册调用（streamable_http）：
+
+| 工具名 | 输入 | 输出语义 |
+|---|---|---|
+| `ontology_query` | `{ "ontology_id": "uuid", "sparql": "..." 或 "natural_lang": "..." }` | 本体语义查询结果（转 Jena SPARQL） |
+| `inference_trace` | `{ "ontology_id": "uuid", "focus": "obj_x" }` | 推理链路 steps（同 §4 inference） |
+| `instance_get` | `{ "ontology_id": "uuid", "object_type": "obj_customer", "filters": {} }` | 实例读取（受本体约束，走 Neo4j） |
+
+> MCP 工具的输入/输出 schema 由本体自动生成，不在此 REST 文档约束范围内，但须与 `mcp_server` 模块实现一致。
+
+### 9.1 工具契约（P-02 借鉴补丁）
+每个自动生成工具附带读写/前置后置/副作用契约，供外部 Agent 静态判断是否会改动数据，降低误调风险（完整版见 `docs/mcp_tools_contract.yaml` 与 `mcp_server.TOOLS_CONTRACT`）：
+
+| 工具名 | reads | writes | side_effect | 关键 precondition |
+|---|---|---|---|---|
+| `ontology_query` | 本体TBox, 实例ABox | — | false | 本体已加载且非空 |
+| `inference_trace` | 推理结论, 推导路径 | — | false | 已执行过推理快照 |
+| `instance_get` | 实例ABox | — | false | 实例存在 |
+| `action_invoke`(VS8) | Action定义, 目标外部系统 | 外部系统, 本地执行日志 | **true** | Action 已定义 + 已人工确认 |
+
+---
+
+## 10. 与垂直切片（VS0–VS10）映射
+| 切片 | 涉及端点 |
+|---|---|
+| VS0 运行基座 | `/health`、系统模块、compose |
+| VS1 建模闭环 | §2 全部 |
+| VS2 推理校验 | `/api/ontologies/{id}/validate`、§4 inference |
+| VS3 归化 | §3 全部 |
+| VS4 可视化 | §4 graph/inference |
+| VS5 模板 | §11 /api/templates |
+| VS6 MCP Server | §9 + `/api/mcp/server/*` |
+| VS7 外部接入 | §5 连接配置 + `/read` |
+| VS8 Action | §6 全部 |
+| VS9 凭据 | §8 |
+| VS10 集成 | 全量串联 |
+
+---
+
+## 11. 模板管理（VS5）
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/templates` | 模板列表（支持 `industry`、`tag` 过滤，分页） |
+| GET | `/api/templates/{id}` | 读取模板 |
+| POST | `/api/templates` | 创建模板 |
+| PUT | `/api/templates/{id}` | 更新模板 |
+| DELETE | `/api/templates/{id}` | 删除模板 |
+| POST | `/api/templates/{id}/instantiate` | 基于模板创建本体（复用 §2 create 校验） |
+
+- 请求体/响应体与 §2 本体结构一致，模板字段：`name`、`description`、`industry`、`tags`、`model`（即 `OntologyCreate`）。
+- 内置模板（可覆盖更新）：`tpl_customer_basic`（基础客户-联系人-订单）、`tpl_product_catalog`（品类-SPU）。
+
+---
+
+## 12. 用户友好建模/逆向生成
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/ontologies/from-text` | 自然语言描述 → 生成本体草稿（201） |
+| POST | `/api/ontologies/from-excel` | 上传 CSV/Excel（对象/属性/关系表）→ 生成本体草稿（201） |
+| POST | `/api/ontologies/from-doc` | 上传 PRD/Word/Excel/PDF/文本 → 异步解析抽取本体（202 返回 job_id） |
+| GET | `/api/ontologies/jobs/{job_id}` | 查询异步解析任务状态 |
+| POST | `/api/ontologies/{id}/publish` | 将 `draft` 状态本体发布为 `active` |
+
+- 所有逆向生成结果默认先为 `status=draft`，可编辑后发布；发布时调用翻译器写入 Jena。
+- `from-doc` 解析异常时返回 `error` 状态；LLM 不可达时启用确定性 fallback 生成最小可用本体。
+
+---
+
+## 13. 状态与待补
+- VS0–VS8 端点已实现，新增 §12 用户友好建模/逆向生成。VS10 集成测试见 `backend/tests/`。
+- 待增强：Fuseki 远程推理开关、SHACL 在 Jena 侧执行、MCP stdio transport 完整 JSON-RPC、Action 熔断/重试策略细化。

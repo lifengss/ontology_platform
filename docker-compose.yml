@@ -1,0 +1,91 @@
+# 企业业务本体平台 — 本地 Docker Compose 一键起（VS0 运行基座）
+# 启动：docker compose up -d  访问：http://localhost:8080 （前端）/ http://localhost:8000/docs （API）
+version: "3.9"
+
+services:
+  # --- 标准层存储：Jena/Fuseki（OWL/SHACL/推理/SPARQL） ---
+  jena:
+    image: stain/jena-fuseki:4.10.0
+    container_name: ont-jena
+    environment:
+      FUSEKI_DATASETS: "ontology"
+    ports:
+      - "3030:3030"
+    volumes:
+      - jena_data:/fuseki
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:3030/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- ABox 实例/图谱：Neo4j Community ---
+  neo4j:
+    image: neo4j:5.20-community
+    container_name: ont-neo4j
+    environment:
+      NEO4J_AUTH: "neo4j/neo4jsecret"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+
+  # --- 向量索引：Postgres + pgvector（可选） ---
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ont-postgres
+    environment:
+      POSTGRES_USER: ont
+      POSTGRES_PASSWORD: ontsecret
+      POSTGRES_DB: ont
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  # --- 后端：FastAPI ---
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../deploy/Dockerfile.backend
+    container_name: ont-backend
+    environment:
+      JENA_BASE_URL: "http://jena:3030"
+      JENA_DATASET: "ontology"
+      NEO4J_URI: "bolt://neo4j:7687"
+      NEO4J_USER: "neo4j"
+      NEO4J_PASSWORD: "neo4jsecret"
+      POSTGRES_DSN: "postgresql://ont:ontsecret@postgres:5432/ont"
+      DATA_DIR: "/app/data"
+      SECRETS_DIR: "/app/secrets"
+      LOG_DIR: "/app/logs"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - jena
+      - neo4j
+      - postgres
+    volumes:
+      - backend_data:/app/data
+      - backend_logs:/app/logs
+      - backend_secrets:/app/secrets
+
+  # --- 前端：浏览器 UI（localhost） ---
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../deploy/Dockerfile.frontend
+    container_name: ont-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  jena_data:
+  neo4j_data:
+  pg_data:
+  backend_data:
+  backend_logs:
+  backend_secrets:
