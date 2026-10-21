@@ -5,8 +5,9 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from api.dependencies import project_id_param
 from api.router_ontologies import create_ontology
 from core.responses import ApiError, list_payload, parse_pagination, success
 from core.storage import JsonStore
@@ -104,15 +105,13 @@ def delete_template(template_id: str):
 
 
 @router.post("/{template_id}/instantiate", status_code=201)
-def instantiate_template(template_id: str):
+def instantiate_template(template_id: str, project_id: str = Depends(project_id_param)):
     rec = _store.get(template_id)
     if not rec:
         raise ApiError("NOT_FOUND", "模板不存在", http_status=404)
     model = rec.get("model", {})
-    # 使用 OntologyCreate 校验并复用已有创建逻辑
     create_payload = OntologyCreate(**model)
-    response = create_ontology(create_payload)
-    # create_ontology 返回 JSONResponse，直接透传
+    response = create_ontology(create_payload, project_id=project_id, namespace=None)
     body = json.loads(response.body.decode("utf-8"))
-    logger.info("instantiate_template template_id=%s -> ontology_id=%s", template_id, body.get("data", {}).get("id"))
+    logger.info("instantiate_template template_id=%s project_id=%s -> ontology_id=%s", template_id, project_id, body.get("data", {}).get("id"))
     return success(body.get("data"), http_status=201)

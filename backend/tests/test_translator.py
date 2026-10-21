@@ -9,6 +9,8 @@ def _sample_ontology():
         "objects": [
             {
                 "id": "obj_customer",
+            "stable_key": "attr_name",
+            "business_definition": "测试用的对象",
                 "name": "客户",
                 "attributes": [
                     {"id": "attr_name", "name": "名称", "data_type": "string",
@@ -19,7 +21,9 @@ def _sample_ontology():
                      "cardinality": "many_to_one", "inverse_name": "拥有客户"},
                 ],
             },
-            {"id": "obj_dept", "name": "部门", "attributes": [], "relations": []},
+            {"id": "obj_dept", "name": "部门",
+             "business_definition": "测试部门对象", "stable_key": "id",
+             "attributes": [], "relations": []},
         ],
         "constraints": [
             {"id": "cst_u", "name": "名称唯一", "scope": "obj_customer",
@@ -39,7 +43,6 @@ def test_translate_produces_owl_and_shacl():
     # 逆关系
     assert "owl:inverseOf" in ttl
 
-
 def test_validate_structure_detects_dangling_parent():
     bad = {"objects": [{"id": "o1", "name": "X", "parent": "nope", "attributes": [], "relations": []}]}
     violations = validate_structure(bad)
@@ -48,7 +51,9 @@ def test_validate_structure_detects_dangling_parent():
 
 def test_validate_structure_detects_dangling_relation_target():
     bad = {"objects": [
-        {"id": "o1", "name": "X", "attributes": [],
+        {"id": "o1",
+            "stable_key": "id",
+            "business_definition": "测试用的对象", "name": "X", "attributes": [],
          "relations": [{"id": "r1", "name": "R", "target_object": "ghost"}]},
     ]}
     violations = validate_structure(bad)

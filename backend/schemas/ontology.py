@@ -37,9 +37,20 @@ class OntologyObject(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
+    business_definition: Optional[str] = None  # 业务语义定义（一句话说明对象代表什么、边界在哪）
+    stable_key: Optional[str] = None            # 业务主键字段 id（禁止用内部自增 id）
+    namespace: Optional[str] = None            # 部门/域命名空间；MVP 默认继承 project
     parent: Optional[str] = None
     attributes: list[ObjectAttribute] = Field(default_factory=list)
     relations: list[ObjectRelation] = Field(default_factory=list)
+
+
+class OntologyObjectPatch(BaseModel):
+    """对象就地更新请求体：id 由路径参数决定，字段可选。"""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    attributes: Optional[list[ObjectAttribute]] = None
+    relations: Optional[list[ObjectRelation]] = None
 
 
 class OntologyConstraint(BaseModel):
@@ -50,6 +61,21 @@ class OntologyConstraint(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class OntologyFunction(BaseModel):
+    """无副作用计算逻辑（Function）元模型预留。
+
+    与 Action 的区别：function 只产生派生值，不触发外部写；side_effect 恒为 False。
+    MVP 仅建模存储，V2 接入 function_engine 执行。
+    """
+
+    function_id: Optional[str] = None
+    name: str
+    expression: str
+    inputs: list[str] = Field(default_factory=list)
+    output_type: str = "string"
+    side_effect: bool = False
+
+
 class Ontology(BaseModel):
     id: Optional[str] = None
     name: str
@@ -58,6 +84,7 @@ class Ontology(BaseModel):
     version: str = "1"
     objects: list[OntologyObject] = Field(default_factory=list)
     constraints: list[OntologyConstraint] = Field(default_factory=list)
+    functions: list[OntologyFunction] = Field(default_factory=list)  # 元模型预留（O-02）
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -71,12 +98,28 @@ class OntologyCreate(BaseModel):
     version: str = "1"
     objects: list[OntologyObject] = Field(default_factory=list)
     constraints: list[OntologyConstraint] = Field(default_factory=list)
+    functions: list[OntologyFunction] = Field(default_factory=list)
 
 
 class OntologyFromTextRequest(BaseModel):
     text: str
     llm_endpoint: Optional[str] = None
     model: Optional[str] = None
+
+
+class OntologyEnrichRequest(BaseModel):
+    """本体增强（增量抽取）参数。"""
+
+    instructions: Optional[str] = None
+    llm_endpoint: Optional[str] = None
+    model: Optional[str] = None
+
+
+class OntologyEnrichSummary(BaseModel):
+    added_objects: list[str] = Field(default_factory=list)
+    added_attributes: list[str] = Field(default_factory=list)
+    added_relations: list[str] = Field(default_factory=list)
+    updated_objects: list[str] = Field(default_factory=list)
 
 
 class OntologyFromDocResponse(BaseModel):

@@ -34,24 +34,35 @@
     .badge.active { color: #34d399; border-color: #065f46; background: #064e3b; }
   </style>
 </head>
-<body class="min-h-screen flex flex-col">
+<body class="h-screen overflow-hidden flex flex-col">
   <header class="panel mx-4 mt-4 px-5 py-3 flex items-center justify-between">
     <div class="flex items-center gap-3">
       <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-bold">O</div>
       <h1 class="text-base font-semibold">企业业务本体平台 <span class="text-xs text-slate-400 font-normal">MVP</span></h1>
     </div>
     <div class="flex items-center gap-3 text-xs">
+      <select id="projectSelect" onchange="setProject(this.value)"
+        class="bg-[#0f1627] border border-slate-700/60 rounded px-2 py-1 text-xs text-slate-300"></select>
+      <select id="namespaceSelect" onchange="setNamespace(this.value)"
+        class="bg-[#0f1627] border border-slate-700/60 rounded px-2 py-1 text-xs text-slate-300"></select>
+      <span id="currentProjectLabel" class="text-slate-300 font-medium" title="项目 / 部门空间"></span>
+      <span class="w-px h-4 bg-slate-700/60"></span>
       <span id="healthDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
-      <span id="healthText" class="text-slate-400">检查中…</span>
+      <span id="healthText" class="text-slate-400 cursor-pointer hover:text-slate-200" onclick="toggleHealthDetails()">检查中…</span>
       <span id="ver" class="text-slate-500"></span>
     </div>
   </header>
+  <div id="healthDetails" class="hidden mx-4 mt-2 px-5 py-3 panel text-xs text-slate-300"></div>
 
   <nav class="mx-4 mt-3 flex gap-1 border-b border-slate-700/50">
     <div class="tab active" data-tab="modeling" onclick="switchTab('modeling')">建模</div>
-    <div class="tab" data-tab="ingest" onclick="switchTab('ingest')">归化</div>
+    <div class="tab" data-tab="ingest" onclick="switchTab('ingest')">实例导入</div>
     <div class="tab" data-tab="graph" onclick="switchTab('graph')">图谱</div>
     <div class="tab" data-tab="inference" onclick="switchTab('inference')">推理</div>
+    <div class="tab" data-tab="action" onclick="switchTab('action')">业务动作</div>
+    <div class="tab" data-tab="mcp" onclick="switchTab('mcp')">MCP</div>
+    <div class="tab" data-tab="logs" onclick="switchTab('logs')">日志</div>
+    <div class="tab" data-tab="settings" onclick="switchTab('settings')">设置</div>
   </nav>
 
   <main class="flex-1 p-4 overflow-auto">
@@ -142,20 +153,57 @@
     </section>
 
     <!-- 归化页 -->
-    <section id="ingest" class="tab-content hidden grid grid-cols-12 gap-4">
-      <div class="col-span-12 lg:col-span-4 card p-4">
+    <section id="ingest" class="tab-content hidden grid grid-cols-12 gap-4 lg:h-full lg:grid-rows-[minmax(0,1fr)]">
+      <div class="col-span-12 lg:col-span-4 card p-4 lg:flex lg:flex-col lg:min-h-0">
         <h3 class="font-medium mb-3">选择本体</h3>
-        <select id="ingestOntology" class="w-full mb-3" onchange="renderIngestTarget()"></select>
-        <div id="ingestTarget" class="text-xs text-slate-400"></div>
+        <select id="ingestOntology" class="w-full mb-3" onchange="onIngestOntologyChange()"></select>
+        <div id="ingestTarget" class="text-xs text-slate-400 lg:flex-1 lg:min-h-0 lg:overflow-y-auto"></div>
       </div>
-      <div class="col-span-12 lg:col-span-8 flex flex-col gap-4">
+      <div class="col-span-12 lg:col-span-8 flex flex-col gap-4 lg:overflow-y-auto lg:min-h-0">
         <div class="card p-4">
-          <h3 class="font-medium mb-3">字段映射 Preview</h3>
-          <div class="grid grid-cols-2 gap-3 mb-3">
-            <div><label>目标对象类型</label><input id="ingestObjectType" class="w-full" /></div>
-            <div><label>字段映射 JSON</label><input id="ingestFieldMap" class="w-full" value='{"name":"attr_name"}' /></div>
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-medium">对象元数据</h3>
+            <div id="objectMetaActions"></div>
           </div>
-          <label>源记录 JSON 数组</label>
+          <div id="ingestObjectMeta" class="text-sm text-slate-400"></div>
+        </div>
+        <div class="card p-4">
+          <h3 class="font-medium mb-3">Excel / CSV 批量导入</h3>
+          <div class="grid grid-cols-2 gap-3 mb-3">
+            <div><label>目标对象类型 <span class="text-slate-500">(CSV 必填；xlsx 可留空使用 sheet 名)</span></label>
+              <select id="ingestObjectType" class="w-full">
+                <option value="">-- 选择对象类型 --</option>
+              </select>
+            </div>
+            <div><label>上传文件 <span class="text-slate-500">.xlsx / .csv</span></label>
+              <input id="ingestFile" type="file" accept=".xlsx,.csv" class="w-full text-xs" />
+            </div>
+          </div>
+          <div class="flex gap-2 mb-3">
+            <button class="btn" onclick="uploadIngestFile()">上传生成候选</button>
+            <button class="btn secondary" onclick="downloadIngestTemplate()">下载 Excel 模板</button>
+          </div>
+          <p class="text-xs text-slate-500">Excel 表头建议与对象属性 ID 保持一致，否则未匹配列会被忽略。导入后先在候选列表审核，再点「入库」。</p>
+        </div>
+        <div class="card p-4">
+          <h3 class="font-medium mb-3">数据来源 Preview</h3>
+          <div class="flex gap-4 mb-3 text-xs">
+            <label class="flex items-center gap-1">
+              <input type="radio" name="ingestSourceKind" value="field_map" checked onchange="onIngestSourceKindChange()" />
+              字段映射
+            </label>
+            <label class="flex items-center gap-1">
+              <input type="radio" name="ingestSourceKind" value="llm" onchange="onIngestSourceKindChange()" />
+              LLM 文本抽取
+            </label>
+          </div>
+          <div class="grid grid-cols-2 gap-3 mb-3">
+            <div><label>目标对象类型</label><input id="ingestObjectTypeManual" class="w-full" placeholder="object_type" /></div>
+            <div id="fieldMapWrap"><label>字段映射 JSON</label><input id="ingestFieldMap" class="w-full" value='{"name":"attr_name"}' /></div>
+            <div id="llmEndpointWrap" class="hidden"><label>LLM Endpoint</label><input id="ingestLlmEndpoint" class="w-full" placeholder="https://api.openai.com/v1" /></div>
+            <div id="llmModelWrap" class="hidden"><label>LLM 模型</label><input id="ingestLlmModel" class="w-full" placeholder="gpt-4o-mini" /></div>
+          </div>
+          <label id="ingestInputLabel">源记录 JSON 数组</label>
           <textarea id="ingestRecords" rows="5" class="w-full font-mono text-xs">[{"name":"腾讯"},{"name":"宝钢"}]</textarea>
           <button class="btn mt-3" onclick="previewIngest()">Preview</button>
           <pre id="ingestPreviewResult" class="mt-3 hidden"></pre>
@@ -163,9 +211,30 @@
         <div class="card p-4">
           <div class="flex justify-between items-center mb-3">
             <h3 class="font-medium">候选列表</h3>
-            <button class="btn secondary" onclick="loadCandidates()">刷新</button>
+            <div class="flex items-center gap-2">
+              <select id="candidateFilterStatus" class="text-xs py-1 px-2" onchange="loadCandidates()">
+                <option value="">全部状态</option>
+                <option value="pending">待审核</option>
+                <option value="imported">已入库</option>
+                <option value="rejected">已驳回</option>
+              </select>
+              <button class="btn secondary" onclick="loadCandidates()">刷新</button>
+            </div>
           </div>
           <div id="candidateList" class="space-y-2 max-h-[360px] overflow-auto"></div>
+        </div>
+
+        <div id="instanceDetailPanel" class="card p-4 hidden">
+          <div class="flex justify-between items-center mb-3">
+            <h3 class="font-medium">实例详情</h3>
+            <div class="flex gap-2">
+              <button class="btn success" onclick="saveInstanceEdit()">保存</button>
+              <button class="btn secondary" onclick="closeInstanceDetail()">关闭</button>
+              <button class="btn" style="background:#991b1b" onclick="deleteInstance()">删除</button>
+            </div>
+          </div>
+          <div class="text-xs text-slate-400 mb-2" id="instanceDetailMeta"></div>
+          <div id="instanceDetailBody" class="space-y-3"></div>
         </div>
       </div>
     </section>
@@ -178,6 +247,15 @@
           <button id="tabSchema" class="px-3 py-1 rounded-md bg-slate-700" onclick="setGraphTab('schema')">本体视图</button>
           <button id="tabKnowledge" class="px-3 py-1 rounded-md" onclick="setGraphTab('knowledge')">知识图谱</button>
         </div>
+      </div>
+      <div class="card p-4">
+        <h3 class="font-medium mb-2">自然语言查询</h3>
+        <div class="flex gap-2">
+          <input id="nlQueryInput" class="flex-1 text-sm" placeholder="例如：有多少个客户创建了订单？" />
+          <button class="btn" onclick="runNlQuery()">查询</button>
+        </div>
+        <pre id="nlQuerySparql" class="mt-3 hidden"></pre>
+        <div id="nlQueryResult" class="mt-2 text-xs"></div>
       </div>
       <div class="card flex-1 relative min-h-[500px]" id="graphContainer">
         <div class="graph-tooltip" id="graphTooltip"></div>
@@ -196,8 +274,225 @@
         <div id="inferenceSteps" class="space-y-2 max-h-[600px] overflow-auto"></div>
       </div>
     </section>
+
+    <!-- MCP 页 -->
+    <section id="mcp" class="tab-content hidden grid grid-cols-12 gap-4">
+      <div class="col-span-12 lg:col-span-4 card p-4">
+        <h3 class="font-medium mb-3">MCP Server 管理</h3>
+        <div class="mb-3">
+          <label>发布到 MCP 的本体</label>
+          <select id="mcpOntology" class="w-full mb-2"></select>
+          <div class="text-xs text-slate-500">发布后，外部 Agent 可通过 SSE 端点调用工具。</div>
+        </div>
+        <div class="flex gap-2 mb-3">
+          <button class="btn" onclick="publishMcpServer()">发布 / 更新</button>
+          <button class="btn secondary" onclick="unpublishMcpServer()">取消发布</button>
+        </div>
+        <div id="mcpStatusBox" class="text-sm"></div>
+      </div>
+      <div class="col-span-12 lg:col-span-8 flex flex-col gap-4">
+        <div class="card p-4">
+          <h3 class="font-medium mb-3">工具清单</h3>
+          <div id="mcpToolsList" class="space-y-2 max-h-[360px] overflow-auto"></div>
+        </div>
+        <div class="card p-4">
+          <h3 class="font-medium mb-3">调用示例</h3>
+          <pre id="mcpExample" class="text-xs"></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Action 页 -->
+    <section id="action" class="tab-content hidden grid grid-cols-12 gap-4">
+      <div class="col-span-12 lg:col-span-4 flex flex-col gap-4">
+        <div class="card p-4">
+          <div class="flex justify-between items-center mb-3">
+            <h3 class="font-medium">业务动作</h3>
+            <div class="flex gap-2">
+              <button class="btn" onclick="startCreateAction()">+ 新建</button>
+              <button class="btn secondary" onclick="showActionTemplates()">模板</button>
+            </div>
+          </div>
+          <div class="mb-3">
+            <select id="actionCategoryFilter" class="w-full text-xs" onchange="renderActionList()">
+              <option value="">全部分类</option>
+            </select>
+          </div>
+          <div id="actionList" class="space-y-2 max-h-[520px] overflow-auto pr-1"></div>
+        </div>
+      </div>
+      <div class="col-span-12 lg:col-span-8 flex flex-col gap-4">
+        <div id="actionEditor" class="card p-4 hidden">
+          <div class="flex justify-between items-center mb-3">
+            <h3 class="font-medium" id="actionEditorTitle">新建业务动作</h3>
+            <div class="flex gap-2">
+              <button class="btn success" onclick="saveAction()">保存</button>
+              <button class="btn secondary" onclick="closeActionEditor()">取消</button>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3 mb-3">
+            <div><label>动作名称 <span class="text-slate-500">*</span></label><input id="actionName" class="w-full" placeholder="例如：同步采购订单到 ERP" /></div>
+            <div><label>业务分类</label>
+              <select id="actionCategory" class="w-full">
+                <option value="">未分类</option>
+                <option value="数据同步">数据同步</option>
+                <option value="审批触发">审批触发</option>
+                <option value="通知推送">通知推送</option>
+                <option value="客户管理">客户管理</option>
+                <option value="库存更新">库存更新</option>
+              </select>
+            </div>
+            <div class="col-span-2"><label>一句话说明</label><input id="actionDescription" class="w-full" placeholder="业务人员能看懂这个 Action 是做什么的" /></div>
+            <div><label>目标连接</label><input id="actionTarget" class="w-full" placeholder="crm_saas / erp_system" /></div>
+            <div><label>调用方式</label>
+              <select id="actionInvokeKind" class="w-full" onchange="onActionKindChange()">
+                <option value="mcp_tool">MCP Tool</option>
+                <option value="webhook">Webhook</option>
+                <option value="rest">REST</option>
+              </select>
+            </div>
+            <div id="actionToolWrap"><label>Tool 名称</label><input id="actionTool" class="w-full" placeholder="upsert_customer" /></div>
+            <div id="actionUrlWrap" class="hidden"><label>URL</label><input id="actionUrl" class="w-full" placeholder="https://api.example.com/customers" /></div>
+            <div id="actionMethodWrap" class="hidden"><label>Method</label>
+              <select id="actionMethod" class="w-full">
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+              </select>
+            </div>
+          </div>
+          <div class="mb-3">
+            <div class="flex justify-between items-center mb-2">
+              <label class="m-0">输入字段映射 <span class="text-slate-500">(key = 外部字段名, value = $.对象.属性)</span></label>
+              <button class="text-xs text-blue-400" onclick="addActionInputMapRow()">+ 添加字段</button>
+            </div>
+            <div id="actionInputMapList" class="space-y-2"></div>
+          </div>
+          <div class="grid grid-cols-2 gap-3 mb-3">
+            <div><label>幂等键</label><input id="actionIdempotency" class="w-full" placeholder="customer::{email}" /></div>
+            <div><label>确认策略</label>
+              <select id="actionConfirmation" class="w-full">
+                <option value="human_required">人工确认</option>
+                <option value="auto">自动执行</option>
+              </select>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 mb-2"><input id="actionDryRun" type="checkbox" checked /> <label class="m-0 inline">支持 dry-run</label></div>
+          <p class="text-xs text-slate-400">Action 默认 <code>side_effect=true</code>，会触发外部系统写操作；执行前建议先用 Dry Run 预览。</p>
+        </div>
+
+        <div id="actionRunner" class="card p-4 hidden">
+          <div id="actionRunnerHeader" class="mb-3 pb-3 border-b border-slate-700/50"></div>
+          <div class="flex justify-between items-center mb-3">
+            <h3 class="font-medium">输入参数</h3>
+            <div class="flex gap-2">
+              <button class="btn secondary" onclick="runActionDry()">Dry Run 预览</button>
+              <button class="btn" onclick="runActionExecute()">触发执行</button>
+            </div>
+          </div>
+          <div id="actionForm" class="mb-3 space-y-4"></div>
+          <div id="actionPendingBox" class="hidden mb-3 p-3 rounded-lg border border-amber-600/40 bg-amber-900/20">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-sm ok">已生成执行计划，请确认后回写</span>
+              <span class="text-xs text-slate-400" id="actionToken"></span>
+            </div>
+            <pre id="actionPlanned" class="mb-2"></pre>
+            <button class="btn success" onclick="runActionConfirm()">确认并回写</button>
+          </div>
+          <div id="actionResultBox" class="hidden">
+            <label>执行结果</label>
+            <div id="actionResult" class="text-sm"></div>
+          </div>
+          <div id="actionLogsBox" class="hidden mt-3">
+            <div class="flex items-center justify-between mb-2"><label class="m-0">执行日志</label><button class="text-xs text-slate-400" onclick="loadActionLogs()">刷新</button></div>
+            <div id="actionLogs" class="space-y-2 max-h-[240px] overflow-auto"></div>
+          </div>
+        </div>
+
+        <div id="actionEmpty" class="card p-8">
+          <div class="text-center mb-6">
+            <div class="text-lg font-medium mb-2">业务动作中心</div>
+            <div class="text-sm text-slate-400">把本体数据安全地同步到外部系统，每一步都可预览、可确认、可审计。</div>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4" id="actionTemplateCards"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 日志页 -->
+    <section id="logs" class="tab-content hidden flex flex-col gap-4">
+      <div class="card p-4">
+        <div class="flex items-center justify-between mb-3">
+          <h3 id="logPanelTitle" class="font-medium">后端日志</h3>
+          <div class="flex items-center gap-2">
+            <select id="logLevel" class="text-xs py-1 px-2" onchange="renderLogs()">
+              <option value="ALL">全部级别</option>
+              <option value="INFO">INFO</option>
+              <option value="WARNING">WARNING</option>
+              <option value="ERROR">ERROR</option>
+              <option value="DEBUG">DEBUG</option>
+            </select>
+            <input id="logFilter" class="text-xs py-1 px-2" placeholder="按内容/来源/级别过滤" oninput="renderLogs()" />
+            <span id="logCount" class="text-xs text-slate-400"></span>
+            <button class="btn secondary" onclick="loadServerLogs()">后端日志</button>
+            <button class="btn secondary" onclick="loadClientLogs()">本地日志</button>
+            <button class="btn secondary" onclick="clearClientLogs()">清空本地</button>
+          </div>
+        </div>
+        <div id="logList" class="space-y-1 max-h-[480px] overflow-auto text-xs"></div>
+      </div>
+    </section>
+
+    <!-- 设置页 -->
+    <section id="settings" class="tab-content hidden grid grid-cols-12 gap-4">
+      <div class="col-span-12 lg:col-span-4 card p-4">
+        <h3 class="font-medium mb-3">设置</h3>
+        <div class="flex flex-col gap-2 text-sm">
+          <button class="subtab active" id="settingTabLLM" onclick="switchSettingTab('llm')">LLM</button>
+          <button class="subtab" id="settingTabPROJECT" onclick="switchSettingTab('project')">项目</button>
+        </div>
+      </div>
+      <div class="col-span-12 lg:col-span-8 flex flex-col gap-4">
+        <div id="settingsLlm" class="card p-4">
+          <h3 class="font-medium mb-3">LLM Endpoint 设置</h3>
+          <div class="grid grid-cols-2 gap-3 mb-3">
+            <div><label>Provider</label>
+              <select id="llmProvider" class="w-full">
+                <option value="openai_compatible">OpenAI 兼容</option>
+                <option value="openai">OpenAI</option>
+                <option value="azure">Azure OpenAI</option>
+              </select>
+            </div>
+            <div><label>Model</label><input id="llmModel" class="w-full" placeholder="例如 deepseek-v4-flash" /></div>
+            <div class="col-span-2"><label>Base URL</label><input id="llmBaseUrl" class="w-full" placeholder="https://api.example.com/v1" /></div>
+            <div class="col-span-2"><label>API Key <span id="llmKeyStatus" class="badge draft">未配置</span></label>
+              <div class="flex gap-2">
+                <input id="llmApiKey" type="password" class="w-full" placeholder="留空表示不修改" />
+                <button class="btn secondary" onclick="toggleApiKeyVisibility()" id="apiKeyEye">👁</button>
+              </div>
+            </div>
+            <div><label>Temperature</label><input id="llmTemperature" type="number" step="0.1" min="0" max="2" class="w-full" value="0.2" /></div>
+            <div><label>Timeout (s)</label><input id="llmTimeout" type="number" min="1" max="600" class="w-full" value="120" /></div>
+            <div><label>Max Tokens</label><input id="llmMaxTokens" type="number" min="1" max="65536" class="w-full" value="4096" /></div>
+          </div>
+          <div class="flex gap-2 mb-3">
+            <button class="btn" onclick="saveLLMSettings()">保存设置</button>
+            <button class="btn secondary" onclick="testLLMConnection()">测试连通</button>
+          </div>
+          <pre id="llmTestResult" class="hidden text-xs"></pre>
+          <hr class="border-slate-700/50 my-3" />
+          <h4 class="text-sm font-medium mb-2">Prompt 模板</h4>
+          <div class="grid grid-cols-2 gap-3">
+            <div><label>本体生成</label><textarea id="promptOntologyGeneration" rows="2" class="w-full text-xs"></textarea></div>
+            <div><label>实例抽取</label><textarea id="promptInstanceExtraction" rows="2" class="w-full text-xs"></textarea></div>
+            <div><label>文档逆向</label><textarea id="promptReverseEngineering" rows="2" class="w-full text-xs"></textarea></div>
+            <div><label>知识图谱</label><textarea id="promptKgConstruction" rows="2" class="w-full text-xs"></textarea></div>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=20261021c"></script>
 </body>
 </html>

@@ -16,6 +16,8 @@ build/
 backend/data/
 backend/logs/
 backend/secrets/
+backend/.env
+backend/.env.local
 *.log
 *.db
 *.db-journal
@@ -36,6 +38,24 @@ Thumbs.db
 
 # Docker volumes
 .docker/
+
+# 本地自包含依赖（Jena/Neo4j/Postgres/JDK，约 2.3GB，见 scripts/start_mvp_local.ps1）
+deps/
+
+# 临时调试产物
+*.err
+backend/startup.err
+backend/ingestion/test_recovery.txt
+scripts/cmdtest.txt
+scripts/inspect.txt
+scripts/html_ingest_lines.txt
+scripts/js_ingest_lines.txt
+
+# 根目录临时脚本（一次性排障用）
+/_*.py
+/_*.ps1
+/_*.json
+/_*.txt
 
 # Coverage
 .coverage

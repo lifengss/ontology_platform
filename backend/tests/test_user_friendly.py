@@ -56,6 +56,12 @@ def test_publish_draft():
 
 
 def test_publish_only_draft():
-    active = c.post("/api/ontologies", json={"name": "直接创建", "objects": [], "constraints": []}).json()["data"]
-    r = c.post(f"/api/ontologies/{active['id']}/publish")
-    assert r.status_code == 422
+    draft = c.post("/api/ontologies", json={"name": "直接创建", "objects": [], "constraints": []}).json()["data"]
+    assert draft["status"] == "draft"
+    # 第一次发布成功
+    r1 = c.post(f"/api/ontologies/{draft['id']}/publish")
+    assert r1.status_code == 200
+    assert r1.json()["data"]["status"] == "active"
+    # 重复发布 active 状态应拒绝
+    r2 = c.post(f"/api/ontologies/{draft['id']}/publish")
+    assert r2.status_code == 422

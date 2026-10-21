@@ -18,8 +18,11 @@ from logging_setup import get_logger
 
 logger = get_logger("action_engine")
 
-_log_store = JsonStore("action_logs")
 _pending_tokens: dict[str, dict[str, Any]] = {}
+
+
+def _log_store_for(project_id: str | None = None) -> JsonStore:
+    return JsonStore("action_logs", project_id=project_id)
 
 
 def render_input_map(input_map: dict[str, str], data: dict[str, Any]) -> dict[str, Any]:
@@ -75,7 +78,7 @@ def _http_call(url: str, method: str, payload: dict[str, Any], timeout: int) -> 
 
 
 class ActionEngine:
-    def execute(self, action: dict, request: dict) -> dict:
+    def execute(self, action: dict, request: dict, project_id: str | None = None) -> dict:
         """触发执行：渲染 payload，返回 confirmation_token（未确认不真正回写）。
         dry_run=true 时直接返回 planned_payload 且 confirmation_token=None。
         """
@@ -92,6 +95,7 @@ class ActionEngine:
             "input": data,
             "planned_payload": planned,
             "idempotency_key": idem,
+            "project_id": project_id,
             "created_at": _now(),
         }
         logger.info("execute action_id=%s token=%s (待确认)", action.get("action_id"), token)
@@ -108,10 +112,11 @@ class ActionEngine:
         planned = pending["planned_payload"]
         idem = pending["idempotency_key"]
         action_id = action.get("action_id", "unknown")
+        project_id = pending.get("project_id") or executed_log.get("project_id")
 
         # 幂等键防重
-        if idem and _already_executed(idem):
-            prev = _find_log_by_idem(idem)
+        if idem and _already_executed(idem, project_id):
+            prev = _find_log_by_idem(idem, project_id)
             logger.info("confirm action_id=%s token=%s idempotency_hit=%s", action_id, token, idem)
             return {"executed": True, "idempotency_hit": True, "external_response": prev.get("external_response", {}), "log_id": prev.get("log_id")}
 
@@ -135,7 +140,7 @@ class ActionEngine:
             "external_response": external_response,
             "executed_at": _now(),
         }
-        _log_store.insert(log_record)
+        _log_store_for(project_id).insert(log_record)
         logger.info("confirm action_id=%s token=%s log_id=%s kind=%s", action_id, token, log_id, kind)
         return {"executed": True, "idempotency_hit": False, "external_response": external_response, "log_id": log_id}
 
@@ -159,12 +164,16 @@ class ActionEngine:
             return {"status": 0, "error": str(e)}
 
 
-def _already_executed(idempotency_key: str) -> bool:
-    return _find_log_by_idem(idempotency_key) is not None
+def list_logs(action_id: str, project_id: str | None = None) -> list[dict[str, Any]]:
+    return _log_store_for(project_id).find(lambda r: r.get("action_id") == action_id)
 
 
-def _find_log_by_idem(idempotency_key: str) -> dict[str, Any] | None:
-    for log in _log_store.all():
+def _already_executed(idempotency_key: str, project_id: str | None = None) -> bool:
+    return _find_log_by_idem(idempotency_key, project_id) is not None
+
+
+def _find_log_by_idem(idempotency_key: str, project_id: str | None = None) -> dict[str, Any] | None:
+    for log in _log_store_for(project_id).all():
         if log.get("idempotency_key") == idempotency_key:
             return log
     return None

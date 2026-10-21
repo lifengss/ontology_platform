@@ -12,6 +12,8 @@ def _make_ontology():
         "objects": [
             {
                 "id": "obj_customer",
+            "stable_key": "attr_name",
+            "business_definition": "测试用的对象",
                 "name": "客户",
                 "attributes": [
                     {"id": "attr_name", "name": "名称", "data_type": "string", "required": True, "constraints": {}},

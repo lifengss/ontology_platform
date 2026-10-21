@@ -9,6 +9,7 @@ VS3 设计：
 from __future__ import annotations
 
 import json
+import math
 import re
 import urllib.error
 import urllib.request
@@ -28,8 +29,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _source_meta(source_type: str, source_ref: str) -> dict[str, Any]:
-    return {"connection_id": source_ref, "read_at": _now()}
+def _source_meta(source_type: str, source_ref: str, raw_ref: str = "") -> dict[str, Any]:
+    """构建结构化 instance_source（O-07）。
+
+    kind: internal | doc | external_mcp | field_map | llm
+    connection_id: 外部连接/端点/文档名标识
+    fetched_at: ISO 时间戳
+    raw_ref: 源记录主键或文档段落引用
+    """
+    return {
+        "kind": source_type,
+        "connection_id": source_ref,
+        "fetched_at": _now(),
+        "raw_ref": raw_ref,
+    }
 
 
 def preview(payload, ontology: dict[str, Any]) -> dict[str, Any]:
@@ -93,26 +106,10 @@ def _extract_json(text: str) -> Any:
 
 
 def _call_llm(endpoint: str, model: str | None, prompt: str) -> dict[str, Any]:
-    """调用 OpenAI 兼容 /chat/completions 端点，返回 assistant content 字符串。"""
-    url = endpoint.rstrip("/") + "/chat/completions"
-    body = {
-        "model": model or "default",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.0,
-    }
-    data = json.dumps(body).encode("utf-8")
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as e:
-        logger.warning("LLM 端点不可达: %s", e)
-        raise ApiError("LLM_UNAVAILABLE", f"LLM 端点不可达: {e}", http_status=503)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("LLM 调用失败: %s", e)
-        raise ApiError("LLM_UNAVAILABLE", f"LLM 调用失败: {e}", http_status=503)
+    """调用 OpenAI 兼容 /chat/completions 端点，返回完整响应对象。"""
+    from ai_helper.client import call_llm
 
+    result = call_llm(prompt, base_url=endpoint, model=model, temperature=0.0, timeout=30)
     choices = result.get("choices", [])
     if not choices:
         raise ApiError("LLM_UNAVAILABLE", "LLM 返回空 choices", http_status=503)
@@ -151,7 +148,8 @@ def _preview_llm(payload, ontology: dict[str, Any]) -> dict[str, Any]:
     # 给每个实例补 object_type 和溯源
     for inst in instances:
         inst["object_type"] = object_type
-        inst.setdefault("_source", _source_meta("llm", endpoint))
+        raw_ref = str(inst.get("_raw_ref", text[:200]))
+        inst.setdefault("_source", _source_meta("llm", endpoint, raw_ref=raw_ref))
 
     return {
         "ontology_id": payload.ontology_id,
@@ -162,24 +160,80 @@ def _preview_llm(payload, ontology: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _clean_value(v: Any) -> Any:
+    if v is None:
+        return None
+    if isinstance(v, float) and math.isnan(v):
+        return None
+    return v
+
+
 def apply_field_map(
     records: list[dict[str, Any]],
     field_map: dict[str, str],
     object_type: str,
     source_ref: str,
     valid_attrs: set[str] | None = None,
+    raw_ref_field: str | None = None,
 ) -> list[dict[str, Any]]:
     """通用字段映射：records × field_map → 候选实例列表。"""
     instances: list[dict[str, Any]] = []
     for rec in records:
-        inst: dict[str, Any] = {"object_type": object_type, "_source": _source_meta("field_map", source_ref)}
+        raw_ref = str(rec.get(raw_ref_field, "")) if raw_ref_field else ""
+        inst: dict[str, Any] = {
+            "object_type": object_type,
+            "_source": _source_meta("field_map", source_ref, raw_ref=raw_ref),
+        }
         for src_field, target_attr in field_map.items():
             if valid_attrs and target_attr not in valid_attrs:
                 continue
             if src_field in rec:
-                inst[target_attr] = rec[src_field]
+                val = _clean_value(rec[src_field])
+                if val is not None:
+                    inst[target_attr] = val
         instances.append(inst)
     return instances
+
+
+def _coerce_value(value: Any, data_type: str) -> Any:
+    if value is None or value == "":
+        return None
+    try:
+        if data_type == "integer":
+            return int(value)
+        if data_type == "float":
+            return float(value)
+        if data_type == "boolean":
+            if isinstance(value, bool):
+                return value
+            if str(value).lower() in ("true", "1", "yes", "是"):
+                return True
+            if str(value).lower() in ("false", "0", "no", "否"):
+                return False
+            raise ValueError
+        if data_type == "date":
+            return str(value)
+        return str(value)
+    except (ValueError, TypeError) as exc:
+        raise ApiError("VALIDATION_ERROR", f"值 '{value}' 无法转换为类型 {data_type}", http_status=422) from exc
+
+
+def _validate_record_against_object(record: dict[str, Any], field_map: dict[str, str], obj: dict[str, Any]) -> list[str]:
+    """校验源记录是否满足对象属性约束（必填 + 类型），返回 violations 列表；preview 阶段不强制阻断。"""
+    errors: list[str] = []
+    for attr in obj.get("attributes", []):
+        attr_id = attr["id"]
+        src_field = next((s for s, t in field_map.items() if t == attr_id), None)
+        value = record.get(src_field) if src_field else None
+        if attr.get("required") and (value is None or value == ""):
+            errors.append(f"属性 {attr.get('name') or attr_id} 必填，但源记录缺少映射字段")
+            continue
+        if value is not None and value != "":
+            try:
+                _coerce_value(value, attr.get("data_type", "string"))
+            except ApiError as e:
+                errors.append(f"属性 {attr.get('name') or attr_id} 类型错误: {e.message}")
+    return errors
 
 
 def _preview_field_map(payload, ontology: dict[str, Any]) -> dict[str, Any]:
@@ -200,6 +254,12 @@ def _preview_field_map(payload, ontology: dict[str, Any]) -> dict[str, Any]:
         if target not in valid_attrs:
             raise ApiError("VALIDATION_ERROR", f"field_map 目标字段 {target} 不在对象 {object_type} 的属性列表中", http_status=422)
 
+    preview_violations: list[str] = []
+    for i, rec in enumerate(records):
+        record_errors = _validate_record_against_object(rec, field_map, obj)
+        for err in record_errors:
+            preview_violations.append(f"记录 #{i}: {err}")
+
     instances = apply_field_map(records, field_map, object_type, mapping.get("source_ref", ""), valid_attrs)
 
     return {
@@ -208,10 +268,11 @@ def _preview_field_map(payload, ontology: dict[str, Any]) -> dict[str, Any]:
         "source_ref": mapping.get("source_ref", ""),
         "object_type": object_type,
         "instances": instances,
+        "violations": preview_violations,
     }
 
 
-def approve(candidate: dict[str, Any], ontology: dict[str, Any]) -> dict[str, Any]:
+def approve(candidate: dict[str, Any], ontology: dict[str, Any], project_id: str | None = None) -> dict[str, Any]:
     """审核通过：SHACL 校验 → 落库。返回 ApproveResult 结构。"""
     if candidate.get("status") == "imported":
         return candidate.get("approve_result", {"imported": 0, "rejected": 0, "violations": [], "neo_tx_id": None})
@@ -244,14 +305,26 @@ def approve(candidate: dict[str, Any], ontology: dict[str, Any]) -> dict[str, An
     from neo4j_sync import Neo4jSync
 
     sync = Neo4jSync()
+    instance_source = instances[0].get("_source") if instances else None
+    if not instance_source:
+        instance_source = _source_meta(candidate.get("source_type", "internal"), candidate.get("source_ref", ""))
+
     tx_id = sync.write_instances(
         object_type, instances,
-        source=candidate.get("source_type", "internal"),
+        source=instance_source,
         ontology_id=candidate.get("ontology_id"),
+        project_id=project_id or candidate.get("project_id"),
+    )
+    # O-13: 关系物化建边
+    relation_tx_id = sync.write_relations(
+        object_type, instances, ontology,
+        ontology_id=candidate.get("ontology_id"),
+        project_id=project_id or candidate.get("project_id"),
     )
     return {
         "imported": len(instances),
         "rejected": 0,
         "violations": [],
         "neo_tx_id": tx_id,
+        "relation_tx_id": relation_tx_id,
     }

@@ -70,6 +70,7 @@ def success(data: Any = None, http_status: int = status.HTTP_200_OK) -> JSONResp
     return JSONResponse(
         status_code=http_status,
         content=Envelope(success=True, data=data, error=None).model_dump(),
+        headers={"Content-Type": "application/json; charset=utf-8"},
     )
 
 
@@ -79,7 +80,11 @@ def fail(err: ApiError) -> JSONResponse:
         data=None,
         error=ErrorDetail(code=err.code, message=err.message, details=err.details),
     )
-    return JSONResponse(status_code=err.http_status, content=envelope.model_dump())
+    return JSONResponse(
+        status_code=err.http_status,
+        content=envelope.model_dump(),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -11,12 +11,16 @@ def _make_ontology_with_relations():
         "objects": [
             {
                 "id": "obj_dept",
+            "stable_key": "attr_dname",
+            "business_definition": "测试用的对象",
                 "name": "部门",
                 "attributes": [{"id": "attr_dname", "name": "部门名", "data_type": "string", "required": True, "constraints": {}}],
                 "relations": [],
             },
             {
                 "id": "obj_customer",
+            "stable_key": "attr_name",
+            "business_definition": "测试用的对象",
                 "name": "客户",
                 "attributes": [
                     {"id": "attr_name", "name": "名称", "data_type": "string", "required": True, "constraints": {}},
@@ -88,9 +92,15 @@ def test_inference_trace_endpoint():
     onto = {
         "name": "继承推理",
         "objects": [
-            {"id": "A", "name": "A", "parent": "B", "attributes": [], "relations": []},
-            {"id": "B", "name": "B", "parent": "C", "attributes": [], "relations": []},
-            {"id": "C", "name": "C", "attributes": [], "relations": []},
+            {"id": "A", "name": "A", "parent": "B",
+             "business_definition": "测试对象 A", "stable_key": "attr_id",
+             "attributes": [{"id": "attr_id", "name": "ID", "data_type": "string", "required": True}], "relations": []},
+            {"id": "B", "name": "B", "parent": "C",
+             "business_definition": "测试对象 B", "stable_key": "attr_id",
+             "attributes": [{"id": "attr_id", "name": "ID", "data_type": "string", "required": True}], "relations": []},
+            {"id": "C", "name": "C",
+             "business_definition": "测试对象 C", "stable_key": "attr_id",
+             "attributes": [{"id": "attr_id", "name": "ID", "data_type": "string", "required": True}], "relations": []},
         ],
         "constraints": [],
     }

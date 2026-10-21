@@ -3,35 +3,136 @@ from __future__ import annotations
 
 import json
 import re
-import urllib.error
-import urllib.request
 from typing import Any
 
-from config import get_settings
-from core.responses import ApiError
+from .client import call_llm, test_connection
+from .config import LLMConfig, get_llm_config, reload_llm_config
+from .prompts import render_ontology_generation
 from logging_setup import get_logger
+from modeling_translator import attr_uri, class_uri
 
 logger = get_logger("ai_helper")
 
 
-def call_llm(prompt: str, endpoint: str | None = None, model: str | None = None) -> str:
-    """调用 OpenAI 兼容 /chat/completions 端点，返回 assistant content 字符串。"""
-    url = (endpoint or get_settings().llm_endpoint or "http://localhost:11434/v1").rstrip("/") + "/chat/completions"
-    body = {
-        "model": model or get_settings().llm_model or "default",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
+def _deterministic_nl_to_sparql(natural_language: str, ontology: dict[str, Any]) -> str:
+    """LLM 不可达或返回非法时，按关键词生成一个合法的兜底 SPARQL。"""
+    objects = ontology.get("objects", [])
+    if not objects:
+        return "SELECT ?s WHERE { ?s a <http://ontology.local/Thing> } LIMIT 10"
+
+    q = natural_language.lower()
+    # 常见业务关键词到对象 ID 的偏好映射
+    keyword_object_prefs: dict[str, str] = {
+        "阶段": "Stage",
+        "stage": "Stage",
+        "供应商": "Supplier",
+        "supply": "Supplier",
+        "订单": "PurchaseOrder",
+        "order": "PurchaseOrder",
+        "计划": "PurchasePlan",
+        "plan": "PurchasePlan",
+        "物料": "Material",
+        "material": "Material",
+        "库存": "Inventory",
+        "inventory": "Inventory",
+        "异常": "Exception",
+        "exception": "Exception",
+        "审批": "ApprovalRecord",
     }
-    data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", "Accept": "application/json"}, method="POST")  # noqa: S310
+    for kw, obj_id in keyword_object_prefs.items():
+        if kw in q and any(o["id"] == obj_id for o in objects):
+            target = next(o for o in objects if o["id"] == obj_id)
+            break
+    else:
+        # 按对象名/ID 与问题中的关键词匹配度排序
+        def _score(o: dict[str, Any]) -> int:
+            score = 0
+            for n in (o.get("name", ""), o["id"]):
+                if not n:
+                    continue
+                n_lower = n.lower()
+                # 对象名/ID 是否包含问题中的连续子串（如"订单"在"采购订单(PO)"中）
+                # 简单按 2-4 字窗口匹配
+                for length in range(min(4, len(q)), 1, -1):
+                    for i in range(len(q) - length + 1):
+                        if q[i:i + length] in n_lower:
+                            score += length
+            return score
+
+        scored = sorted(objects, key=_score, reverse=True)
+        target = scored[0] if _score(scored[0]) > 0 else objects[0]
+
+    obj_uri = f"<{class_uri(target['id'])}>"
+    attrs = target.get("attributes", [])
+    var_list = "?s"
+    triples = f"?s a {obj_uri} ."
+    for i, a in enumerate(attrs[:3]):
+        var = f"?v{i}"
+        var_list += " " + var
+        triples += f" ?s <{attr_uri(a['id'])}> {var} ."
+    return f"SELECT {var_list} WHERE {{ {triples} }} LIMIT 50"
+
+
+def nl_to_sparql(natural_language: str, ontology: dict[str, Any]) -> str:
+    """自然语言 → SPARQL（O-05）。LLM 不可达时使用确定性 fallback。"""
+    from .client import call_llm
+
+    lines = ["本体的业务对象与属性："]
+    # 限制 prompt 长度，避免低端 LLM 过载不输出 content
+    max_objects = 20
+    for o in ontology.get("objects", [])[:max_objects]:
+        attrs = ", ".join(f"{a['id']}({a.get('name','')})" for a in o.get("attributes", []))
+        lines.append(f"- {o['id']} ({o.get('name', '')}): {attrs}")
+        rels = ", ".join(
+            f"{r['id']}->{r.get('target_object')}"
+            for r in o.get("relations", [])
+            if r.get("target_object")
+        )
+        if rels:
+            lines.append(f"  关系: {rels}")
+    schema_text = "\n".join(lines)
+
+    prompt = (
+        f"你是一名知识图谱专家。请根据下面的本体，把用户问题转成 SPARQL SELECT 查询。\n\n"
+        f"{schema_text}\n\n"
+        f"前缀约定：PREFIX ont: <http://ontology.local/>。\n"
+        f"对象类型 URI：<http://ontology.local/{{object_type}}>。\n"
+        f"属性 URI：<http://ontology.local/{{attribute_id}}>（与本体属性 ID 一致，不含对象前缀）。\n"
+        f"关系 URI：<http://ontology.local/{{relation_id}}>。\n"
+        f"实例为主体 http://ontology.local/inst_{{实例ID}}，其 a 为对象类型 URI。\n\n"
+        f"用户问题：{natural_language}\n\n"
+        f"必须只输出 SPARQL 查询文本，不要解释，不要 markdown 代码块。"
+    )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310
-            result = json.loads(resp.read().decode("utf-8"))
-            return result["choices"][0]["message"]["content"]
-    except urllib.error.HTTPError as e:
-        raise ApiError("LLM_ERROR", f"LLM HTTP {e.code}: {e.read().decode('utf-8', errors='replace')}", http_status=502)  # noqa: TRY401
-    except Exception as e:
-        raise ApiError("LLM_ERROR", f"LLM 调用失败: {e}", http_status=502)  # noqa: TRY401
+        # NL 查询转 SPARQL 对实时性要求高，超时限制在 8 秒；LLM 不可达或异常时走确定性 fallback
+        result = call_llm(prompt, temperature=0.1, max_tokens=1024, timeout=8)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("LLM 不可达，nl_to_sparql 使用确定性 fallback: %s", e)
+        return _deterministic_nl_to_sparql(natural_language, ontology)
+
+    message = result.get("choices", [{}])[0].get("message") or {}
+    content = message.get("content")
+    # 某些 LLM 把思考过程放在 reasoning，不输出 content；此类输出不可信，直接 fallback
+    if not content:
+        logger.warning("LLM content 为空（可能仅有 reasoning），使用 deterministic fallback")
+        return _deterministic_nl_to_sparql(natural_language, ontology)
+    content = str(content).strip()
+
+    # 从 markdown 代码块中提取 SPARQL
+    code_match = re.search(r"```(?:sparql)?\s*([\s\S]*?)```", content, re.IGNORECASE)
+    if code_match:
+        content = code_match.group(1).strip()
+    # 简单清理单行 markdown
+    content = re.sub(r"^```sparql\s*", "", content, flags=re.IGNORECASE)
+    content = re.sub(r"^```\s*", "", content)
+    content = re.sub(r"```$", "", content).strip()
+
+    # 基础语法校验：必须以 SELECT 开头，且包含 WHERE { ... }
+    if not re.match(r"^SELECT\s+", content, re.IGNORECASE) or "{" not in content or "}" not in content:
+        logger.warning("LLM 返回非法 SPARQL，使用 fallback: %s", content[:200])
+        return _deterministic_nl_to_sparql(natural_language, ontology)
+    logger.info("nl_to_sparql generated query length=%d", len(content))
+    return content
 
 
 def extract_json(text: str) -> Any:
@@ -49,43 +150,17 @@ def extract_json(text: str) -> Any:
         raise
 
 
-ONTOLOGY_GENERATION_PROMPT = """你是企业业务本体建模专家。请根据以下业务描述，生成一个结构化的本体定义。
-
-业务描述：
-{text}
-
-请只返回如下 JSON 格式，不要返回任何解释或 markdown 代码块外的内容：
-{
-  "name": "本体名称",
-  "description": "简短描述",
-  "objects": [
-    {
-      "id": "obj_xxx",
-      "name": "对象中文名",
-      "attributes": [
-        {"id": "attr_xxx", "name": "属性中文名", "data_type": "string", "required": true, "constraints": {}}
-      ],
-      "relations": [
-        {"id": "rel_xxx", "name": "关系中文名", "target_object": "目标对象id", "cardinality": "many_to_one"}
-      ]
-    }
-  ],
-  "constraints": []
-}
-
-规则：
-1. id 使用小写下划线命名，全局唯一（建议以 obj_/attr_/rel_ 前缀区分）。
-2. data_type 只能是 string / integer / float / boolean / date 之一。
-3. required 为布尔值；constraints 如不确定可留空对象 {}。
-4. cardinality 只能是 one_to_one / one_to_many / many_to_one / many_to_many 之一。
-5. 尽量覆盖描述中所有核心业务概念。
-"""
-
-
-def generate_ontology_from_text(text: str, endpoint: str | None = None, model: str | None = None, fallback: bool = True) -> dict[str, Any]:
-    prompt = ONTOLOGY_GENERATION_PROMPT.replace("{text}", text[:12000])
+def generate_ontology_from_text(
+    text: str,
+    endpoint: str | None = None,
+    model: str | None = None,
+    fallback: bool = True,
+) -> dict[str, Any]:
+    prompt = render_ontology_generation(text)
     try:
-        content = call_llm(prompt, endpoint, model)
+        # 本体生成需要完整 JSON，不设置 max_tokens 避免被截断；使用较低温度提升稳定性
+        result = call_llm(prompt, base_url=endpoint, model=model, temperature=0.1, max_tokens=8192)
+        content = result["choices"][0]["message"]["content"]
         return extract_json(content)
     except Exception as e:  # noqa: BLE001
         logger.warning("LLM 调用失败，使用确定性 fallback 抽取: %s", e)
@@ -149,10 +224,8 @@ def deterministic_extract_ontology(text: str) -> dict[str, Any]:
                 "relations": [r for r in tmpl["relations"] if r["target_object"].replace("obj_", "") in text or True],
             })
             seen.add(keyword)
-    # 至少保证有一个对象：按第一句话中的前两个名词硬拆
     if not objects:
         first = re.split(r"[，。、；]", text)[0]
-        # 简单按常见 2 字/3 字名词硬切
         tokens = re.findall(r"[\u4e00-\u9fff]{2,4}", first)
         for i, tok in enumerate(tokens[:3]):
             objects.append({
@@ -162,3 +235,17 @@ def deterministic_extract_ontology(text: str) -> dict[str, Any]:
                 "relations": [],
             })
     return {"name": "文档抽取本体", "description": text[:200], "objects": objects, "constraints": []}
+
+
+__all__ = [
+    "call_llm",
+    "test_connection",
+    "extract_json",
+    "generate_ontology_from_text",
+    "generate_ontology_from_document",
+    "nl_to_sparql",
+    "deterministic_extract_ontology",
+    "LLMConfig",
+    "get_llm_config",
+    "reload_llm_config",
+]

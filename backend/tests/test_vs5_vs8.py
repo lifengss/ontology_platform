@@ -12,6 +12,8 @@ def _create_ontology():
         "objects": [
             {
                 "id": "obj_account",
+            "stable_key": "attr_aname",
+            "business_definition": "测试用的对象",
                 "name": "账户",
                 "attributes": [{"id": "attr_aname", "name": "账户名", "data_type": "string", "required": True, "constraints": {}}],
                 "relations": [],
@@ -36,8 +38,9 @@ def test_mcp_server_status():
     r = c.get("/mcp/status")
     assert r.status_code == 200
     data = r.json()["data"]
-    assert data["endpoint"] == "/mcp"
+    # 按项目挂载后，全局状态不再返回单一 endpoint，而是返回工具列表
     assert "ontology_query" in data["tools"]
+    assert "published_projects" in data
 
 
 def test_mcp_connection_crud_and_test():

@@ -22,18 +22,51 @@ ontology_platform/
 └── frontend/                   # 无构建 SPA：建模表单/AI生成/文档逆向/归化/图谱/推理
 ```
 
-## 快速开始（本地，无需 Docker）
-```bash
-cd backend
-python -m venv .venv && .venv\Scripts\activate   # Windows
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000
-# 另开终端
-cd frontend && python -m http.server 8080
-```
-访问 http://localhost:8000/docs 查看 API；http://localhost:8080 查看前端 SPA（建模 / 归化 / 图谱 / 推理）。
+## 快速开始（MVP 推荐：本地运行，无需 Docker）
 
-## Docker 一键起
+MVP 阶段所有功能都可以本地跑通，Docker 仅作为后续发布/交付的封装方式。
+
+### 1. 安装依赖（只需一次）
+```powershell
+# Windows PowerShell
+.\scripts\setup-local-deps.ps1
+```
+
+```bash
+# Linux/macOS/WSL
+chmod +x ./scripts/setup-local-deps.sh
+./scripts/setup-local-deps.sh
+```
+脚本会检查 Java 17+，然后下载并解压 Jena/Fuseki 和 Neo4j Community 到 `deps/` 目录。
+
+### 2. 一键启动全部服务
+```powershell
+# Windows PowerShell
+.\scripts\start-all.ps1
+```
+
+```bash
+# Linux/macOS/WSL
+chmod +x ./scripts/start-all.sh
+./scripts/start-all.sh
+```
+
+访问：
+- 前端 SPA：http://localhost:8123
+- 后端 API：http://localhost:8000
+- 后端 Swagger：http://localhost:8000/docs
+- 健康检查：http://localhost:8000/health
+
+### 3. 最小启动（仅前后端）
+如果暂时不需要 SPARQL/图谱，可以直接启动前后端：
+```bash
+cd backend && python main.py
+# 另开终端
+cd frontend && python -m http.server 8123
+```
+此时后端健康检查会显示 `degraded`，属于正常降级。
+
+## Docker 一键起（发布/交付阶段）
 ```bash
 docker compose up -d
 # 前端 http://localhost:8080   API http://localhost:8000/docs   Fuseki http://localhost:3030

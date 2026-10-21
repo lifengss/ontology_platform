@@ -8,6 +8,11 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 
+# 优先从项目 .env 加载环境变量；启动时执行一次，允许覆盖既有环境变量
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
+
 
 def _env_bool(name: str, default: bool) -> bool:
     val = os.getenv(name)
@@ -34,13 +39,14 @@ class Settings:
         self.version: str = os.getenv("APP_VERSION", "1.0.0")
 
         # 依赖服务（VS0 健康检查会探测可达性）
-        self.jena_base_url: str = os.getenv("JENA_BASE_URL", "http://jena:3030")
+        # MVP 默认从本机启动，不依赖 Docker；Docker Compose 通过环境变量覆盖即可
+        self.jena_base_url: str = os.getenv("JENA_BASE_URL", "http://localhost:3030")
         self.jena_dataset: str = os.getenv("JENA_DATASET", "ontology")
-        self.neo4j_uri: str = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
+        self.neo4j_uri: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
         self.neo4j_user: str = os.getenv("NEO4J_USER", "neo4j")
         self.neo4j_password: str = os.getenv("NEO4J_PASSWORD", "neo4jsecret")
         self.postgres_dsn: str = os.getenv(
-            "POSTGRES_DSN", "postgresql://ont:ontsecret@postgres:5432/ont"
+            "POSTGRES_DSN", "postgresql://ont:ontsecret@localhost:5432/ont"
         )
 
         # 本地持久化（无需 Postgres 也能跑通 VS0/VS1 的演示路径）

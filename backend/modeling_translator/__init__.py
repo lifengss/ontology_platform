@@ -40,6 +40,21 @@ def _xsd_for(data_type: str) -> URIRef:
     return XSD_MAP.get(data_type, XSD.string)
 
 
+def class_uri(object_id: str) -> str:
+    """对象类型业务 id → 类 URI（与 schema 翻译一致，供实例三元组/查询侧复用）。"""
+    return str(BASE + _local(object_id))
+
+
+def attr_uri(attr_id: str) -> str:
+    """属性业务 id → 属性 URI（与 schema 翻译一致，供实例三元组/查询侧复用）。"""
+    return str(BASE + _local(attr_id))
+
+
+def rel_uri(rel_id: str) -> str:
+    """关系业务 id → 关系 URI（与 schema 翻译一致，供实例三元组/查询侧复用）。"""
+    return str(BASE + _local(rel_id))
+
+
 def _build_classes(g: Graph, objects, obj_by_id) -> None:
     for o in objects:
         cls = URIRef(BASE + _local(o["id"]))
@@ -184,7 +199,8 @@ def _add_sh_in(g: Graph, ps, values: list) -> None:
 def validate_business_layer(ontology: dict[str, Any]) -> list[dict[str, Any]]:
     """翻译前轻量校验门（P-01/P-03）：纯本地 O(实体) 逻辑，不依赖 Jena。
 
-    覆盖：id 唯一、属性/关系名禁用敏感词、data_type/基数合法、枚举定义合法、父级无环、引用完整性。
+    覆盖：id 唯一、业务语义定义、稳定主键、属性/关系名禁用敏感词、data_type/基数合法、
+    枚举定义合法、父级无环、引用完整性。
     与 SHACL 互补——SHACL 负责实例级语义约束（minCount/datatype/length/unique/enum 取值），本门负责模型级完整性。
     """
     errors: list[dict[str, Any]] = []
@@ -197,6 +213,16 @@ def validate_business_layer(ontology: dict[str, Any]) -> list[dict[str, Any]]:
         if oid in seen_ids:
             errors.append({"severity": "error", "path": oid, "message": f"对象 id 重复: {oid}"})
         seen_ids.add(oid)
+
+        # O-01: 业务语义定义必填
+        biz_def = (o.get("business_definition") or "").strip()
+        if len(biz_def) < 5:
+            errors.append({
+                "severity": "error",
+                "path": f"{oid}/business_definition",
+                "message": "『业务语义定义』为必填，请用一句话说明该对象在业务中代表什么、边界在哪（至少 5 个字符）",
+            })
+
         attr_ids: set[str] = set()
         for attr in o.get("attributes", []):
             aid = attr["id"]
@@ -215,6 +241,22 @@ def validate_business_layer(ontology: dict[str, Any]) -> list[dict[str, Any]]:
                 if not isinstance(en, list) or not en or not all(isinstance(x, str) for x in en):
                     errors.append({"severity": "error", "path": f"{oid}/{aid}",
                                    "message": "enum 约束必须为非空字符串数组"})
+
+        # O-01: stable_key 必须存在且指向本对象属性
+        stable_key = o.get("stable_key")
+        if not stable_key:
+            errors.append({
+                "severity": "error",
+                "path": f"{oid}/stable_key",
+                "message": "必须声明业务主键 stable_key，禁止用内部/数据库自增 id",
+            })
+        elif stable_key not in attr_ids:
+            errors.append({
+                "severity": "error",
+                "path": f"{oid}/stable_key",
+                "message": f"stable_key '{stable_key}' 必须是本对象的一个属性 id",
+            })
+
         rel_ids: set[str] = set()
         for rel in o.get("relations", []):
             rid = rel["id"]

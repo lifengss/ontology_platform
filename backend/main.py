@@ -11,15 +11,17 @@ from __future__ import annotations
 import time
 import uuid
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api.router_actions import router as actions_router
 from api.router_graph import router as graph_router
 from api.router_ingest import router as ingest_router
+from api.router_llm import router as llm_router
 from api.router_mcp import router as mcp_router
 from api.router_ontologies import router as ontologies_router
+from api.router_projects import router as projects_router
 from api.router_system import router as system_router
 from api.router_templates import router as templates_router
 from config import get_settings
@@ -69,33 +71,55 @@ async def unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
     return fail(ApiError("INTERNAL_ERROR", "未预期的内部错误", http_status=500))
 
 
+def _postgres_health() -> str:
+    try:
+        import psycopg2
+        conn = psycopg2.connect(settings.postgres_dsn, connect_timeout=3)
+        conn.close()
+        return "healthy"
+    except Exception:  # noqa: BLE001
+        return "unavailable"
+
+
 @app.get("/health")
 def health():
     deps = jena_health()
     deps.update(Neo4jSync().health())
-    deps["postgres"] = "unavailable"  # 可选
+    deps["postgres"] = _postgres_health()
     all_ok = all(v == "healthy" for v in deps.values())
     return success({"status": "ok" if all_ok else "degraded", "version": settings.version, "dependencies": deps})
 
 
 # 挂载业务路由
+app.include_router(projects_router)
 app.include_router(ontologies_router)
 app.include_router(ingest_router)
 app.include_router(graph_router)
 app.include_router(mcp_router)
 app.include_router(actions_router)
 app.include_router(templates_router)
+app.include_router(llm_router)
 app.include_router(system_router)
 
 
-# VS6: 由 mcp_server 模块通过 FastMCP 挂载 /mcp（SSE）
+# VS6: 由 mcp_server 模块通过 FastMCP 按项目挂载 /mcp/{project_id}（SSE）
 _mcp_server = McpServer()
 _mcp_server.mount(app)
 
 
 @app.get("/mcp/status")
-def mcp_status():
-    return success(_mcp_server.status())
+def mcp_status(project_id: str | None = Query(default=None)):
+    return success(_mcp_server.status(project_id=project_id))
+
+
+@app.get("/mcp/{project_id}")
+async def mcp_sse_endpoint(request: Request):
+    return await _mcp_server.handle_sse(request)
+
+
+@app.post("/mcp/{project_id}/messages/")
+async def mcp_messages_endpoint(request: Request):
+    return await _mcp_server.handle_messages(request)
 
 
 if __name__ == "__main__":

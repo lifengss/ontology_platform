@@ -101,6 +101,9 @@
       "id": "obj_customer",
       "name": "客户",
       "description": "签约客户",
+      "business_definition": "已达成交易或潜在交易意向的企业或个人主体（一句话业务边界）",
+      "stable_key": "attr_name",
+      "namespace": null,
       "parent": null,
       "attributes": [
         {
@@ -130,14 +133,18 @@
 }
 ```
 - `modeling_type` 取值：`manual`(手工) / `reverse`(逆向) / `schema`(Schema 约束) / `hybrid`(混合)。
+- `business_definition`：必填，一句话说明该对象在业务中代表什么、边界在哪（≥5 字符）。
+- `stable_key`：必填，指向本对象的一个属性 id，作为实例写入 Neo4j 时的业务主键；**禁止**使用数据库自增 id。
+- `namespace`：可选，部门/域命名空间；MVP 默认继承 project。创建/列表接口支持通过 `?namespace=` 参数切换，本体对象在创建时会默认继承本体的 namespace。
 - `data_type` 取值：`string` / `integer` / `float` / `boolean` / `date` / `datetime`。
 - `cardinality` 取值：`one_to_one` / `one_to_many` / `many_to_one` / `many_to_many`。
+- `functions`（本体级）：元模型预留，用于声明无副作用计算逻辑（与 Action 的 `side_effect=true` 相对）。MVP 仅存储，V2 接入 function_engine 执行。
 
 ### 2.2 端点
 | 方法 | 路径 | 说明 | 关键参数 / 请求体 |
 |---|---|---|---|
 | POST | `/api/ontologies` | 创建/保存业务本体（翻译落 Jena，本地回退文件持久化） | body=§2.1 模型（不含 id/时间戳） |
-| GET | `/api/ontologies` | 本体列表（分页） | query=`page`,`pageSize`,`keyword`(可选) |
+| GET | `/api/ontologies` | 本体列表（分页） | query=`page`,`pageSize`,`keyword`(可选),`namespace`(可选，默认继承 project_id) |
 | GET | `/api/ontologies/{id}` | 读取业务层模型 | path=`id` |
 | PUT | `/api/ontologies/{id}` | 更新模型 | body=§2.1（可部分字段） |
 | DELETE | `/api/ontologies/{id}` | 删除本体 | path=`id` |
@@ -169,13 +176,24 @@
   "source_ref": "connection_id 或 文档名",
   "object_type": "obj_customer",
   "instances": [
-    { "name": "示例客户", "industry": "制造", "_source": { "connection_id": "crm-sf-mcp", "read_at": "2026-10-19T10:00:00+08:00" } }
+    {
+      "name": "示例客户",
+      "industry": "制造",
+      "_source": {
+        "kind": "field_map",
+        "connection_id": "crm-sf-mcp",
+        "fetched_at": "2026-10-19T10:00:00+08:00",
+        "raw_ref": "crm_record_001"
+      }
+    }
   ],
   "status": "pending",
   "created_at": "2026-10-19T10:00:00+08:00"
 }
 ```
 - `status`：`pending`(待审核) / `approved`(已通过) / `rejected`(已拒绝) / `imported`(已落库)。
+- 实例 `_source` 为结构化 `instance_source`：`{ kind, connection_id, fetched_at, raw_ref }`。`kind` 取值 `internal|doc|external_mcp|field_map|llm`。
+- 实例写入 Neo4j 时按 `stable_uri = urn:ontology:{project}:{object_type}:{stable_key_value}` 生成稳定主键节点；关系字段按 `relation.id` 作为属性键、目标业务主键值作为属性值，物化为 Neo4j 边。
 
 ### 3.2 端点
 | 方法 | 路径 | 说明 |
@@ -220,7 +238,9 @@
 |---|---|---|
 | GET | `/api/graph/{id}` | 图谱数据（含 `source` 溯源着色字段） |
 | GET | `/api/inference/trace/{id}` | 推理链路 steps |
+| POST | `/api/graph/{id}/nl-query` | 自然语言 → SPARQL → 图谱查询（O-05） |
 
+- `POST /api/graph/{id}/nl-query` 请求体：`{ "question": "查询所有客户及其订单" }`；响应：`{ "question": "...", "sparql": "SELECT ...", "rows": [{...}], "count": N }`。
 - `GET /api/graph/{id}` 响应：
 ```json
 { "success": true, "data": {
@@ -309,7 +329,7 @@
   "updated_at": "2026-10-19T10:00:00+08:00"
 }
 ```
-- `invoke.kind`：`mcp_tool` / `webhook` / `rest`。`confirmation`：当前仅 `human_required`。
+- `invoke.kind`：`mcp_tool` / `webhook` / `rest`。`confirmation`：当前仅 `human_required`。`side_effect`：Action 恒为 `true`（外部写操作）；与 Function（元模型，无副作用）相对。
 
 ### 6.2 端点
 | 方法 | 路径 | 说明 |
@@ -321,10 +341,12 @@
 | DELETE | `/api/actions/{id}` | 删除 |
 | POST | `/api/actions/{id}/execute` | 触发执行（返回确认令牌，未确认不真正回写） |
 | POST | `/api/actions/{id}/confirm` | 人工确认后真正回写 |
+| GET | `/api/actions/{id}/logs` | 读取 Action 执行日志（分页） |
 
 - `POST .../execute` 请求体：`{ "input": { "Customer": { "id":"c1","name":"张三" } }, "dry_run": false }`。
 - `POST .../execute` 响应：`data = { "confirmation_token": "uuid", "dry_run": false, "planned_payload": { "tool":"upsert_contact", "args": { "name":"张三" } }, "idempotency_key": "customer::c1" }`。**此时未回写**。
 - `POST .../confirm` 请求体：`{ "confirmation_token": "uuid" }`；响应：`data = { "executed": true, "external_response": { ... }, "log_id": "uuid" }`。
+- `GET .../logs` 响应：分页列表，每条日志含 `log_id/action_id/confirmation_token/idempotency_key/planned_payload/external_response/executed_at`。
 - 护栏：相同 `idempotency_key` 重复确认不产生重复回写（幂等）；`dry_run=true` 时 `execute` 直接返回 `planned_payload` 且 `confirmation_token=null`，不发起外部调用。
 
 ---
@@ -335,6 +357,22 @@
 |---|---|---|
 | GET | `/health` | 健康检查（后端 + 依赖服务可达性） |
 | GET | `/api/system/info` | 平台元信息（版本、模块就绪状态） |
+
+## 7.1 LLM 设置（`llm`）
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/llm/settings` | 读取 LLM 运行时配置（不含 API key 明文） |
+| PUT | `/api/llm/settings` | 保存 LLM 运行时配置；`api_key` 单独落到后端 secrets |
+| GET | `/api/llm/env-hints` | 返回 `.env` 中的 base_url/model/key 配置状态（key 仅布尔） |
+| POST | `/api/llm/test` | 测试 LLM 连通性，可临时覆盖 base_url/model/api_key |
+
+- 配置分层：
+  - 非敏感配置（provider、model、temperature、timeout、max_tokens、提示词模板）走 `data/llm_config.json`。
+  - API key 走 **环境变量优先**；若环境变量未设置，则读取后端 `secrets/LLM_API_KEY.json`（文件权限 600，可选 Fernet 加密）。
+- `GET /api/llm/settings` 响应：`data.api_key_configured`（布尔）与 `data.api_key_source`（`env` / `file` / `none`），**永不返回 key 明文**。
+- `PUT /api/llm/settings` 请求体：`{ "provider": "openai_compatible", "model": "default", "temperature": 0.2, "timeout": 120, "max_tokens": 4096, "api_key": "sk-...", "prompts": { "ontology_generation": "...", "instance_extraction": "...", "reverse_engineering": "...", "kg_construction": "..." } }`。
+  - `api_key` 为空字符串时删除已保存的 `secrets/LLM_API_KEY.json`。
+- `POST /api/llm/test` 请求体：`{ "base_url": "http://.../v1", "model": "...", "api_key": "sk-...", "timeout": 30 }`；响应：`data = { "ok": true, "latency_ms": 123, "model": "...", "url": "...", "content_preview": "Hi" }`。
 
 - `GET /health` 响应（HTTP 200 表示服务存活；依赖不可达时仍 200 但 `dependencies` 标 unhealthy，便于告警）：
 ```json
@@ -355,7 +393,19 @@
 
 ---
 
-## 9. 对外 MCP 工具（挂载 `/mcp`，非 REST）
+## 9. 日志（新增）
+
+| 方法 | 路径 | 说明 | 关键参数 / 请求体 |
+|---|---|---|---|
+| GET | `/api/logs` | 后端结构化日志（JSON 行），默认返回最近 2 天，按时间从新到旧排列 | query=`days`(1-7, 默认 2), `limit`(1-10000, 默认 2000) |
+| POST | `/api/client-logs` | 前端错误/操作日志上报，统一落入后端日志文件 | body=`{ "level": "error", "message": "...", "stack?": "...", "url?": "...", "user_agent?": "..." }` |
+
+- 日志文件位于 `backend/logs/app-YYYY-MM-DD.log`，保留策略：仅保留最近 2 天，进程启动时自动清理过期文件。
+- 前端同时维护本地操作日志（`localStorage`），保留 2 天；错误级别日志会自动上报到 `/api/client-logs`。
+
+---
+
+## 11. 对外 MCP 工具（挂载 `/mcp`，非 REST）
 
 由本体 Schema **自动生成**，供外部智能体平台注册调用（streamable_http）：
 
@@ -379,7 +429,7 @@
 
 ---
 
-## 10. 与垂直切片（VS0–VS10）映射
+## 12. 与垂直切片（VS0–VS10）映射
 | 切片 | 涉及端点 |
 |---|---|
 | VS0 运行基座 | `/health`、系统模块、compose |
@@ -396,7 +446,7 @@
 
 ---
 
-## 11. 模板管理（VS5）
+## 13. 模板管理（VS5）
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/templates` | 模板列表（支持 `industry`、`tag` 过滤，分页） |
@@ -411,7 +461,7 @@
 
 ---
 
-## 12. 用户友好建模/逆向生成
+## 14. 用户友好建模/逆向生成
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/ontologies/from-text` | 自然语言描述 → 生成本体草稿（201） |
@@ -425,6 +475,6 @@
 
 ---
 
-## 13. 状态与待补
+## 15. 状态与待补
 - VS0–VS8 端点已实现，新增 §12 用户友好建模/逆向生成。VS10 集成测试见 `backend/tests/`。
 - 待增强：Fuseki 远程推理开关、SHACL 在 Jena 侧执行、MCP stdio transport 完整 JSON-RPC、Action 熔断/重试策略细化。

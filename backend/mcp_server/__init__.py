@@ -1,4 +1,4 @@
-"""mcp_server：由本体 Schema 自动生成工具，通过 SSE 挂载 /mcp（VS6）。
+"""mcp_server：由本体 Schema 按项目自动生成工具，通过 SSE 挂载 /mcp/{project_id}（VS6）。
 
 工具契约（对外 Agent 可读）：
 - ontology_query: 读本体 TBox，无副作用
@@ -46,40 +46,101 @@ TOOLS_CONTRACT = {
 
 
 class McpServer:
+    """按项目维护独立的 FastMCP 实例，挂载到 /mcp/{project_id}。"""
+
     def __init__(self) -> None:
-        self._ontologies = JsonStore("ontologies")
-        self._actions = JsonStore("actions")
+        self._projects: dict[str, Any] = {}
+        self._transports: dict[str, Any] = {}
         self._action_engine = ActionEngine()
-        self._mcp: Any | None = None
-        self._transport: Any | None = None
 
-    def status(self) -> dict:
-        return {"published": bool(self._mcp), "endpoint": "/mcp", "tools": list(TOOLS_CONTRACT.keys())}
+    def _ontologies(self, project_id: str) -> JsonStore:
+        return JsonStore("ontologies", project_id=project_id)
 
-    def publish(self, ontology_id: str) -> dict:
-        rec = self._ontologies.get(ontology_id)
+    def _actions(self, project_id: str) -> JsonStore:
+        return JsonStore("actions", project_id=project_id)
+
+    def status(self, project_id: str | None = None) -> dict:
+        if project_id:
+            return {
+                "published": project_id in self._projects,
+                "endpoint": f"/mcp/{project_id}",
+                "tools": list(TOOLS_CONTRACT.keys()),
+            }
+        return {
+            "published_projects": list(self._projects.keys()),
+            "tools": list(TOOLS_CONTRACT.keys()),
+        }
+
+    def publish(self, project_id: str, ontology_id: str) -> dict:
+        rec = self._ontologies(project_id).get(ontology_id)
         if not rec:
             return {"published": False, "error": "本体不存在"}
-        logger.info("publish MCP server for ontology_id=%s tools=%s", ontology_id, list(TOOLS_CONTRACT.keys()))
-        return {"published": True, "ontology_id": ontology_id, "endpoint": "/mcp", "tools": list(TOOLS_CONTRACT.keys())}
+        self._ensure_mcp(project_id)
+        logger.info("publish MCP server project_id=%s ontology_id=%s tools=%s", project_id, ontology_id, list(TOOLS_CONTRACT.keys()))
+        return {
+            "published": True,
+            "project_id": project_id,
+            "ontology_id": ontology_id,
+            "endpoint": f"/mcp/{project_id}",
+            "tools": list(TOOLS_CONTRACT.keys()),
+        }
 
-    def mount(self, app):
-        """将 MCP SSE 端点挂载到 FastAPI app。"""
+    def unpublish(self, project_id: str) -> dict:
+        if project_id not in self._projects:
+            return {"published": False, "error": "MCP Server 未发布"}
+        self._projects.pop(project_id, None)
+        self._transports.pop(project_id, None)
+        logger.info("unpublish MCP server project_id=%s", project_id)
+        return {"published": False, "project_id": project_id, "message": "已取消发布"}
+
+    def tools(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": name,
+                "description": meta.get("description", ""),
+                "side_effect": meta.get("side_effect", False),
+                "reads": meta.get("reads", []),
+                "writes": meta.get("writes", []),
+                "example": self._tool_example(name),
+            }
+            for name, meta in TOOLS_CONTRACT.items()
+        ]
+
+    def _tool_example(self, tool_name: str) -> dict[str, Any]:
+        examples = {
+            "ontology_query": {"method": "tools/call", "params": {"name": "ontology_query", "arguments": {"ontology_id": "<ontology_id>"}}},
+            "inference_trace": {"method": "tools/call", "params": {"name": "inference_trace", "arguments": {"ontology_id": "<ontology_id>"}}},
+            "instance_get": {"method": "tools/call", "params": {"name": "instance_get", "arguments": {"ontology_id": "<ontology_id>", "object_type": "Activity"}}},
+            "action_invoke": {"method": "tools/call", "params": {"name": "action_invoke", "arguments": {"action_id": "<action_id>", "confirmation_token": "<token>"}}},
+        }
+        return examples.get(tool_name, {})
+
+    def _ensure_mcp(self, project_id: str) -> Any:
         try:
             from mcp.server.fastmcp import FastMCP
             from mcp.server.sse import SseServerTransport
         except Exception as e:  # noqa: BLE001
             logger.warning("mcp 库未安装，跳过 MCP Server 挂载: %s", e)
-            return
+            return None
 
-        mcp = FastMCP("EnterpriseOntologyMCP", instructions="企业业务本体平台 MCP Server：可查询本体/实例/推理链路，或在确认后调用 Action 回写外部系统。")
-        self._mcp = mcp
-        self._transport = SseServerTransport("/mcp/messages/")
+        if project_id in self._projects:
+            return self._projects[project_id]
+
+        mcp = FastMCP(
+            f"EnterpriseOntologyMCP_{project_id}",
+            instructions=f"企业业务本体平台 MCP Server（项目 {project_id}）：可查询本体/实例/推理链路，或在确认后调用 Action 回写外部系统。",
+        )
+        transport = SseServerTransport(f"/mcp/{project_id}/messages/")
+        self._projects[project_id] = mcp
+        self._transports[project_id] = transport
+
+        ontologies = self._ontologies(project_id)
+        actions = self._actions(project_id)
 
         @mcp.tool()
         def ontology_query(ontology_id: str, query: str = "") -> str:
             """查询本体结构：返回对象、属性、关系摘要。"""
-            rec = self._ontologies.get(ontology_id)
+            rec = ontologies.get(ontology_id)
             if not rec:
                 return json.dumps({"error": "NOT_FOUND"}, ensure_ascii=False)
             summary = {
@@ -100,7 +161,7 @@ class McpServer:
         @mcp.tool()
         def inference_trace(ontology_id: str) -> str:
             """返回 OWL2-RL 风格推理链路。"""
-            rec = self._ontologies.get(ontology_id)
+            rec = ontologies.get(ontology_id)
             if not rec:
                 return json.dumps({"error": "NOT_FOUND"}, ensure_ascii=False)
             try:
@@ -112,7 +173,7 @@ class McpServer:
         @mcp.tool()
         def instance_get(ontology_id: str, object_type: str = "", instance_id: str = "") -> str:
             """查询已落库实例（支持按 object_type 过滤或按 id 精确匹配）。"""
-            instances = _load_instances(ontology_id)
+            instances = _load_instances(project_id, ontology_id)
             if object_type:
                 instances = [i for i in instances if i.get("object_type") == object_type]
             if instance_id:
@@ -122,25 +183,44 @@ class McpServer:
         @mcp.tool()
         def action_invoke(action_id: str, confirmation_token: str = "") -> str:
             """确认执行 Action（需先通过 /api/actions/{id}/execute 获取 confirmation_token）。"""
-            rec = self._actions.get(action_id)
+            rec = actions.get(action_id)
             if not rec:
                 return json.dumps({"error": "NOT_FOUND"}, ensure_ascii=False)
             result = self._action_engine.confirm(confirmation_token, {"action": rec})
             return json.dumps(result, ensure_ascii=False)
 
-        @app.get("/mcp")
-        async def handle_sse(request):
-            async with self._transport.connect_sse(request.scope, request.receive, request.send) as streams:
-                await mcp._mcp_server.run(
-                    streams[0], streams[1],
-                    mcp._mcp_server.create_initialization_options(),
-                )
+        return mcp
 
-        @app.post("/mcp/messages/")
-        async def handle_messages(request):
-            await self._transport.handle_post_message(request.scope, request.receive, request.send)
+    def mount(self, app):
+        """将 MCP SSE 端点按项目挂载到 FastAPI app（路由定义在 main.py）。"""
+        logger.info("MCP Server 已挂载到 /mcp/{project_id} (SSE)，工具: %s", list(TOOLS_CONTRACT.keys()))
 
-        logger.info("MCP Server 已挂载到 /mcp (SSE)，工具: %s", list(TOOLS_CONTRACT.keys()))
+    async def handle_sse(self, request):
+        """供 main.py /mcp/{project_id} GET 路由调用。"""
+        project_id = request.path_params["project_id"]
+        self._ensure_mcp(project_id)
+        transport = self._transports.get(project_id)
+        mcp = self._projects.get(project_id)
+        if not transport or not mcp:
+            body = json.dumps({"error": "MCP Server 未发布"}).encode("utf-8")
+            await request.send({"type": "http.response.start", "status": 404, "headers": [[b"content-type", b"application/json"]]})
+            return await request.send({"type": "http.response.body", "body": body})
+        async with transport.connect_sse(request.scope, request.receive, request.send) as streams:
+            await mcp._mcp_server.run(
+                streams[0], streams[1],
+                mcp._mcp_server.create_initialization_options(),
+            )
+
+    async def handle_messages(self, request):
+        """供 main.py /mcp/{project_id}/messages/ POST 路由调用。"""
+        project_id = request.path_params["project_id"]
+        transport = self._transports.get(project_id)
+        if not transport:
+            body = json.dumps({"error": "MCP Server 未发布"}).encode("utf-8")
+            await request.send({"type": "http.response.start", "status": 404, "headers": [[b"content-type", b"application/json"]]})
+            await request.send({"type": "http.response.body", "body": body})
+            return
+        await transport.handle_post_message(request.scope, request.receive, request.send)
 
 
 def _run_inference(ontology: dict[str, Any]) -> list[dict[str, Any]]:
@@ -148,8 +228,8 @@ def _run_inference(ontology: dict[str, Any]) -> list[dict[str, Any]]:
     return _inf(ontology)
 
 
-def _load_instances(ontology_id: str) -> list[dict[str, Any]]:
-    path = os.path.join(get_settings().data_dir, "instances.jsonl")
+def _load_instances(project_id: str, ontology_id: str) -> list[dict[str, Any]]:
+    path = os.path.join(get_settings().data_dir, "projects", project_id, "instances.jsonl")
     if not os.path.exists(path):
         return []
     records: list[dict[str, Any]] = []

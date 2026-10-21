@@ -1,0 +1,22 @@
+# Fuseki 服务配置：可写 TDB2 数据集 ontology（持久化到 backend/data/fuseki）
+# 启动：java -jar fuseki-server.jar --port 3030 --config <本文件>
+@prefix fuseki: <http://jena.apache.org/fuseki#> .
+@prefix rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix tdb:    <http://jena.apache.org/2016/tdb#> .
+
+<#server> a fuseki:Server ;
+    fuseki:services ( <#ontology> ) .
+
+<#ontology> a fuseki:Service ;
+    rdfs:label "Ontology Dataset" ;
+    fuseki:name "ontology" ;
+    fuseki:serviceQuery "query" ;
+    fuseki:serviceUpdate "update" ;
+    fuseki:serviceLoad "load" ;
+    fuseki:serviceData "data" ;
+    fuseki:dataset <#ontologyDS> .
+
+# Jena 5：tdb:DatasetTDB（2016/tdb 命名空间）即 TDB2 数据集装配器，可读写
+<#ontologyDS> a tdb:DatasetTDB ;
+    tdb:location "d:/self_coding/ontology_platform/backend/data/fuseki" .

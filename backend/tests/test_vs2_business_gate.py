@@ -11,6 +11,8 @@ from jena_adapter.client import shacl_validate
 def _base():
     return {"name": "t", "objects": [
         {"id": "o1", "name": "O1",
+         "business_definition": "测试对象 O1，用于业务层校验门",
+         "stable_key": "a1",
          "attributes": [{"id": "a1", "name": "A1", "data_type": "string", "required": True, "constraints": {}}],
          "relations": []},
     ], "constraints": []}
@@ -18,7 +20,9 @@ def _base():
 
 def test_duplicate_object_id():
     o = _base()
-    o["objects"].append({"id": "o1", "name": "dup", "attributes": [], "relations": []})
+    o["objects"].append({"id": "o1",
+            "stable_key": "id",
+            "business_definition": "测试用的对象", "name": "dup", "attributes": [], "relations": []})
     errs = validate_business_layer(o)
     assert any("重复" in e["message"] for e in errs)
 
@@ -49,8 +53,12 @@ def test_enum_definition_must_be_nonempty_list():
 
 def test_parent_cycle_detected():
     o = {"name": "t", "objects": [
-        {"id": "a", "name": "A", "parent": "b", "attributes": [], "relations": []},
-        {"id": "b", "name": "B", "parent": "a", "attributes": [], "relations": []},
+        {"id": "a", "name": "A", "parent": "b",
+         "business_definition": "测试对象 A", "stable_key": "id",
+         "attributes": [], "relations": []},
+        {"id": "b", "name": "B", "parent": "a",
+         "business_definition": "测试对象 B", "stable_key": "id",
+         "attributes": [], "relations": []},
     ], "constraints": []}
     errs = validate_business_layer(o)
     assert any("环" in e["message"] for e in errs)
@@ -62,7 +70,9 @@ def test_valid_model_passes_gate():
 
 def test_enum_generates_sh_in_and_validates():
     onto = {"name": "t", "objects": [
-        {"id": "o1", "name": "O1", "attributes": [
+        {"id": "o1",
+            "stable_key": "a1",
+            "business_definition": "测试用的对象", "name": "O1", "attributes": [
             {"id": "a1", "name": "A1", "data_type": "string", "required": False,
              "constraints": {"enum": ["A", "B"]}}], "relations": []},
     ], "constraints": []}
