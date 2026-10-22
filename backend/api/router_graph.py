@@ -99,7 +99,7 @@ def natural_language_query(
     if not rec:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
     try:
-        sparql = nl_to_sparql(question, rec)
+        sparql, source = nl_to_sparql(question, rec)
     except Exception as e:  # noqa: BLE001
         logger.warning("nl_to_sparql failed: %s", e)
         raise ApiError("LLM_ERROR", f"自然语言转 SPARQL 失败: {e}", http_status=502) from e
@@ -108,8 +108,9 @@ def natural_language_query(
     except Exception as e:  # noqa: BLE001
         logger.warning("sparql_query failed: %s", e)
         raise ApiError("UPSTREAM_UNAVAILABLE", f"SPARQL 执行失败: {e}", http_status=502) from e
-    logger.info("nl_query ontology_id=%s project_id=%s rows=%d", ontology_id, project_id, len(rows))
-    return success({"question": question, "sparql": sparql, "rows": rows, "count": len(rows)})
+    logger.info("nl_query ontology_id=%s project_id=%s source=%s question=%r rows=%d sparql=%.200s",
+                ontology_id, project_id, source, question, len(rows), sparql)
+    return success({"question": question, "sparql": sparql, "source": source, "rows": rows, "count": len(rows)})
 
 
 @router.post("/graph/{ontology_id}/rdf-sync")

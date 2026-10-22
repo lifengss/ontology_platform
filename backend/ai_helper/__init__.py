@@ -73,14 +73,32 @@ def _deterministic_nl_to_sparql(natural_language: str, ontology: dict[str, Any])
     return f"SELECT {var_list} WHERE {{ {triples} }} LIMIT 50"
 
 
-def nl_to_sparql(natural_language: str, ontology: dict[str, Any]) -> str:
-    """自然语言 → SPARQL（O-05）。LLM 不可达时使用确定性 fallback。"""
-    from .client import call_llm
+def _normalize_sparql(content: str) -> str:
+    """清理 LLM 输出中的 markdown 围栏与前导声明（PREFIX/注释），返回规整后的查询文本。
 
+    PREFIX 是合法 SPARQL 前缀声明（LLM 常按 prompt 的前缀约定输出），不算非法内容，
+    执行侧 client._ensure_prefixes 会按实际情况补齐缺失声明。
+    """
+    code_match = re.search(r"```(?:sparql)?\s*([\s\S]*?)```", content, re.IGNORECASE)
+    if code_match:
+        content = code_match.group(1).strip()
+    content = re.sub(r"^```(?:sparql)?\s*", "", content, flags=re.IGNORECASE)
+    content = re.sub(r"```$", "", content)
+    content = re.sub(r"^(?:\s*PREFIX\s+\S+:\s*<[^>]+>\s*)+", "", content, flags=re.IGNORECASE | re.DOTALL)
+    content = re.sub(r"^(?:\s*#.*\n?)+", "", content)
+    return content.strip()
+
+
+def nl_to_sparql(natural_language: str, ontology: dict[str, Any]) -> tuple[str, str]:
+    """自然语言 → SPARQL（O-05）。返回 (sparql, source)，source 为 "llm" 或 "fallback"。
+
+    LLM 不可达/超时/返回非法时使用确定性 fallback（模板查询仅能近似回答，不能理解条件语义）。
+    """
+    objects = ontology.get("objects", [])
     lines = ["本体的业务对象与属性："]
     # 限制 prompt 长度，避免低端 LLM 过载不输出 content
-    max_objects = 20
-    for o in ontology.get("objects", [])[:max_objects]:
+    max_objects = 30
+    for o in objects[:max_objects]:
         attrs = ", ".join(f"{a['id']}({a.get('name','')})" for a in o.get("attributes", []))
         lines.append(f"- {o['id']} ({o.get('name', '')}): {attrs}")
         rels = ", ".join(
@@ -93,46 +111,48 @@ def nl_to_sparql(natural_language: str, ontology: dict[str, Any]) -> str:
     schema_text = "\n".join(lines)
 
     prompt = (
-        f"你是一名知识图谱专家。请根据下面的本体，把用户问题转成 SPARQL SELECT 查询。\n\n"
+        "你是知识图谱查询专家。请根据下面的本体，把用户问题转成 SPARQL SELECT 查询。\n\n"
         f"{schema_text}\n\n"
-        f"前缀约定：PREFIX ont: <http://ontology.local/>。\n"
-        f"对象类型 URI：<http://ontology.local/{{object_type}}>。\n"
-        f"属性 URI：<http://ontology.local/{{attribute_id}}>（与本体属性 ID 一致，不含对象前缀）。\n"
-        f"关系 URI：<http://ontology.local/{{relation_id}}>。\n"
-        f"实例为主体 http://ontology.local/inst_{{实例ID}}，其 a 为对象类型 URI。\n\n"
+        "前缀 ont: <http://ontology.local/> 已声明，直接使用即可，不要重复声明，不要使用其它前缀。\n"
+        "URI 约定：\n"
+        "- 对象类型：ont:{对象ID}（如 ont:Activity）\n"
+        "- 属性属性：ont:{属性ID}（与上面列出的属性 ID 一致，不含对象前缀，如 ont:activityName）\n"
+        "- 关系属性：ont:{关系ID}（如 ont:belongsToStage）\n"
+        "- 实例主体：http://ontology.local/inst_{实例ID}，其 a 为对象类型 URI\n\n"
+        "数据约定（务必遵守）：\n"
+        "1. 属性值与关系值通常都是字面量（字符串/数字），例如 leadingRole 的值是字符串'采购经理'，"
+        "不是角色实例 URI。禁止写 ?a ont:attrName ?x . ?x a ont:SomeClass 这种把属性值当节点连接的查询；"
+        "问题含具体值条件（如'主导角色是采购经理'）时用 ?a ont:leadingRole \"采购经理\" 或 FILTER 表达。\n"
+        "2. 只有查询两个对象实例之间的关联（如'活动属于哪个阶段'）时，才用关系属性连接两个节点："
+        "?a ont:belongsToStage ?b . ?b a ont:Stage . 注意关系值也可能是字面量，不确定时优先单对象查询。\n"
+        "3. 只使用上面本体列表中真实出现的对象 ID、属性 ID、关系 ID，不要编造。\n"
+        "4. 查询末尾加 LIMIT 50（用户未明确指定数量时）。\n\n"
         f"用户问题：{natural_language}\n\n"
-        f"必须只输出 SPARQL 查询文本，不要解释，不要 markdown 代码块。"
+        "只输出 SPARQL SELECT 查询文本，不要解释，不要 markdown 代码块，不要 PREFIX 声明行。"
     )
     try:
-        # NL 查询转 SPARQL 对实时性要求高，超时限制在 8 秒；LLM 不可达或异常时走确定性 fallback
-        result = call_llm(prompt, temperature=0.1, max_tokens=1024, timeout=8)
+        # NL 查询对实时性要求高，但 8s 实测会偶发读超时（同模型延迟 0.8~5s 波动），放宽到 20s 换取成功率
+        result = call_llm(prompt, temperature=0.1, max_tokens=1024, timeout=20)
     except Exception as e:  # noqa: BLE001
-        logger.warning("LLM 不可达，nl_to_sparql 使用确定性 fallback: %s", e)
-        return _deterministic_nl_to_sparql(natural_language, ontology)
+        logger.warning("LLM 不可达，nl_to_sparql 使用确定性 fallback: question=%r err=%s", natural_language, e)
+        return _deterministic_nl_to_sparql(natural_language, ontology), "fallback"
 
     message = result.get("choices", [{}])[0].get("message") or {}
     content = message.get("content")
     # 某些 LLM 把思考过程放在 reasoning，不输出 content；此类输出不可信，直接 fallback
     if not content:
-        logger.warning("LLM content 为空（可能仅有 reasoning），使用 deterministic fallback")
-        return _deterministic_nl_to_sparql(natural_language, ontology)
-    content = str(content).strip()
+        logger.warning("LLM content 为空（可能仅有 reasoning），使用 deterministic fallback: question=%r", natural_language)
+        return _deterministic_nl_to_sparql(natural_language, ontology), "fallback"
 
-    # 从 markdown 代码块中提取 SPARQL
-    code_match = re.search(r"```(?:sparql)?\s*([\s\S]*?)```", content, re.IGNORECASE)
-    if code_match:
-        content = code_match.group(1).strip()
-    # 简单清理单行 markdown
-    content = re.sub(r"^```sparql\s*", "", content, flags=re.IGNORECASE)
-    content = re.sub(r"^```\s*", "", content)
-    content = re.sub(r"```$", "", content).strip()
-
-    # 基础语法校验：必须以 SELECT 开头，且包含 WHERE { ... }
-    if not re.match(r"^SELECT\s+", content, re.IGNORECASE) or "{" not in content or "}" not in content:
-        logger.warning("LLM 返回非法 SPARQL，使用 fallback: %s", content[:200])
-        return _deterministic_nl_to_sparql(natural_language, ontology)
-    logger.info("nl_to_sparql generated query length=%d", len(content))
-    return content
+    content = _normalize_sparql(str(content))
+    # 基础语法校验：必须以 SELECT 开头，且包含 WHERE { ... }（前导 PREFIX 已在 normalize 中剥离）
+    if not content or not re.match(r"^SELECT\s+", content, re.IGNORECASE) or "{" not in content or "}" not in content:
+        logger.warning("LLM 返回非法 SPARQL，使用 fallback: question=%r content=%.300s", natural_language, str(content))
+        return _deterministic_nl_to_sparql(natural_language, ontology), "fallback"
+    if not re.search(r"\bLIMIT\s+\d+", content, re.IGNORECASE):
+        content += " LIMIT 50"
+    logger.info("nl_to_sparql llm ok question=%r length=%d", natural_language, len(content))
+    return content, "llm"
 
 
 def extract_json(text: str) -> Any:

@@ -2484,8 +2484,10 @@ async function runNlQuery() {
     const d = j.data;
     $('nlQuerySparql').textContent = d.sparql;
     $('nlQuerySparql').classList.remove('hidden');
-    // 如果 LLM 不可达，后端会返回确定性 fallback SPARQL，给用户友好提示
-    const fallbackHint = (d.sparql || '').includes('http://ontology.local/') && !d.sparql.toLowerCase().startsWith('select ?s where { ?s a <http://ontology.local/thing>') ? '' : '<div class="text-xs text-amber-400 mb-1">当前 LLM 未正确返回 SPARQL，已使用本地规则生成兜底查询。</div>';
+    // 后端显式返回 source：fallback 表示 LLM 不可达/返回非法，用的是确定性模板（只能近似列出对象实例）
+    const fallbackHint = (d.source === 'fallback')
+      ? '<div class="text-xs text-amber-400 mb-1">当前 LLM 未正确返回 SPARQL（不可达或超时），已使用本地规则生成兜底查询，结果仅为对象实例抽样，不包含问题中的条件过滤。</div>'
+      : '';
     if (!d.rows || !d.rows.length) {
       $('nlQueryResult').innerHTML = fallbackHint + '<span class="text-slate-400">查询结果为空（共 0 条）</span>';
       return;

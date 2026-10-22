@@ -328,3 +328,21 @@
 - **根因**：`buildObjectTree` 按 many_to_one 关系建父子层级，但 L6 本体关系图含 **3 个环**（2 自环 + 1 三节点环）；`walk` 递归与 `renderNode` 展开渲染均无环保护 → `RangeError: Maximum call stack size exceeded` → 整栏渲染中断（异常吞在 `loadOntologies().then` 里，页面无任何提示，右栏实例列表连带不加载）
 - **修复**：`frontend/app.js` `buildObjectTree` 改为"关系图 → 真树"——自环边剔除、每节点只挂第一个到达它的父节点（环形/菱形重复边丢弃），`renderNode` 递归天然终止；仅由环可达的节点提升为根，不丢对象。app.js 版本号 `?v=20261022d`
 - **验证**：Playwright 实测 27/27 对象渲染、0 重复、全展开/点击选中正常、右栏元数据+实例列表(43 条)恢复显示，**0 JS 报错**
+
+---
+
+## 16. 2026-10-22：自然语言查询（NL→SPARQL）链路修复
+
+- **现象**：用户对 L6 本体提多个自然语言问题，页面均提示"LLM 未能正确返回 SPARQL，已使用本地规则生成兜底查询"，且结果不含问题条件
+- **日志还原**（`backend/logs/app-2026-10-22.log` 07:31~08:42 共 6 次）：
+  - 2 次"LLM 返回非法 SPARQL"实为**误杀**：LLM 按 prompt 前缀约定输出合法查询但以 `PREFIX ont: <...>` 行开头，校验器要求以 `SELECT` 开头 → 误判非法丢弃（其中一条 `SELECT ?role WHERE { ?role a ont:Role }` 完全正确）
+  - 1 次 8s 读超时（同模型延迟 0.8~5s 波动，8s 卡边）
+  - 3 次 LLM 查询通过校验但 rows=0/1：旧 prompt 未说明"属性/关系值是字面量"，LLM 把 `leadingRole`（字符串"采购经理"）当 URI 节点连接 `?role a ont:Role` → 必然 0 行
+  - **前端提示误报**：`runNlQuery` 靠字符串启发式（sparql 是否含 `http://ontology.local/` 全文）判断兜底——LLM 用 `ont:` 前缀的干净查询反而触发"LLM 未正确返回"提示，真正的兜底查询反而不提示
+- **修复**：
+  - `backend/ai_helper/__init__.py`：`_normalize_sparql` 剥离前导 PREFIX/注释/markdown 围栏后再校验；`nl_to_sparql` 返回 `(sparql, source)`，source=llm|fallback；prompt 增强（前缀已声明勿重复、属性值是字面量禁止当节点连接、关系连接用法、ID 白名单、自动 LIMIT 50）；对象上限 20→30（L6 有 27 个对象会被截断）；超时 8s→20s；日志记录 question
+  - `backend/api/router_graph.py`：响应新增 `source` 字段，日志记 question + sparql 前 200 字符
+  - `frontend/app.js` `runNlQuery`：按 `d.source === 'fallback'` 显示兜底提示（移除错误启发式），提示文案说明兜底仅为实例抽样
+  - 文档：`docs/API-INTERFACE-DOC.md` O-05 响应补 `source` 字段说明
+- **验证**：pytest **66/66**（新增 `test_nl_to_sparql.py` 6 例：PREFIX 前导/markdown 围栏容忍、非法拒绝、空 content、LLM 不可达、关键词兜底）；真实链路冒烟"有哪些角色？"→source=llm 4 行、"列出所有流程活动及其主导角色"→source=llm 33 行（activityName+leadingRole 字面量，符合预期）
+- **已知限制**：确定性兜底是模板查询（按关键词命中对象后取前 50 实例），不理解条件语义，属设计降级；app.js 版本号 `?v=20261022e`

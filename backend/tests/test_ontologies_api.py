@@ -104,6 +104,7 @@ def test_nl_query_shape_and_sparql():
     assert "rows" in d
     assert d["count"] == len(d["rows"])
     assert d["sparql"].upper().startswith("SELECT")
+    assert d["source"] in ("llm", "fallback")  # 显式来源标记，前端据此提示兜底
 
 
 def test_nl_query_requires_question():
