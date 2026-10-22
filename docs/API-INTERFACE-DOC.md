@@ -286,13 +286,17 @@
   "auth": { "type": "oauth2_client_credentials", "token_url": "https://.../token",
             "client_id_ref": "${CRM_CLIENT_ID}", "client_secret_ref": "${CRM_CLIENT_SECRET}", "scopes": ["mcp.read","mcp.write"] },
   "tool_allowlist": ["query_account","upsert_contact"],
-  "maps_to_ontology": { "object_type": "Customer", "field_map": { "account_name": "name", "industry": "industry" } },
+  "maps_to_ontology": { "ontology_id": "onto_001", "read_tool": "query_account",
+                        "object_type": "Customer", "field_map": { "account_name": "name", "industry": "industry" } },
   "read_schedule": "manual",
   "created_at": "2026-10-19T10:00:00+08:00",
   "updated_at": "2026-10-19T10:00:00+08:00"
 }
 ```
 > 凭据仅存引用（如 `${CRM_CLIENT_ID}`），**明文不落库、不打印**（见 §8 / VS9）。
+> `connection_id` 可选：缺省自动生成；自定义 ID 一经创建不可更改（PUT 忽略 `connection_id`）。
+> `maps_to_ontology.ontology_id` 为目标本体 ID，`read` 端点必填；`read_tool` 为缺省读取工具名（`read` 未显式传 `tool` 时使用）。
+> 前端入口：MCP 页「外部 MCP 数据源连接（入）」卡片，可完成新建/编辑/测试/读取→候选/删除全流程。
 
 ### 5.2 端点
 | 方法 | 路径 | 说明 |
@@ -478,3 +482,54 @@
 ## 15. 状态与待补
 - VS0–VS8 端点已实现，新增 §12 用户友好建模/逆向生成。VS10 集成测试见 `backend/tests/`。
 - 待增强：Fuseki 远程推理开关、SHACL 在 Jena 侧执行、MCP stdio transport 完整 JSON-RPC、Action 熔断/重试策略细化。
+
+## 16. 项目管理（projects）
+
+### 16.1 项目记录数据结构
+```json
+{
+  "id": "e9a3067a…767f",
+  "name": "L6采购计划",
+  "description": "可选",
+  "status": "active",            // active | archived（历史数据无该字段时按 active 处理）
+  "archive_info": null,          // 归档后为归档元信息，active 时为 null
+  "created_at": "2026-10-01T00:00:00+00:00",
+  "updated_at": "2026-10-01T00:00:00+00:00"
+}
+```
+`archive_info`（仅 status=archived 时有值）：
+```json
+{
+  "path": "…/data/archives/<project_id>.zip",
+  "archived_at": "…",
+  "original_size": 238070,
+  "archive_size": 96213,
+  "ontology_count": 1,
+  "instance_count": 42,
+  "ontology_index": [ { "id": "…", "name": "客户本体", "status": "active", "version": "1", "created_at": "…", "updated_at": "…" } ]
+}
+```
+
+### 16.2 端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/projects` | 新建项目，201；body `{name, description?}` |
+| GET | `/api/projects` | 项目列表（分页）；`?with_stats=true` 见下 |
+| GET | `/api/projects/{project_id}` | 项目详情 |
+| PUT | `/api/projects/{project_id}` | 更新 `name`/`description`（**status 只允许经 archive/restore 变更**） |
+| DELETE | `/api/projects/{project_id}` | 删除项目；级联：MCP 发布态下线（尽力而为）+ 数据目录 + 归档包；`default`/`_shared` 返回 403 |
+| POST | `/api/projects/{project_id}/archive` | **归档**：重数据（本体/实例/候选/动作/TTL 快照）整目录压缩到 `data/archives/<id>.zip`（先写包并校验完整性，再删原目录），meta 仅保留 `status=archived` + `archive_info`（本体索引/计数/大小）；归档前自动下线 MCP；已归档再归档返回 400 |
+| POST | `/api/projects/{project_id}/restore` | **恢复**：解压归档包回 `projects/<id>/`（防 zip-slip 路径校验），删除归档包，`status` 置回 `active`；非归档状态返回 400，归档包缺失返回 404 |
+| POST | `/api/projects/{project_id}/promote-to-shared?ontology_id=` | MVP noop 提示（共享库下版本开放） |
+
+`GET /api/projects?with_stats=true`（首页总览用）：每个 item 额外附带
+```json
+{
+  "stats": { "ontology_count": 1, "instance_count": 42, "data_size": 238070, "size_kind": "dir|archive" },
+  "mcp_published": true
+}
+```
+归档项目的 `stats` 直接读 `archive_info`（`size_kind=archive`，`data_size` 为压缩包大小），不解压。
+
+> 归档语义（用户定义）：只保留索引——项目仍出现在项目列表/首页（名称、ID、本体清单与计数），但本体定义、实例等重数据以压缩方式存放；Jena/Neo4j 远端数据**不在**本次归档范围（避免恢复失败造成不可逆丢失，列入待增强）。

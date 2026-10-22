@@ -17,8 +17,9 @@
     .btn.success { background: #059669; }
     .btn.danger { background: #dc2626; }
     .ok { color: var(--ok); } .bad { color: var(--bad); }
-    .tab { padding: 8px 14px; border-bottom: 2px solid transparent; color: var(--muted); cursor: pointer; }
-    .tab.active { color: var(--text); border-color: var(--accent); }
+    .tab { padding: 8px 14px; margin-bottom: 2px; border-left: 2px solid transparent; color: var(--muted); cursor: pointer; border-radius: 0 6px 6px 0; font-size: 13px; transition: all .15s ease; }
+    .tab:hover { color: var(--text); background: rgba(79,140,255,.06); }
+    .tab.active { color: var(--text); border-left-color: var(--accent); background: rgba(79,140,255,.10); font-weight: 500; }
     pre { background: #0b1222; border: 1px solid var(--border); border-radius: 8px; padding: 10px; overflow: auto; max-height: 320px; font-size: 12px; }
     input, textarea, select { background: #0b1222; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
     label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
@@ -52,24 +53,26 @@
   <header class="panel mx-4 mt-4 px-5 py-3 flex items-center justify-between">
     <div class="flex items-center gap-3">
       <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-bold">O</div>
-      <h1 class="text-base font-semibold">企业业务本体平台 <span class="text-xs text-slate-400 font-normal">MVP</span></h1>
+      <h1 class="text-base font-semibold whitespace-nowrap">企业业务本体平台 <span class="text-xs text-slate-400 font-normal">MVP</span></h1>
     </div>
     <div class="flex items-center gap-3 text-xs">
       <select id="projectSelect" onchange="setProject(this.value)"
         class="bg-[#0f1627] border border-slate-700/60 rounded px-2 py-1 text-xs text-slate-300"></select>
       <select id="namespaceSelect" onchange="setNamespace(this.value)"
         class="bg-[#0f1627] border border-slate-700/60 rounded px-2 py-1 text-xs text-slate-300"></select>
-      <span id="currentProjectLabel" class="text-slate-300 font-medium" title="项目 / 部门空间"></span>
+      <span id="currentProjectLabel" class="text-slate-300 font-medium whitespace-nowrap" title="项目 / 部门空间"></span>
       <span class="w-px h-4 bg-slate-700/60"></span>
       <span id="healthDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
-      <span id="healthText" class="text-slate-400 cursor-pointer hover:text-slate-200" onclick="toggleHealthDetails()">检查中…</span>
+      <span id="healthText" class="text-slate-400 cursor-pointer hover:text-slate-200 whitespace-nowrap" onclick="toggleHealthDetails()">检查中…</span>
       <span id="ver" class="text-slate-500"></span>
     </div>
   </header>
   <div id="healthDetails" class="hidden mx-4 mt-2 px-5 py-3 panel text-xs text-slate-300"></div>
 
-  <nav class="mx-4 mt-3 flex gap-1 border-b border-slate-700/50">
-    <div class="tab active" data-tab="modeling" onclick="switchTab('modeling')">建模</div>
+  <div class="flex-1 flex overflow-hidden">
+  <nav class="w-36 shrink-0 border-r border-slate-700/50 py-3 px-2 overflow-auto">
+    <div class="tab active" data-tab="home" onclick="switchTab('home')">首页</div>
+    <div class="tab" data-tab="modeling" onclick="switchTab('modeling')">建模</div>
     <div class="tab" data-tab="ingest" onclick="switchTab('ingest')">实例导入</div>
     <div class="tab" data-tab="graph" onclick="switchTab('graph')">图谱</div>
     <div class="tab" data-tab="inference" onclick="switchTab('inference')">推理</div>
@@ -80,6 +83,72 @@
   </nav>
 
   <main class="flex-1 p-4 overflow-auto">
+    <!-- 首页：项目总览与项目管理 -->
+    <section id="home" class="tab-content grid grid-cols-12 gap-4">
+      <div class="col-span-12 grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div class="card p-4">
+          <div class="text-xs text-slate-400 mb-1">项目总数</div>
+          <div id="homeStatProjects" class="text-2xl font-semibold">-</div>
+          <div id="homeStatProjectsSub" class="text-xs text-slate-500 mt-1"></div>
+        </div>
+        <div class="card p-4">
+          <div class="text-xs text-slate-400 mb-1">本体总数</div>
+          <div id="homeStatOntologies" class="text-2xl font-semibold">-</div>
+          <div class="text-xs text-slate-500 mt-1">各项目构建的本体模型数量</div>
+        </div>
+        <div class="card p-4">
+          <div class="text-xs text-slate-400 mb-1">实例总数</div>
+          <div id="homeStatInstances" class="text-2xl font-semibold">-</div>
+          <div class="text-xs text-slate-500 mt-1">归化入库后的实例</div>
+        </div>
+        <div class="card p-4">
+          <div class="text-xs text-slate-400 mb-1">MCP 在线项目</div>
+          <div id="homeStatMcp" class="text-2xl font-semibold">-</div>
+          <div class="text-xs text-slate-500 mt-1">已发布本体、端点可用</div>
+        </div>
+      </div>
+      <div class="col-span-12">
+        <div class="card p-4">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="font-medium mb-0">项目管理</h3>
+            <div class="flex items-center gap-2">
+              <select id="projectFilter" class="text-xs" onchange="renderProjects()">
+                <option value="all">全部</option>
+                <option value="active">进行中</option>
+                <option value="archived">已归档</option>
+              </select>
+              <button class="btn" type="button" onclick="toggleProjectForm()">＋ 新建项目</button>
+            </div>
+          </div>
+          <div id="projectForm" class="hidden mb-3 p-3 rounded-lg border border-slate-700/60 bg-slate-900/40 grid grid-cols-12 gap-2">
+            <input id="newProjectName" class="col-span-4" placeholder="项目名称（必填）" />
+            <input id="newProjectDesc" class="col-span-6" placeholder="项目描述（可选）" />
+            <div class="col-span-2 flex gap-2">
+              <button class="btn flex-1" type="button" onclick="submitNewProject()">创建</button>
+              <button class="btn secondary flex-1" type="button" onclick="toggleProjectForm(false)">取消</button>
+            </div>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="text-slate-400 text-xs">
+                  <th class="p-1 text-left">名称</th>
+                  <th class="p-1 text-left">项目ID</th>
+                  <th class="p-1 text-left">状态</th>
+                  <th class="p-1 text-left">本体数</th>
+                  <th class="p-1 text-left">实例数</th>
+                  <th class="p-1 text-left">MCP</th>
+                  <th class="p-1 text-left">数据量</th>
+                  <th class="p-1 text-left">创建时间</th>
+                  <th class="p-1 text-left">操作</th>
+                </tr>
+              </thead>
+              <tbody id="projectTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
     <!-- 建模页 -->
     <section id="modeling" class="tab-content grid grid-cols-12 gap-4">
       <div class="col-span-12 lg:col-span-4 flex flex-col gap-4">
@@ -419,6 +488,34 @@
           </div>
         </div>
       </div>
+      <div class="col-span-12">
+        <div class="card p-4">
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <h3 class="font-medium mb-1">外部 MCP 数据源连接（入）</h3>
+              <div class="text-xs text-slate-500">对接业务系统的 MCP Server：调用其工具 → 按字段映射生成候选实例 → 到「实例导入」审批后入库。凭据只存环境变量引用（如 ${CRM_TOKEN}），不落明文。</div>
+            </div>
+            <button class="btn" type="button" onclick="openConnEditor()">＋ 新建连接</button>
+          </div>
+          <div id="connEditor" class="hidden mb-3 p-3 rounded-lg border border-slate-700/60 bg-slate-900/40"></div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs border-collapse">
+              <thead>
+                <tr class="text-slate-400">
+                  <th class="border-b border-slate-700 p-1 text-left">名称</th>
+                  <th class="border-b border-slate-700 p-1 text-left">传输</th>
+                  <th class="border-b border-slate-700 p-1 text-left">端点</th>
+                  <th class="border-b border-slate-700 p-1 text-left">鉴权</th>
+                  <th class="border-b border-slate-700 p-1 text-left">映射到本体</th>
+                  <th class="border-b border-slate-700 p-1 text-left">工具白名单</th>
+                  <th class="border-b border-slate-700 p-1 text-left w-72">操作</th>
+                </tr>
+              </thead>
+              <tbody id="connTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
       <div class="col-span-12 lg:col-span-6">
         <div class="card p-4">
           <h3 class="font-medium mb-3">工具清单</h3>
@@ -627,7 +724,8 @@
       </div>
     </section>
   </main>
+  </div>
 
-  <script src="app.js?v=20261021c"></script>
+  <script src="app.js?v=20261022a"></script>
 </body>
 </html>

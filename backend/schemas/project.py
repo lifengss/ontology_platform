@@ -10,6 +10,8 @@ class Project(BaseModel):
     id: Optional[str] = None
     name: str
     description: Optional[str] = None
+    status: str = "active"  # active | archived（归档：仅保留索引，重数据压缩存放）
+    archive_info: Optional[dict] = None  # 归档元信息（路径/大小/本体索引/计数）
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 

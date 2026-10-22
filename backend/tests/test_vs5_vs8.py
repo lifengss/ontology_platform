@@ -52,7 +52,7 @@ def test_mcp_connection_crud_and_test():
         "endpoint": "http://localhost:9999/read",
         "auth": {"type": "api_key", "api_key_ref": "TEST_KEY"},
         "tool_allowlist": ["read"],
-        "maps_to_ontology": {"ontology_id": oid, "object_type": "obj_account", "field_map": {"account_name": "attr_aname"}},
+        "maps_to_ontology": {"ontology_id": oid, "object_type": "obj_account", "field_map": {"account_name": "attr_aname"}, "read_tool": "read"},
     }
     r = c.post("/api/mcp/connections", json=body)
     assert r.status_code == 201
@@ -62,6 +62,12 @@ def test_mcp_connection_crud_and_test():
     r2 = c.get(f"/api/mcp/connections/{cid}")
     assert r2.status_code == 200
     assert r2.json()["data"]["display_name"] == "测试 CRM"
+    # 回归：pydantic extra 默认丢弃未声明字段，曾导致 ontology_id/read_tool 静默丢失、read 端点恒 422
+    m = r2.json()["data"]["maps_to_ontology"]
+    assert m["ontology_id"] == oid
+    assert m["object_type"] == "obj_account"
+    assert m["field_map"] == {"account_name": "attr_aname"}
+    assert m["read_tool"] == "read"
 
     r3 = c.post(f"/api/mcp/connections/{cid}/test")
     assert r3.status_code == 200

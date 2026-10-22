@@ -179,7 +179,8 @@ function toggleHealthDetails() {
 async function loadProjects() {
   try {
     const j = await api('/api/projects?page=1&pageSize=100', { namespace: null });
-    state.projects = j.data.items || [];
+    // 归档项目不进顶部选择器（首页管理区可恢复/删除）
+    state.projects = (j.data.items || []).filter(p => (p.status || 'active') !== 'archived');
     const savedId = localStorage.getItem('op_currentProject');
     if (!state.currentProject && state.projects.length) {
       state.currentProject = state.projects.find(p => p.id === savedId) || state.projects[0];
@@ -299,6 +300,400 @@ async function createProject(name) {
   } catch (e) { if (!name) toast('创建项目失败: ' + e.message, 'err'); throw e; }
 }
 
+// ---- 首页：项目总览与项目管理 ----
+let homeProjects = [];
+
+function escAttr(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+function fmtSize(n) {
+  if (n == null) return '-';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+async function loadHome() {
+  try {
+    const j = await api('/api/projects?with_stats=true&pageSize=100', { projectId: null, namespace: null });
+    homeProjects = j.data.items || [];
+    renderHomeStats();
+    renderProjects();
+  } catch (e) { toast('加载项目列表失败: ' + e.message, 'err'); }
+}
+
+function renderHomeStats() {
+  const active = homeProjects.filter(p => (p.status || 'active') !== 'archived');
+  const archived = homeProjects.length - active.length;
+  $('homeStatProjects').textContent = homeProjects.length;
+  $('homeStatProjectsSub').textContent = active.length + ' 进行中 · ' + archived + ' 已归档';
+  $('homeStatOntologies').textContent = homeProjects.reduce((s, p) => s + ((p.stats && p.stats.ontology_count) || 0), 0);
+  $('homeStatInstances').textContent = homeProjects.reduce((s, p) => s + ((p.stats && p.stats.instance_count) || 0), 0);
+  $('homeStatMcp').textContent = homeProjects.filter(p => p.mcp_published).length;
+}
+
+function renderProjects() {
+  const filter = $('projectFilter') ? $('projectFilter').value : 'all';
+  const items = homeProjects.filter(p => {
+    const st = p.status || 'active';
+    if (filter === 'active') return st !== 'archived';
+    if (filter === 'archived') return st === 'archived';
+    return true;
+  });
+  const tb = $('projectTableBody');
+  if (!tb) return;
+  if (!items.length) { tb.innerHTML = '<tr><td colspan="9" class="p-3 text-center text-slate-500">暂无项目</td></tr>'; return; }
+  tb.innerHTML = items.map(p => {
+    const st = p.status || 'active';
+    const archived = st === 'archived';
+    const stats = p.stats || {};
+    const badge = archived ? '<span class="badge draft">已归档</span>' : '<span class="badge active">进行中</span>';
+    const isDefault = p.id === 'default' || p.id === '_shared';
+    const acts = ['<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="enterProject(\'' + p.id + '\')">进入</button>'];
+    if (!isDefault) {
+      if (archived) acts.push('<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="restoreProject(\'' + p.id + '\', \'' + escAttr(p.name) + '\')">恢复</button>');
+      else acts.push('<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="archiveProject(\'' + p.id + '\', \'' + escAttr(p.name) + '\')">归档</button>');
+      acts.push('<button class="btn danger" style="padding:2px 8px;font-size:12px" onclick="deleteProjectRow(\'' + p.id + '\', \'' + escAttr(p.name) + '\')">删除</button>');
+    }
+    return '<tr class="border-b border-slate-700/40 hover:bg-slate-800/30">' +
+      '<td class="p-2">' + esc(p.name) + (p.description ? '<div class="text-xs text-slate-500">' + esc(p.description) + '</div>' : '') + '</td>' +
+      '<td class="p-2 font-mono text-xs text-slate-500 whitespace-nowrap">' + esc(p.id.slice(0, 8)) + '…' + copyIcon(p.id, '项目ID') + '</td>' +
+      '<td class="p-2">' + badge + '</td>' +
+      '<td class="p-2">' + (stats.ontology_count != null ? stats.ontology_count : '-') + '</td>' +
+      '<td class="p-2">' + (stats.instance_count != null ? stats.instance_count : '-') + '</td>' +
+      '<td class="p-2">' + (p.mcp_published ? '<span class="text-emerald-400">● 在线</span>' : '<span class="text-slate-500">未发布</span>') + '</td>' +
+      '<td class="p-2 text-xs text-slate-400">' + fmtSize(stats.data_size) + (stats.size_kind === 'archive' ? '（压缩）' : '') + '</td>' +
+      '<td class="p-2 text-xs text-slate-400 whitespace-nowrap">' + (p.created_at ? new Date(p.created_at).toLocaleDateString() : '-') + '</td>' +
+      '<td class="p-2 whitespace-nowrap">' + acts.join(' ') + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+function toggleProjectForm(show) {
+  const box = $('projectForm');
+  const willShow = show != null ? show : box.classList.contains('hidden');
+  box.classList.toggle('hidden', !willShow);
+  if (willShow) $('newProjectName').focus();
+}
+
+async function submitNewProject() {
+  const name = $('newProjectName').value.trim();
+  if (!name) { toast('项目名称不能为空', 'err'); return; }
+  const desc = $('newProjectDesc').value.trim();
+  try {
+    const j = await api('/api/projects', { method: 'POST', body: JSON.stringify({ name, description: desc }), projectId: null, namespace: null });
+    $('newProjectName').value = '';
+    $('newProjectDesc').value = '';
+    toggleProjectForm(false);
+    toast('项目「' + name + '」已创建', 'ok');
+    await loadProjects();
+    await setProject(j.data.id);
+    await loadHome();
+  } catch (e) { toast('创建失败: ' + e.message, 'err'); }
+}
+
+async function enterProject(id) {
+  const p = homeProjects.find(x => x.id === id);
+  if (!p) return;
+  if ((p.status || 'active') === 'archived') { toast('该项目已归档，请先「恢复」后再进入', 'err'); return; }
+  if (!state.projects.some(x => x.id === id)) await loadProjects();
+  if (!state.projects.some(x => x.id === id)) { toast('项目不在进行中列表中', 'err'); return; }
+  await setProject(id);
+  switchTab('modeling');
+}
+
+async function archiveProject(id, name) {
+  const ok = confirm('归档项目「' + name + '」？\n\n归档后：\n· 项目只保留索引（本体清单与计数），仍显示在首页\n· 本体定义、实例等重数据压缩为归档包，释放磁盘空间\n· 从顶部项目选择器移除，MCP 发布状态自动下线\n\n可随时「恢复」，数据完整还原。');
+  if (!ok) return;
+  try {
+    const j = await api('/api/projects/' + id + '/archive', { method: 'POST', body: '{}', projectId: null, namespace: null });
+    const info = (j.data && j.data.archive_info) || {};
+    let msg = '项目已归档';
+    if (info.original_size) {
+      const saved = Math.max(0, Math.round(100 - info.archive_size / info.original_size * 100));
+      msg += '：' + fmtSize(info.original_size) + ' → ' + fmtSize(info.archive_size) + '（节省约 ' + saved + '% 空间）';
+    }
+    toast(msg, 'ok', 6000);
+    await afterProjectStateChange();
+  } catch (e) { toast('归档失败: ' + e.message, 'err'); }
+}
+
+async function restoreProject(id, name) {
+  try {
+    await api('/api/projects/' + id + '/restore', { method: 'POST', body: '{}', projectId: null, namespace: null });
+    toast('项目「' + name + '」已恢复', 'ok');
+    await afterProjectStateChange();
+  } catch (e) { toast('恢复失败: ' + e.message, 'err'); }
+}
+
+async function deleteProjectRow(id, name) {
+  const ok = confirm('删除项目「' + name + '」？\n\n此操作不可恢复，将级联清理：\n· 该项目全部本体模型、实例、候选、动作记录\n· MCP 发布状态（自动下线）\n· 压缩归档包（若已归档）\n\n如只想释放空间，建议「归档」而非「删除」。');
+  if (!ok) return;
+  try {
+    await api('/api/projects/' + id, { method: 'DELETE', projectId: null, namespace: null });
+    toast('项目已删除', 'ok');
+    await afterProjectStateChange();
+  } catch (e) { toast('删除失败: ' + e.message, 'err'); }
+}
+
+// 项目状态变化（新建/归档/恢复/删除）后的统一刷新：
+// 首页重渲染；若当前项目已不可用则自动切到第一个进行中项目
+async function afterProjectStateChange() {
+  await loadHome();
+  const curId = state.currentProject ? state.currentProject.id : localStorage.getItem('op_currentProject');
+  const cur = homeProjects.find(p => p.id === curId);
+  if (!cur || (cur.status || 'active') === 'archived') {
+    const first = homeProjects.find(p => (p.status || 'active') !== 'archived');
+    if (first) {
+      await loadProjects();
+      await setProject(first.id);
+      return;
+    }
+    state.currentProject = null;
+    localStorage.removeItem('op_currentProject');
+    renderProjectSelector();
+    return;
+  }
+  await loadProjects();
+}
+
+// ---- 外部 MCP 数据源连接（入）：对接业务系统 MCP Server ----
+let connList = [];
+let connEditId = null;      // null = 新建
+let connEditAuth = { type: 'none' };
+let connEditMaps = {};
+
+async function loadConnections() {
+  try {
+    const j = await api('/api/mcp/connections');
+    connList = j.data.items || [];
+    renderConnections();
+  } catch (e) { console.warn('loadConnections', e); }
+}
+
+function renderConnections() {
+  const tb = $('connTableBody');
+  if (!tb) return;
+  if (!connList.length) {
+    tb.innerHTML = '<tr><td colspan="7" class="p-3 text-center text-slate-500">暂无连接。点右上「＋ 新建连接」配置业务系统 MCP Server。</td></tr>';
+    return;
+  }
+  tb.innerHTML = connList.map(c => {
+    const maps = c.maps_to_ontology || {};
+    const auth = c.auth || {};
+    let authLabel = auth.type === 'none' ? '无' : esc(auth.type);
+    const ref = auth.bearer_token_ref || auth.api_key_ref || auth.client_id_ref;
+    if (auth.type !== 'none' && ref) authLabel += ' · ' + esc(ref);
+    const allow = (c.tool_allowlist || []).join(', ');
+    return '<tr class="border-b border-slate-700/40 hover:bg-slate-800/30 align-top">' +
+      '<td class="p-1.5">' + esc(c.display_name) + '<div class="text-slate-500 font-mono text-[11px]">' + esc((c.connection_id || '').slice(0, 14)) + '</div></td>' +
+      '<td class="p-1.5 text-xs whitespace-nowrap">' + esc(c.transport) + '</td>' +
+      '<td class="p-1.5 font-mono text-xs text-slate-400 break-all max-w-[220px]">' + esc(c.endpoint || '-') + '</td>' +
+      '<td class="p-1.5 text-xs">' + authLabel + '</td>' +
+      '<td class="p-1.5 text-xs">' + esc(maps.ontology_id || '-') + (maps.object_type ? '<div class="text-slate-500">' + esc(maps.object_type) + ' · ' + Object.keys(maps.field_map || {}).length + ' 字段映射</div>' : '') + '</td>' +
+      '<td class="p-1.5 font-mono text-xs text-slate-400">' + esc(allow || '（全部）') + '</td>' +
+      '<td class="p-1.5 whitespace-nowrap">' +
+        '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="testConnection(\'' + c.connection_id + '\')">测试</button> ' +
+        '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="readConnection(\'' + c.connection_id + '\')">读取→候选</button> ' +
+        '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="openConnEditor(\'' + c.connection_id + '\')">编辑</button> ' +
+        '<button class="btn danger" style="padding:2px 8px;font-size:12px" onclick="deleteConnection(\'' + c.connection_id + '\')">删除</button>' +
+      '</td></tr>';
+  }).join('');
+}
+
+async function openConnEditor(id) {
+  connEditId = id || null;
+  const box = $('connEditor');
+  box.classList.remove('hidden');
+  box.innerHTML = '<div class="text-xs text-slate-500">加载本体选项…</div>';
+  try { await loadOntologies(); } catch (e) { console.warn(e); }
+  const c = connList.find(x => x.connection_id === id) || null;
+  connEditAuth = (c && c.auth) ? { type: 'none', ...c.auth } : { type: 'none' };
+  connEditMaps = (c && c.maps_to_ontology) || {};
+  const transport = (c && c.transport) || 'streamable_http';
+  box.innerHTML =
+    '<div class="grid grid-cols-12 gap-2 text-sm">' +
+      '<div class="col-span-4"><label class="text-xs text-slate-400">名称 *</label><input id="connName" class="w-full" value="' + esc((c && c.display_name) || '') + '" placeholder="如：CRM 系统"></div>' +
+      '<div class="col-span-3"><label class="text-xs text-slate-400">传输方式</label><select id="connTransport" class="w-full">' +
+        '<option value="streamable_http"' + (transport === 'streamable_http' ? ' selected' : '') + '>streamable_http</option>' +
+        '<option value="stdio"' + (transport === 'stdio' ? ' selected' : '') + '>stdio（MVP 仅测可达性，读取未实现）</option>' +
+      '</select></div>' +
+      '<div class="col-span-5"><label class="text-xs text-slate-400">端点</label><input id="connEndpoint" class="w-full font-mono text-xs" value="' + esc((c && c.endpoint) || '') + '" placeholder="http://业务系统:端口/mcp 或 stdio 启动命令"></div>' +
+      '<div class="col-span-3"><label class="text-xs text-slate-400">鉴权类型</label><select id="connAuthType" class="w-full" onchange="renderConnAuthFields()">' +
+        ['none', 'bearer_token', 'api_key', 'oauth2_client_credentials'].map(t => '<option value="' + t + '"' + (connEditAuth.type === t ? ' selected' : '') + '>' + t + '</option>').join('') +
+      '</select></div>' +
+      '<div id="connAuthFields" class="col-span-9 grid grid-cols-2 gap-2"></div>' +
+      '<div class="col-span-4"><label class="text-xs text-slate-400">目标本体 *</label><select id="connOntologyId" class="w-full" onchange="renderConnObjectOptions()">' +
+        '<option value="">-- 选择 --</option>' + (state.ontologies || []).map(o => '<option value="' + o.id + '"' + (connEditMaps.ontology_id === o.id ? ' selected' : '') + '>' + esc(o.name) + '</option>').join('') +
+      '</select></div>' +
+      '<div class="col-span-4"><label class="text-xs text-slate-400">对象类型 *</label><select id="connObjectType" class="w-full" onchange="renderConnAttrOptions()"></select></div>' +
+      '<div class="col-span-4"><label class="text-xs text-slate-400">缺省读取工具</label><input id="connReadTool" class="w-full" value="' + esc(connEditMaps.read_tool || '') + '" placeholder="如 query_accounts；「读取→候选」未显式指定工具时用此值"></div>' +
+      '<div class="col-span-12" id="connFieldMapBox"></div>' +
+      '<div class="col-span-6"><label class="text-xs text-slate-400">工具白名单（逗号分隔；留空=该连接工具全部可用）</label><input id="connAllowlist" class="w-full" value="' + esc(((c && c.tool_allowlist) || []).join(', ')) + '" placeholder="query_accounts, query_orders"></div>' +
+      '<div class="col-span-6 flex items-end gap-2">' +
+        '<button class="btn" type="button" onclick="saveConnection()">保存</button>' +
+        '<button class="btn secondary" type="button" onclick="closeConnEditor()">取消</button>' +
+      '</div>' +
+    '</div>';
+  renderConnAuthFields();
+  renderConnObjectOptions();
+}
+
+function closeConnEditor() {
+  connEditId = null;
+  $('connEditor').classList.add('hidden');
+  $('connEditor').innerHTML = '';
+}
+
+function connAuthRef(name) { return (connEditAuth && connEditAuth[name]) || ''; }
+
+function renderConnAuthFields() {
+  const t = $('connAuthType').value;
+  const box = $('connAuthFields');
+  if (!box) return;
+  const inp = (id, label, val, ph) =>
+    '<div><label class="text-xs text-slate-400">' + label + '</label><input id="' + id + '" class="w-full font-mono text-xs" value="' + esc(val) + '" placeholder="' + (ph || '') + '"></div>';
+  if (t === 'none') { box.innerHTML = '<div class="col-span-2 text-xs text-slate-500 self-end pb-2">无需鉴权。</div>'; return; }
+  if (t === 'bearer_token') { box.innerHTML = inp('connBearerRef', 'Bearer Token 环境变量引用', connAuthRef('bearer_token_ref'), '${CRM_TOKEN}（只存引用，不落明文）'); return; }
+  if (t === 'api_key') { box.innerHTML = inp('connApiKeyRef', 'API Key 环境变量引用', connAuthRef('api_key_ref'), '${CRM_API_KEY}'); return; }
+  box.innerHTML = inp('connTokenUrl', 'token_url', connAuthRef('token_url'), 'https://auth.example.com/oauth/token') +
+    inp('connClientIdRef', 'client_id 环境变量引用', connAuthRef('client_id_ref'), '${CRM_CLIENT_ID}') +
+    inp('connClientSecretRef', 'client_secret 环境变量引用', connAuthRef('client_secret_ref'), '${CRM_CLIENT_SECRET}') +
+    inp('connScopes', 'scopes（逗号分隔）', (connEditAuth.scopes || []).join(', '), 'openid profile');
+}
+
+function _connCurrentObject() {
+  const ontId = $('connOntologyId') ? $('connOntologyId').value : '';
+  const ont = (state.ontologies || []).find(o => o.id === ontId);
+  const objId = $('connObjectType') ? $('connObjectType').value : '';
+  return { ont, obj: (ont && (ont.objects || []).find(o => o.id === objId)) || null };
+}
+
+function renderConnObjectOptions() {
+  const sel = $('connObjectType');
+  if (!sel) return;
+  const { ont } = _connCurrentObject();
+  const prev = sel.value;
+  if (!ont) { sel.innerHTML = '<option value="">-- 先选本体 --</option>'; renderConnAttrOptions(); return; }
+  sel.innerHTML = (ont.objects || []).map(o => '<option value="' + o.id + '">' + esc(o.name) + ' (' + o.id + ')</option>').join('');
+  if ((ont.objects || []).some(o => o.id === prev)) sel.value = prev;
+  renderConnAttrOptions();
+}
+
+function connFmRowHtml(ext, attrId) {
+  const { obj } = _connCurrentObject();
+  const opts = (obj && (obj.attributes || []).map(x => '<option value="' + x.id + '"' + (x.id === attrId ? ' selected' : '') + '>' + esc(x.name) + ' (' + x.id + ')</option>').join('')) || '';
+  return '<div class="connFmRow flex gap-1 items-center max-w-2xl">' +
+    '<input class="connFmK flex-1 font-mono text-xs" placeholder="外部字段名" value="' + esc(ext) + '">' +
+    '<span class="text-slate-500 text-xs">→</span>' +
+    '<select class="connFmV flex-1 text-xs"><option value="">-- 不映射 --</option>' + opts + '</select></div>';
+}
+
+function renderConnAttrOptions() {
+  const box = $('connFieldMapBox');
+  if (!box) return;
+  const { obj } = _connCurrentObject();
+  if (!obj || !(obj.attributes || []).length) {
+    box.innerHTML = '<div class="text-xs text-slate-500">选择对象类型后可配置字段映射（外部字段 → 本体属性）。</div>';
+    return;
+  }
+  const existing = connEditMaps.field_map || {};
+  const rows = (obj.attributes || []).map(a => {
+    const ext = Object.keys(existing).find(k => existing[k] === a.id) || '';
+    return connFmRowHtml(ext, a.id);
+  }).join('');
+  box.innerHTML = '<label class="text-xs text-slate-400">字段映射（外部字段 → 本体属性；外部字段名留空=忽略该行）</label>' +
+    '<div id="connFmRows" class="flex flex-col gap-1 mt-1">' + rows + '</div>' +
+    '<button class="btn secondary mt-2" type="button" style="font-size:12px;padding:2px 10px" onclick="addConnFmRow()">＋ 添加映射行</button>';
+}
+
+function addConnFmRow() {
+  const rows = $('connFmRows');
+  if (!rows) return;
+  const div = document.createElement('div');
+  div.innerHTML = connFmRowHtml('', '');
+  rows.appendChild(div.firstElementChild);
+}
+
+async function saveConnection() {
+  const name = $('connName').value.trim();
+  if (!name) { toast('连接名称不能为空', 'err'); return; }
+  const ontId = $('connOntologyId').value;
+  const objId = $('connObjectType').value;
+  if (!ontId) { toast('请选择目标本体', 'err'); return; }
+  if (!objId) { toast('请选择对象类型', 'err'); return; }
+  const fieldMap = {};
+  document.querySelectorAll('#connFmRows .connFmRow').forEach(row => {
+    const k = row.querySelector('.connFmK').value.trim();
+    const v = row.querySelector('.connFmV').value;
+    if (k && v) fieldMap[k] = v;
+  });
+  const t = $('connAuthType').value;
+  const auth = { type: t };
+  if (t === 'bearer_token') auth.bearer_token_ref = $('connBearerRef').value.trim() || null;
+  if (t === 'api_key') auth.api_key_ref = $('connApiKeyRef').value.trim() || null;
+  if (t === 'oauth2_client_credentials') {
+    auth.token_url = $('connTokenUrl').value.trim() || null;
+    auth.client_id_ref = $('connClientIdRef').value.trim() || null;
+    auth.client_secret_ref = $('connClientSecretRef').value.trim() || null;
+    auth.scopes = $('connScopes').value.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  const body = {
+    display_name: name,
+    transport: $('connTransport').value,
+    endpoint: $('connEndpoint').value.trim() || null,
+    auth,
+    tool_allowlist: $('connAllowlist').value.split(',').map(s => s.trim()).filter(Boolean),
+    maps_to_ontology: {
+      ontology_id: ontId,
+      read_tool: $('connReadTool').value.trim() || null,
+      object_type: objId,
+      field_map: fieldMap,
+    },
+    read_schedule: 'manual',
+  };
+  try {
+    if (connEditId) {
+      await api('/api/mcp/connections/' + connEditId, { method: 'PUT', body: JSON.stringify(body) });
+    } else {
+      await api('/api/mcp/connections', { method: 'POST', body: JSON.stringify(body) });
+    }
+    closeConnEditor();
+    toast(connEditId ? '连接已更新' : '连接已创建', 'ok');
+    await loadConnections();
+  } catch (e) { toast('保存失败: ' + e.message, 'err'); }
+}
+
+async function testConnection(id) {
+  toast('测试连通性与鉴权…', 'info');
+  try {
+    const j = await api('/api/mcp/connections/' + id + '/test', { method: 'POST', body: '{}' });
+    const r = j.data || {};
+    if (r.reachable && r.auth_ok) toast('连接成功：鉴权通过' + (r.latency_ms != null ? '（' + r.latency_ms + 'ms）' : ''), 'ok', 5000);
+    else if (r.reachable) toast('网络可达但鉴权失败：' + (r.error || ''), 'err', 6000);
+    else toast('连接失败：' + (r.error || '不可达'), 'err', 6000);
+  } catch (e) { toast('测试失败: ' + e.message, 'err'); }
+}
+
+async function readConnection(id) {
+  const ok = confirm('从该连接读取数据并生成候选实例？\n\n读取结果进入「实例导入」的待审列表，需人工审批后才真正入库。');
+  if (!ok) return;
+  try {
+    const j = await api('/api/mcp/connections/' + id + '/read', { method: 'POST', body: '{}' });
+    const d = j.data || {};
+    if (d.candidate_id) toast('已生成候选实例（覆盖 ' + d.record_count + ' 条记录），请到「实例导入」审批', 'ok', 6000);
+    else toast(d.message || '读取完成（无记录）', 'info', 5000);
+  } catch (e) { toast('读取失败: ' + e.message, 'err', 6000); }
+}
+
+async function deleteConnection(id) {
+  if (!confirm('删除该连接？删除后不影响已入库的候选/实例。')) return;
+  try {
+    await api('/api/mcp/connections/' + id, { method: 'DELETE' });
+    toast('连接已删除', 'ok');
+    await loadConnections();
+  } catch (e) { toast('删除失败: ' + e.message, 'err'); }
+}
+
 let _lastTab = '';
 
 function switchTab(name) {
@@ -306,6 +701,8 @@ function switchTab(name) {
   document.querySelectorAll('.tab-content').forEach(s => s.classList.add('hidden'));
   $(name).classList.remove('hidden');
   clientLog('info', 'switch tab', { tab: name });
+  if (name === 'home') loadHome();
+  if (name === 'mcp') { loadConnections(); }
   if (name === 'modeling') loadOntologies();
   if (name === 'ingest') {
     const fromGraph = _lastTab === 'graph';
@@ -2901,6 +3298,6 @@ window.addEventListener('unhandledrejection', e => {
     try { await createProject('默认项目'); } catch (e) { /* ignore */ }
     await loadProjects();
   }
-  switchTab('modeling');
+  switchTab('home');
   setInterval(checkHealth, 10000);
 })();

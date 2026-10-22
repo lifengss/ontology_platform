@@ -17,6 +17,8 @@ class ConnectionAuth(BaseModel):
 
 
 class MapsToOntology(BaseModel):
+    ontology_id: Optional[str] = None   # 目标本体 ID（read 端点必填）
+    read_tool: Optional[str] = None     # 缺省读取工具名（read 端点未显式传 tool 时使用）
     object_type: str
     field_map: dict[str, str] = Field(default_factory=dict)
 
@@ -35,6 +37,7 @@ class ConnectionConfig(BaseModel):
 
 
 class ConnectionCreate(BaseModel):
+    connection_id: Optional[str] = None  # 可选自定义 ID；缺省自动生成
     display_name: str
     transport: str
     endpoint: Optional[str] = None
