@@ -13,14 +13,14 @@ from __future__ import annotations
 import os
 import urllib.request
 
-from rdflib import Graph, Literal, RDF, RDFS, URIRef, XSD
+from rdflib import Graph, Literal, RDF, RDFS, URIRef
 
 from config import get_settings
 from core.instance_store import JsonlInstanceStore
 from core.storage import JsonStore
 from jena_adapter.client import FILE_MODE, REMOTE_MODE, _is_reachable
 from logging_setup import get_logger
-from modeling_translator import attr_uri, class_uri, rel_uri, translate_to_turtle
+from modeling_translator import attr_uri, class_uri, rel_uri, translate_to_turtle, typed_literal
 
 logger = get_logger("jena_adapter.rdf_sync")
 
@@ -33,26 +33,6 @@ _RESERVED_KEYS = {"id", "_source"}
 def graph_uri_for(ontology_id: str) -> str:
     """本体在 Fuseki 中的命名图标识。"""
     return f"urn:ontology:{ontology_id}"
-
-
-def _typed_literal(value, data_type: str):
-    """按声明的数据类型生成带 xsd 类型的字面量；未知类型/转换失败回退字符串字面量。"""
-    try:
-        if data_type == "integer":
-            return Literal(int(float(str(value))))
-        if data_type == "float":
-            return Literal(float(value))
-        if data_type == "boolean":
-            if isinstance(value, str):
-                return Literal(value.strip().lower() in ("1", "true", "yes", "是"))
-            return Literal(bool(value))
-        if data_type == "date":
-            return Literal(str(value), datatype=XSD.date)
-        if data_type == "datetime":
-            return Literal(str(value), datatype=XSD.dateTime)
-    except (TypeError, ValueError):
-        pass
-    return Literal(str(value))
 
 
 def build_instance_triples(ontology: dict, instances: list[dict]) -> Graph:
@@ -95,7 +75,7 @@ def build_instance_triples(ontology: dict, instances: list[dict]) -> Graph:
             if k in _RESERVED_KEYS or v is None:
                 continue
             if k in attr_ids:
-                g.add((s, URIRef(attr_uri(k)), _typed_literal(v, attr_ids[k].get("data_type", "string"))))
+                g.add((s, URIRef(attr_uri(k)), typed_literal(v, attr_ids[k].get("data_type", "string"))))
             elif k in rel_ids:
                 target_obj = rel_ids[k].get("target_object")
                 resolved = key_index.get((target_obj, str(v))) if target_obj else None

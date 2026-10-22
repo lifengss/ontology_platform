@@ -356,3 +356,20 @@
 - **前端**：`loadInference` 以 `*_zh` 为主展示（规则名/依据/推断三段），原始 OWL2-RL 形式收进 `<details>查看原始规则` 折叠块供技术排查；app.js 版本号 `?v=20261022f`
 - **验证**：pytest **67/67**（test_vs2 扩展 zh 文案断言 + 新增中文名不泄漏裸 ID 用例，test_vs4 端点用例断言每步骤含 zh 字段）；运行中服务 L6 本体 12 步推理全为中文（对象归属的传递 1 / 属性适用范围继承 7 / 属性取值对象继承 4）；Playwright 实测 12 卡片渲染 + 折叠展开正常、0 JS 报错
 - **文档**：`docs/API-INTERFACE-DOC.md` §4 推理响应示例补 `*_zh` 字段说明
+
+---
+
+## 18. 2026-10-22：VS10 P0 集成验收（全链路无断点）
+
+- **目标**：串联 建模→SHACL 校验→发布 MCP Server→外部 Agent 经 MCP 查询→连接外部 MCP 读取→人工审核归化入库→定义 Action 并 dry-run/确认回写/幂等防重，对应 PRD §9.1 四条 P0 验收项。
+- **交付**：
+  - 新增 `backend/tests/test_vs10_e2e.py`（单独立项 `vs10-e2e` 串联 5 测试）+ `backend/tests/mock_mcp_http.py`（可计数 read/write 端点）；
+  - 测试基建：同进程真实 uvicorn（随机空闲端口）+ **真实 MCP SDK SSE 客户端**（`mcp.client.sse.sse_client`+`ClientSession`）——既有 REST 单测覆盖不到的传输层断链由此暴露。
+- **发现并修复的 3 处断链**（真实 SSE 客户端才暴露）：
+  1. **MCP SSE 连接即 500**：`mcp_server` 的 `handle_sse/handle_messages` 取 `request.send`，而 Starlette `Request` 无公开 `.send` → 新增 `_asgi_send(request)`（优先 `scope["asgi"]["send"]`，兜底 `request._send`）；`JSONResponse` 误从 `fastapi` 导入 → 改 `fastapi.responses`。
+  2. **float 字段 SHACL 误杀**：pyshacl 在 `inference="none"` 下把整数形态 float 词法（`'-5'`/`'88'` 无小数点）判为非法 `xsd:float` → 合法样本被误拒、违规样本多报一条 datatype 违和。对照实验定位：同数据/shape 仅 `inference` 参数不同结果即不同。修复：`modeling_translator` 新增权威 `typed_literal()`（float 转 Python float 保证词法含小数点），`build_instance_graph`（校验）与 `jena_adapter/rdf_sync`（物化）共用，消除两路径逻辑分叉（根因即二者曾分叉）。
+  3. 校验/物化字面量构造统一到单一数据源，杜绝再次分叉。
+- **验证**：e2e **5/5**（test_01 建模+SHACL 门控 / test_02 发布 MCP+真实 SSE 查询 / test_03 外部 MCP 读取+审核卡点+落库 / test_04 Action dry-run+确认回写+幂等防重 / test_05 取消发布）；全量 **pytest 72/72**；运行中 8000 实例 live 冒烟全过（`amount=88→valid=True` 修复生效、`amount=-5→valid=False path=amount`、真实 SSE 查询 4 工具齐全）。
+- **PRD §9.1 结论**：四条 P0 验收项全部满足（4 种建模方式均有测试覆盖 + MCP 发布后外部 Agent SSE 查询成功；LLM/外部读取必经人工审核、未审核不落库；http 外部 MCP 连通读取归化入库 source_type=external_mcp；Action 人工确认 + 幂等防重 + 执行日志）。
+- **文档**：新增 `docs/VS10-集成验收报告.md`；`README.md`（VS10 状态 ✅ + 新增运维附录：端口/环境变量/健康降级语义/数据与备份/故障排查）、`docs/系统架构说明.md` §12、`docs/API-INTERFACE-DOC.md` §15 状态同步。
+- **遗留（不阻断 MVP）**：Fuseki 远程推理开关、SHACL 在 Jena 侧执行、MCP stdio 完整 JSON-RPC、Action 熔断/重试细化。

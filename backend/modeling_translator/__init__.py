@@ -40,6 +40,34 @@ def _xsd_for(data_type: str) -> URIRef:
     return XSD_MAP.get(data_type, XSD.string)
 
 
+def typed_literal(value, data_type: str) -> Literal:
+    """按声明 data_type 生成带 xsd 类型的字面量（校验/物化共用，单一数据源）。
+
+    关键：float 统一转 Python float，保证词法形态含小数点（'-5'→'-5.0'）。
+    pyshacl 在 inference="none" 下会把 '-5'/'88' 这类整数字面量判为非法 xsd:float 词法，
+    导致合法样本被误杀、违规样本多出一条 datatype 违和。integer 兼容 "5.0" 输入。
+    转换失败回退字符串字面量（交给 SHACL 判违和，不抛异常）。
+    """
+    if value is None:
+        return Literal(value)
+    try:
+        if data_type == "integer":
+            return Literal(int(float(str(value))))
+        if data_type == "float":
+            return Literal(float(value), datatype=XSD.float)
+        if data_type == "boolean":
+            if isinstance(value, str):
+                return Literal(value.strip().lower() in ("1", "true", "yes", "是"))
+            return Literal(bool(value))
+        if data_type == "date":
+            return Literal(str(value), datatype=XSD.date)
+        if data_type == "datetime":
+            return Literal(str(value), datatype=XSD.dateTime)
+        return Literal(str(value))
+    except (TypeError, ValueError):
+        return Literal(str(value))
+
+
 def class_uri(object_id: str) -> str:
     """对象类型业务 id → 类 URI（与 schema 翻译一致，供实例三元组/查询侧复用）。"""
     return str(BASE + _local(object_id))
@@ -187,6 +215,7 @@ def build_instance_graph(ontology: dict[str, Any], instances: list[dict[str, Any
     objects = ontology.get("objects", [])
     obj_by_id = {o["id"]: o for o in objects}
     attr_ids = {o["id"]: {a["id"] for a in o.get("attributes", [])} for o in objects}
+    attr_defs = {o["id"]: {a["id"]: a for a in o.get("attributes", [])} for o in objects}
     rel_ids = {o["id"]: {r["id"] for r in o.get("relations", [])} for o in objects}
     rel_by_id = {o["id"]: {r["id"]: r for r in o.get("relations", [])} for o in objects}
     # 批次内 stable_key 值 → 实例 subject（按对象类型分桶，避免不同对象同值串号）
@@ -210,7 +239,11 @@ def build_instance_graph(ontology: dict[str, Any], instances: list[dict[str, Any
             if k in ("object_type", "type", "_source"):
                 continue
             if k in attr_ids.get(otype, set()):
-                g.add((subj, URIRef(BASE + _local(k)), Literal(v)))
+                # 按声明 data_type 生成带 xsd 类型的字面量（typed_literal 统一处理：
+                # float 保证词法含小数点，避免 pyshacl inference=none 误判整数字面量）
+                a_def = (attr_defs.get(otype) or {}).get(k) or {}
+                g.add((subj, URIRef(BASE + _local(k)),
+                       typed_literal(v, a_def.get("data_type", "string"))))
             elif k in rel_ids.get(otype, set()):
                 rel_def = rel_by_id.get(otype, {}).get(k)
                 tgt_type = rel_def.get("target_object") if rel_def else None

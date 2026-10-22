@@ -15,10 +15,26 @@ from typing import Any
 from action_engine import ActionEngine
 from config import get_settings
 from core.storage import JsonStore
+from fastapi.responses import JSONResponse
 from logging_setup import get_logger
 from reasoning import inference_trace
 
 logger = get_logger("mcp_server")
+
+
+def _asgi_send(request):
+    """从 Starlette Request 取原始 ASGI send 可调用对象（供 mcp SDK 传输层使用）。
+
+    uvicorn/hypercorn 将 send 放在 scope["asgi"]["send"]；
+    部分 ASGI 栈（如 TestClient）改挂在 Request._send 上，做兜底。
+    """
+    asgi = request.scope.get("asgi") or {}
+    send = asgi.get("send")
+    if send is None:
+        send = getattr(request, "_send", None)
+    if send is None:
+        raise RuntimeError("无法获取 ASGI send（SSE 传输不可用）")
+    return send
 
 # P-02 借鉴补丁：对外工具契约元数据（外部 Agent 可静态判断读写/副作用）
 TOOLS_CONTRACT = {
@@ -241,16 +257,19 @@ class McpServer:
         logger.info("MCP Server 已挂载到 /mcp/{project_id} (SSE)，工具: %s", list(TOOLS_CONTRACT.keys()))
 
     async def handle_sse(self, request):
-        """供 main.py /mcp/{project_id} GET 路由调用。"""
+        """供 main.py /mcp/{project_id} GET 路由调用。
+
+        注意：mcp SDK 的 SseServerTransport 需要**原始 ASGI send 可调用对象**，
+        Starlette Request 未公开 .send 属性（早期实现误用 request.send，
+        真实 MCP 客户端一连接即 500，只有走 REST 的测试能发现不了）。
+        """
         project_id = request.path_params["project_id"]
         self._ensure_mcp(project_id)
         transport = self._transports.get(project_id)
         mcp = self._projects.get(project_id)
         if not transport or not mcp:
-            body = json.dumps({"error": "MCP Server 未发布"}).encode("utf-8")
-            await request.send({"type": "http.response.start", "status": 404, "headers": [[b"content-type", b"application/json"]]})
-            return await request.send({"type": "http.response.body", "body": body})
-        async with transport.connect_sse(request.scope, request.receive, request.send) as streams:
+            return JSONResponse({"error": "MCP Server 未发布"}, status_code=404)
+        async with transport.connect_sse(request.scope, request.receive, _asgi_send(request)) as streams:
             await mcp._mcp_server.run(
                 streams[0], streams[1],
                 mcp._mcp_server.create_initialization_options(),
@@ -261,11 +280,8 @@ class McpServer:
         project_id = request.path_params["project_id"]
         transport = self._transports.get(project_id)
         if not transport:
-            body = json.dumps({"error": "MCP Server 未发布"}).encode("utf-8")
-            await request.send({"type": "http.response.start", "status": 404, "headers": [[b"content-type", b"application/json"]]})
-            await request.send({"type": "http.response.body", "body": body})
-            return
-        await transport.handle_post_message(request.scope, request.receive, request.send)
+            return JSONResponse({"error": "MCP Server 未发布"}, status_code=404)
+        await transport.handle_post_message(request.scope, request.receive, _asgi_send(request))
 
 
 def _run_inference(ontology: dict[str, Any]) -> list[dict[str, Any]]:

@@ -484,7 +484,8 @@
 ---
 
 ## 15. 状态与待补
-- VS0–VS8 端点已实现，新增 §12 用户友好建模/逆向生成。VS10 集成测试见 `backend/tests/`。
+- **VS0–VS10 端点已全部实现**。VS10 为 P0 集成验收切片（建模→SHACL→发布 MCP→外部 Agent SSE 查询→外部 MCP 读取归化→人工审核入库→Action dry-run/确认回写/幂等防重），**已验收通过**：e2e `backend/tests/test_vs10_e2e.py` 5/5 + 全量 72/72 全绿，报告见 `docs/VS10-集成验收报告.md`。
+- 用户友好建模/逆向生成见 §14。
 - 待增强：Fuseki 远程推理开关、SHACL 在 Jena 侧执行、MCP stdio transport 完整 JSON-RPC、Action 熔断/重试策略细化。
 
 ## 16. 项目管理（projects）
