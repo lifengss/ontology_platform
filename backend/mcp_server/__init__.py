@@ -51,6 +51,7 @@ class McpServer:
     def __init__(self) -> None:
         self._projects: dict[str, Any] = {}
         self._transports: dict[str, Any] = {}
+        self._published_ontologies: dict[str, list[str]] = {}  # project_id -> [ontology_id, ...]（5.1：按本体记录发布清单）
         self._action_engine = ActionEngine()
 
     def _ontologies(self, project_id: str) -> JsonStore:
@@ -59,15 +60,34 @@ class McpServer:
     def _actions(self, project_id: str) -> JsonStore:
         return JsonStore("actions", project_id=project_id)
 
+    def _ontology_names(self, project_id: str, ontology_ids: list[str]) -> list[dict]:
+        store = self._ontologies(project_id)
+        items = []
+        for oid in ontology_ids:
+            rec = store.get(oid)
+            items.append({"ontology_id": oid, "name": (rec or {}).get("name") or oid})
+        return items
+
     def status(self, project_id: str | None = None) -> dict:
         if project_id:
+            # 5.1：项目级状态含"已发布本体清单"（多本体共享同一项目端点）
             return {
                 "published": project_id in self._projects,
                 "endpoint": f"/mcp/{project_id}",
+                "messages_endpoint": f"/mcp/{project_id}/messages/",
                 "tools": list(TOOLS_CONTRACT.keys()),
+                "published_ontologies": self._ontology_names(project_id, self._published_ontologies.get(project_id, [])),
             }
+        # 5.2：全局状态=多项目共存视图（各项目独立端点互不影响）
         return {
-            "published_projects": list(self._projects.keys()),
+            "published_projects": [
+                {
+                    "project_id": pid,
+                    "endpoint": f"/mcp/{pid}",
+                    "published_ontologies": self._ontology_names(pid, self._published_ontologies.get(pid, [])),
+                }
+                for pid in self._projects
+            ],
             "tools": list(TOOLS_CONTRACT.keys()),
         }
 
@@ -76,20 +96,37 @@ class McpServer:
         if not rec:
             return {"published": False, "error": "本体不存在"}
         self._ensure_mcp(project_id)
-        logger.info("publish MCP server project_id=%s ontology_id=%s tools=%s", project_id, ontology_id, list(TOOLS_CONTRACT.keys()))
+        ids = self._published_ontologies.setdefault(project_id, [])
+        if ontology_id not in ids:
+            ids.append(ontology_id)
+        logger.info("publish MCP server project_id=%s ontology_id=%s ontologies=%d tools=%s",
+                    project_id, ontology_id, len(ids), list(TOOLS_CONTRACT.keys()))
         return {
             "published": True,
             "project_id": project_id,
             "ontology_id": ontology_id,
             "endpoint": f"/mcp/{project_id}",
             "tools": list(TOOLS_CONTRACT.keys()),
+            "published_ontologies": self._ontology_names(project_id, ids),
         }
 
-    def unpublish(self, project_id: str) -> dict:
+    def unpublish(self, project_id: str, ontology_id: str | None = None) -> dict:
         if project_id not in self._projects:
             return {"published": False, "error": "MCP Server 未发布"}
+        if ontology_id:
+            # 5.1：按本体取消发布；清单清空后下线整个项目 Server
+            ids = self._published_ontologies.get(project_id, [])
+            if ontology_id in ids:
+                ids.remove(ontology_id)
+            if not ids:
+                self._projects.pop(project_id, None)
+                self._transports.pop(project_id, None)
+            logger.info("unpublish MCP ontology project_id=%s ontology_id=%s remaining=%d", project_id, ontology_id, len(ids))
+            return {"published": bool(self._projects.get(project_id)), "project_id": project_id,
+                    "ontology_id": ontology_id, "message": "已取消发布该本体"}
         self._projects.pop(project_id, None)
         self._transports.pop(project_id, None)
+        self._published_ontologies.pop(project_id, None)
         logger.info("unpublish MCP server project_id=%s", project_id)
         return {"published": False, "project_id": project_id, "message": "已取消发布"}
 

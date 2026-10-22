@@ -249,10 +249,11 @@ def _preview_field_map(payload, ontology: dict[str, Any]) -> dict[str, Any]:
     obj = next((o for o in ontology.get("objects", []) if o["id"] == object_type), None)
     if obj is None:
         raise ApiError("VALIDATION_ERROR", f"对象类型 {object_type} 不存在", http_status=422)
-    valid_attrs = {a["id"] for a in obj.get("attributes", [])}
+    # 映射目标允许 属性 ID 或 关系 ID（关系引用值按 rdf_sync 约定存于关系 ID 键）
+    valid_attrs = {a["id"] for a in obj.get("attributes", [])} | {r["id"] for r in obj.get("relations", [])}
     for target in field_map.values():
         if target not in valid_attrs:
-            raise ApiError("VALIDATION_ERROR", f"field_map 目标字段 {target} 不在对象 {object_type} 的属性列表中", http_status=422)
+            raise ApiError("VALIDATION_ERROR", f"field_map 目标字段 {target} 不在对象 {object_type} 的属性/关系字段列表中", http_status=422)
 
     preview_violations: list[str] = []
     for i, rec in enumerate(records):

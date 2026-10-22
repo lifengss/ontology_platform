@@ -178,8 +178,9 @@ def publish_server(
 
 
 @router.post("/server/unpublish")
-def unpublish_server(project_id: str = Depends(project_id_param)):
-    result = _server.unpublish(project_id=project_id)
+def unpublish_server(ontology_id: str | None = None, project_id: str = Depends(project_id_param)):
+    """取消发布：不带 ontology_id=整个项目下线；带 ontology_id=仅下线该本体（清单空则项目下线）。"""
+    result = _server.unpublish(project_id=project_id, ontology_id=ontology_id)
     return success(result)
 
 

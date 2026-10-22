@@ -303,7 +303,7 @@ async def upload_instances(
 
         for sheet_name, matched_object_type in target_sheets:
             obj = obj_by_id[matched_object_type]
-            valid_attrs = {a["id"] for a in obj.get("attributes", [])}
+            valid_attrs = {a["id"] for a in obj.get("attributes", [])} | {r["id"] for r in obj.get("relations", [])}
             # 全局 field_map 可能只针对部分对象；过滤出当前对象可用属性，无法映射的表头走自动匹配
             sheet_field_map = None
             if explicit_field_map:
@@ -328,7 +328,7 @@ async def upload_instances(
             raise ApiError("VALIDATION_ERROR", f"对象类型 {object_type} 不在本体中", http_status=422)
         content = (await file.read()).decode("utf-8-sig")
         obj = obj_by_id[object_type]
-        valid_attrs = {a["id"] for a in obj.get("attributes", [])}
+        valid_attrs = {a["id"] for a in obj.get("attributes", [])} | {r["id"] for r in obj.get("relations", [])}
         csv_field_map = None
         if explicit_field_map:
             csv_field_map = {k: v for k, v in explicit_field_map.items() if v in valid_attrs}
@@ -520,17 +520,9 @@ def get_candidate(candidate_id: str, project_id: str = Depends(project_id_param)
     return success(rec)
 
 
-@router.post("/candidates/{candidate_id}/approve")
-def approve_candidate(candidate_id: str, project_id: str = Depends(project_id_param)):
+def _approve_one(rec: dict, candidate_id: str, project_id: str) -> dict:
+    """单个候选批准：校验 + 落库 + 状态回写（供单条/批量批准复用）。"""
     store = _store_for(project_id)
-    rec = store.get(candidate_id)
-    if not rec:
-        raise ApiError("NOT_FOUND", "候选不存在", http_status=404)
-    if rec.get("status") == "imported":
-        return success(rec.get("approve_result") or ApproveResult(imported=0, rejected=0, violations=[], neo_tx_id=None).model_dump())
-    if rec.get("status") == "rejected":
-        raise ApiError("VALIDATION_ERROR", "已拒绝的候选不能重新审批", http_status=422)
-
     ontology = _load_ontology(rec["ontology_id"], project_id)
     result = approve_candidate_logic(rec, ontology, project_id=project_id)
 
@@ -554,7 +546,20 @@ def approve_candidate(candidate_id: str, project_id: str = Depends(project_id_pa
     store.update(candidate_id, rec)
     logger.info("approve candidate_id=%s project_id=%s imported=%d violations=%d",
                 candidate_id, project_id, result["imported"], len(result["violations"]))
-    return success(result)
+    return result
+
+
+@router.post("/candidates/{candidate_id}/approve")
+def approve_candidate(candidate_id: str, project_id: str = Depends(project_id_param)):
+    store = _store_for(project_id)
+    rec = store.get(candidate_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "候选不存在", http_status=404)
+    if rec.get("status") == "imported":
+        return success(rec.get("approve_result") or ApproveResult(imported=0, rejected=0, violations=[], neo_tx_id=None).model_dump())
+    if rec.get("status") == "rejected":
+        raise ApiError("VALIDATION_ERROR", "已拒绝的候选不能重新审批", http_status=422)
+    return success(_approve_one(rec, candidate_id, project_id))
 
 
 @router.post("/candidates/{candidate_id}/reject")
@@ -568,6 +573,103 @@ def reject_candidate(candidate_id: str, project_id: str = Depends(project_id_par
     store.update(candidate_id, {"status": "rejected"})
     logger.info("reject candidate_id=%s project_id=%s", candidate_id, project_id)
     return success({"status": "rejected"})
+
+
+@router.post("/candidates/{candidate_id}/revert")
+def revert_candidate(candidate_id: str, project_id: str = Depends(project_id_param)):
+    """1.4：已驳回候选恢复为待审核。"""
+    store = _store_for(project_id)
+    rec = store.get(candidate_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "候选不存在", http_status=404)
+    if rec.get("status") != "rejected":
+        raise ApiError("FORBIDDEN_WRITE", "仅已驳回的候选可恢复为待审核", http_status=403)
+    store.update(candidate_id, {"status": "pending"})
+    logger.info("revert candidate_id=%s project_id=%s", candidate_id, project_id)
+    return success({"candidate_id": candidate_id, "status": "pending"})
+
+
+@router.delete("/candidates/batch")
+def delete_candidates_batch(payload: dict, project_id: str = Depends(project_id_param)):
+    """1.4：批量删除候选（仅限 已驳回/已入库）。"""
+    store = _store_for(project_id)
+    ids = payload.get("candidate_ids")
+    if not isinstance(ids, list) or not ids:
+        raise ApiError("VALIDATION_ERROR", "candidate_ids 必须是非空数组", http_status=422)
+    deleted, skipped = [], []
+    for cid in ids:
+        rec = store.get(cid)
+        if not rec:
+            skipped.append({"id": cid, "reason": "not_found"})
+            continue
+        if rec.get("status") == "pending":
+            skipped.append({"id": cid, "reason": "pending 候选需先批准或驳回"})
+            continue
+        store.delete(cid)
+        deleted.append(cid)
+    logger.info("delete_candidates_batch deleted=%d skipped=%d project_id=%s", len(deleted), len(skipped), project_id)
+    return success({"deleted": deleted, "skipped": skipped})
+
+
+@router.delete("/candidates/{candidate_id}")
+def delete_candidate(candidate_id: str, project_id: str = Depends(project_id_param)):
+    """1.4：删除单个候选（仅限 已驳回/已入库；待审核需先批准或驳回）。"""
+    store = _store_for(project_id)
+    rec = store.get(candidate_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "候选不存在", http_status=404)
+    if rec.get("status") == "pending":
+        raise ApiError("FORBIDDEN_WRITE", "待审核候选不能删除，请先批准或驳回", http_status=403)
+    if not store.delete(candidate_id):
+        raise ApiError("NOT_FOUND", "候选不存在", http_status=404)
+    logger.info("delete_candidate candidate_id=%s project_id=%s", candidate_id, project_id)
+    return success({"deleted": True})
+
+
+@router.post("/candidates/batch-approve")
+def batch_approve_candidates(payload: dict, project_id: str = Depends(project_id_param)):
+    """1.4：批量批准（仅对 pending 候选生效，逐组执行与单个批准相同的校验+落库）。"""
+    store = _store_for(project_id)
+    ids = payload.get("candidate_ids")
+    if not isinstance(ids, list) or not ids:
+        raise ApiError("VALIDATION_ERROR", "candidate_ids 必须是非空数组", http_status=422)
+    affected, skipped = 0, 0
+    total_imported, all_violations = 0, []
+    for cid in ids:
+        rec = store.get(cid)
+        if not rec or rec.get("status") != "pending":
+            skipped += 1
+            continue
+        result = _approve_one(rec, cid, project_id)
+        total_imported += result.get("imported", 0)
+        all_violations.extend(result.get("violations", []))
+        affected += 1
+    logger.info("batch_approve affected=%d skipped=%d project_id=%s", affected, skipped, project_id)
+    return success({
+        "affected": affected,
+        "skipped": skipped,
+        "imported": total_imported,
+        "violations": all_violations,
+    })
+
+
+@router.post("/candidates/batch-reject")
+def batch_reject_candidates(payload: dict, project_id: str = Depends(project_id_param)):
+    """1.4：批量驳回（仅对 pending 候选生效）。"""
+    store = _store_for(project_id)
+    ids = payload.get("candidate_ids")
+    if not isinstance(ids, list) or not ids:
+        raise ApiError("VALIDATION_ERROR", "candidate_ids 必须是非空数组", http_status=422)
+    affected, skipped = 0, 0
+    for cid in ids:
+        rec = store.get(cid)
+        if not rec or rec.get("status") != "pending":
+            skipped += 1
+            continue
+        store.update(cid, {"status": "rejected"})
+        affected += 1
+    logger.info("batch_reject affected=%d skipped=%d project_id=%s", affected, skipped, project_id)
+    return success({"affected": affected, "skipped": skipped})
 
 
 @router.put("/candidates/{candidate_id}/instances")

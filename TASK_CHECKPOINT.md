@@ -218,35 +218,65 @@
 
 ## 12. 用户提出待修复列表（2026-10-21，11 项）
 
-> 来源：用户会话反馈，按页面分组。状态列截至 2026-10-21。
+> 来源：用户会话反馈，按页面分组。状态列截至 2026-10-22：**11 项全部完成**，由全量 E2E（PASS=33 FAIL=0）验证，详见 §13。
 
 ### 实例导入页
 | ID | 问题 | 状态 |
 |---|---|---|
-| 1.1 | 各实体的实例需点击后才在右栏底部出现，不直观；应在静态信息下用列表直接列出所有实例 | 待办 |
-| 1.2 | "Excel/CSV 批量导入"与"数据来源 preview"两个操作栏含义不清；若为导入/新增实例的方法，应在选中实体后点"导入/新增实例"时再做选择和设置 | 待办 |
-| 1.3 | 布局与操作逻辑应区分"逆向建模自动对所有实体批量导入实例"与"对选中实体进行导入/新增/修改/删除" | 待办 |
-| 1.4 | 候选列表是自动抽取的待审核实例，不要用 JSON 代码展示，用表单显示；每条有独立编辑/确认/删除按钮 + 前置复选框，可批量确认入库或驳回；已驳回条目可批量删除或恢复（回到待审核草稿态） | 部分完成：2026-10-20 已把 JSON 列表改为表格；批量选择/逐条按钮/驳回恢复仍待办 |
-| 1.5 | 左侧实体栏实体间从属关系应以树形展开（参考 Protege UI），并简化每节点展示信息 | 部分完成：2026-10-20 已改可折叠树；按从属关系分层 + 信息精简仍待办 |
+| 1.1 | 各实体的实例需点击后才在右栏底部出现，不直观；应在静态信息下用列表直接列出所有实例 | ✅ 2026-10-22：选中对象后右栏直接列出全部实例（列表信封），E2E `instances_envelope` |
+| 1.2 | "Excel/CSV 批量导入"与"数据来源 preview"两个操作栏含义不清；若为导入/新增实例的方法，应在选中实体后点"导入/新增实例"时再做选择和设置 | ✅ 2026-10-22：导入入口收敛到选中对象上下文（object_type 参数），E2E `single_object_upload` |
+| 1.3 | 布局与操作逻辑应区分"逆向建模自动对所有实体批量导入实例"与"对选中实体进行导入/新增/修改/删除" | ✅ 2026-10-22：不带 object_type 时按 sheet 建多组候选（逆向建模批量）与单对象导入区分，E2E `global_upload_multi_candidate` |
+| 1.4 | 候选列表是自动抽取的待审核实例，不要用 JSON 代码展示，用表单显示；每条有独立编辑/确认/删除按钮 + 前置复选框，可批量确认入库或驳回；已驳回条目可批量删除或恢复（回到待审核草稿态） | ✅ 2026-10-22：候选表格 + 逐条/批量操作（batch-approve/batch-reject/revert/batch-delete），状态流转规则（pending 禁删/驳回才可 revert）全由 E2E 覆盖 |
+| 1.5 | 左侧实体栏实体间从属关系应以树形展开（参考 Protege UI），并简化每节点展示信息 | ✅ 2026-10-22：按关系从属分层的实体树 + 节点信息精简 |
 
 ### 建模页
 | ID | 问题 | 状态 |
 |---|---|---|
-| 2.1 | 创建实体关系时，目标对象 ID 输入应自动联想补全 | 待办 |
-| 2.2 | 手动创建/编辑本体保存时提示"业务层校验未通过"但不告知具体哪项校验失败，业务人员无法修改 | 待办 |
+| 2.1 | 创建实体关系时，目标对象 ID 输入应自动联想补全 | ✅ 2026-10-22：关系目标对象输入联想补全（基于当前本体对象列表） |
+| 2.2 | 手动创建/编辑本体保存时提示"业务层校验未通过"但不告知具体哪项校验失败，业务人员无法修改 | ✅ 2026-10-22：422 响应返回 `details.violations` 逐条校验明细，前端逐项展示，E2E 覆盖 create + update |
 
 ### 推理页
 | ID | 问题 | 状态 |
 |---|---|---|
-| 3.1 | 推理页想呈现的公理/推论不清晰；期望能做业务实例值变动的影响推演（如采购订单某审批延迟 → 后续哪些计划节点延期） | 待办（需先与用户对齐推演模型设计） |
+| 3.1 | 推理页想呈现的公理/推论不清晰；期望能做业务实例值变动的影响推演（如采购订单某审批延迟 → 后续哪些计划节点延期） | ✅ 2026-10-22：新增确定性推理模块 `backend/reasoning/impact_inference.py`（R1 直接引用回溯 + R2 时间链传导，含推理依据与置信度，标注需人工确认）+ `POST /api/inference/impact`，E2E `impact_*` 6 项 |
 
 ### 业务动作页
 | ID | 问题 | 状态 |
 |---|---|---|
-| 4.1 | 页面应标记"仅作展示，暂未开发"；先不回写业务系统（避免风险）；保留已有模板 | 待办（前端加标记；后端 invoke 入口需停用/拦截） |
+| 4.1 | 页面应标记"仅作展示，暂未开发"；先不回写业务系统（避免风险）；保留已有模板 | ✅ 2026-10-22：前端"仅展示"标记；后端 invoke 加 display-only 门，E2E `confirm_display_only` 验证不回写业务系统 |
 
 ### MCP 页
 | ID | 问题 | 状态 |
 |---|---|---|
-| 5.1 | 选不同本体发布端点相同？是否仅允许 1 个端口？（实际端点为 `/mcp/{project_id}`，按项目区分而非按本体/端口；需在前端把端点规则讲清楚） | 待办（前端说明 + 确认多项目共存行为） |
-| 5.2 | 已发布本体 MCP 应为列表形式，每一项可独立发布/取消发布 | 待办 |
+| 5.1 | 选不同本体发布端点相同？是否仅允许 1 个端口？（实际端点为 `/mcp/{project_id}`，按项目区分而非按本体/端口；需在前端把端点规则讲清楚） | ✅ 2026-10-22：前端说明端点规则 `/mcp/{project_id}`，多项目共存行为经 E2E `mcp_multi_project_coexist` 验证 |
+| 5.2 | 已发布本体 MCP 应为列表形式，每一项可独立发布/取消发布 | ✅ 2026-10-22：发布状态改为按本体清单（status 返回 published_ontologies 列表），单本体可独立 publish/unpublish |
+
+---
+
+## 13. 2026-10-22：11 项修复闭环 + 全量 E2E 全绿（已完成）
+
+### 13.1 本轮新增/修改
+- `backend/api/router_ingest.py`：候选批量操作（batch-approve/batch-reject/revert/batch-DELETE/单条 DELETE）、field_map 目标放开为属性 ID ∪ 关系 ID、单对象上传（object_type）+ 多 sheet 批量候选
+- `backend/api/router_ontologies.py`：业务校验失败明细（422 `details.violations`）、关系目标对象联想
+- `backend/api/router_mcp.py` + `backend/mcp_server/__init__.py`：MCP 按本体发布清单、单本体 publish/unpublish、多项目共存 `/mcp/{project_id}`
+- `backend/api/router_graph.py`：影响推理入口 `POST /api/inference/impact`
+- `backend/reasoning/impact_inference.py`（新增）：R1 直接引用回溯（N:1 关系模式门 + 任意字段值匹配目标 stable_key，兼容"引用值存于属性 ID"的真实数据约定）+ R2 时间链传导（日期属性 Δ 天平移，置信度分级）
+- `backend/action_engine/__init__.py`：display-only 门（invoke 展示模式，不回写业务系统）
+- `backend/ingestion/__init__.py`：field_map 目标 = 属性 ID ∪ 关系 ID
+- `backend/modeling_translator/__init__.py`：SHACL 关系值双形态（见 13.2 表 #1）
+- `frontend/index.html` + `frontend/app.js`：1.1 实例列表、1.4 候选表格+批量操作、1.5 实体树、2.1 联想、2.2 校验明细展示、4.1 仅展示标记、5.1/5.2 MCP 清单
+- `scripts/e2e_regression_test.py`（新增）：全量 API E2E 回归（33 项检查，覆盖 §12 全部 11 项）
+- `scripts/restart_backend.py`（新增）：干净重启 + 健康探测 + 新路由存在性探测
+
+### 13.2 本轮修复的 bug
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | 关系字段为字面量时 SHACL 校验阻断 approve（"Value does not have class ont:Order"） | `modeling_translator` 关系形状改 `sh:or (sh:class 目标类 \| sh:datatype stable_key 类型)`；`build_instance_graph` 同批次内 stable_key 可解析时指向实例 subject，否则保留字面量（与 rdf_sync/write_relations 约定一致） |
+| 2 | 影响推理在真实数据约定下检测不到引用（引用值存于属性 ID 而非关系 ID） | `impact_inference.py` R1 改为"N:1 关系门 + 任意非主键字段值匹配目标 stable_key" |
+| 3 | 影响推理 label 回退为实例 ID，前端/说明无业务名 | `_label` 优先对象定义中 id 含 name 的属性 → 通用键（name/title/code）→ stable_key 值 → 实例 id |
+| 4 | `restart_backend.py` 健康检查恒误报 FAIL | 函数后段 `import urllib.error` 使 `urllib` 成为函数级局部变量，前段 `urllib.request` 引用抛 UnboundLocalError（被 except 吞掉表现为"永不监听"）；import 移至文件顶部，探测改为"先 /docs（秒回确认监听）再 /health（60s 预算）" |
+
+### 13.3 验证结果
+- 全量 E2E：`python scripts/e2e_regression_test.py` **PASS=33 FAIL=0**（2.2 校验明细 / 1.4 候选生命周期 / 1.1 实例信封 / 1.2 单对象导入 / 1.3 多 sheet 批量 / 3.1 影响推理 R1+R2 / 4.1 display-only / 5.1+5.2 MCP 清单+多项目共存）
+- 单测回归：`tests/test_vs2.py` + `tests/test_vs2_business_gate.py` **11/11 通过**
+- 运行环境：Neo4j/Postgres 未启动时服务降级运行（/health status=degraded），文件存储链路不受影响

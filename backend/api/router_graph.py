@@ -55,6 +55,36 @@ def inference_trace_by_id(ontology_id: str, project_id: str = Depends(project_id
     return success(_inference_trace_response(ontology_id, rec, focus=None))
 
 
+@router.post("/inference/impact")
+def impact_inference_endpoint(
+    payload: dict,
+    project_id: str = Depends(project_id_param),
+):
+    """3.1 业务影响推理：实例值变化 → 下游实例影响（确定性规则 R1 直接引用 + R2 时间链传导）。
+
+    body: { ontology_id, instance_id, attribute, new_value }
+    """
+    from core.instance_store import get_instance_store
+    from reasoning.impact_inference import infer_impact
+
+    ontology_id = (payload.get("ontology_id") or "").strip()
+    instance_id = (payload.get("instance_id") or "").strip()
+    attribute = (payload.get("attribute") or "").strip()
+    new_value = payload.get("new_value")
+    if not (ontology_id and instance_id and attribute):
+        raise ApiError("VALIDATION_ERROR", "ontology_id / instance_id / attribute 均不能为空", http_status=422)
+    rec = _store_for(project_id).get(ontology_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    instances = get_instance_store(project_id).all()
+    try:
+        result = infer_impact(rec, instances, instance_id, attribute, str(new_value))
+    except KeyError as e:
+        raise ApiError("NOT_FOUND", "实例不存在", http_status=404) from e
+    logger.info("impact_inference ontology_id=%s instance_id=%s project_id=%s", ontology_id, instance_id, project_id)
+    return success(result)
+
+
 @router.post("/graph/{ontology_id}/nl-query")
 def natural_language_query(
     ontology_id: str,

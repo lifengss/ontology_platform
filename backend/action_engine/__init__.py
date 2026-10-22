@@ -18,6 +18,11 @@ from logging_setup import get_logger
 
 logger = get_logger("action_engine")
 
+# 4.1：业务动作页当前为"仅展示、未开发"状态。
+# True 时 confirm 不会真正回写业务系统（webhook/MCP 外呼被拦截），仅记录日志；
+# 待业务回写需求明确后改为 False 即可启用下方保留的完整回写模板代码。
+DISPLAY_ONLY = True
+
 _pending_tokens: dict[str, dict[str, Any]] = {}
 
 
@@ -123,7 +128,11 @@ class ActionEngine:
         invoke = action.get("invoke", {})
         kind = invoke.get("kind")
         external_response: dict[str, Any]
-        if kind in ("webhook", "rest"):
+        if DISPLAY_ONLY:
+            logger.info("confirm action_id=%s token=%s display_only=True（未回写业务系统）", action_id, token)
+            external_response = {"status": 0, "display_only": True,
+                                 "error": "display_only: 业务动作页为展示模式，未回写业务系统"}
+        elif kind in ("webhook", "rest"):
             external_response = _http_call(invoke.get("url", ""), invoke.get("method", "POST"), planned, get_settings().mcp_timeout_seconds)
         elif kind == "mcp_tool":
             external_response = self._invoke_mcp_tool(action, invoke, planned)

@@ -160,6 +160,14 @@ def update_ontology(
     for obj in patch.get("objects", []):
         if not obj.get("namespace"):
             obj["namespace"] = patch.get("namespace", existing.get("namespace", project_id))
+    # 2.2：更新路径同样执行业务层校验（与 create 一致），失败时返回具体 violations
+    if "objects" in patch:
+        merged = dict(existing)
+        merged.update(patch)
+        biz_errors = validate_business_layer(merged)
+        if biz_errors:
+            raise ApiError("VALIDATION_ERROR", "业务层校验未通过", http_status=422,
+                           details={"violations": biz_errors})
     updated = store.update(ontology_id, patch)
     _sync_rdf(project_id, ontology_id)
     logger.info("update_ontology id=%s project_id=%s", ontology_id, project_id)

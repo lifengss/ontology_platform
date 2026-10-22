@@ -22,7 +22,7 @@
     input, textarea, select { background: #0b1222; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
     label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
     .graph-tooltip { position: absolute; background: rgba(15,23,42,.95); border: 1px solid var(--border); padding: 6px 10px; border-radius: 6px; font-size: 12px; pointer-events: none; opacity: 0; transition: opacity .15s; }
-    .toast { position: fixed; bottom: 16px; right: 16px; min-width: 260px; max-width: 360px; padding: 12px 14px; border-radius: 10px; color: #fff; font-size: 13px; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,.35); animation: slideIn .25s ease; border: 1px solid var(--border); }
+    .toast { position: fixed; bottom: 16px; right: 16px; min-width: 260px; max-width: 420px; padding: 12px 14px; border-radius: 10px; color: #fff; font-size: 13px; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,.35); animation: slideIn .25s ease; border: 1px solid var(--border); white-space: pre-line; }
     @keyframes slideIn { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
     .toast.info { background: #1e3a8a; } .toast.ok { background: #065f46; } .toast.err { background: #991b1b; }
     .subtab { padding: 6px 12px; border-radius: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
@@ -168,49 +168,68 @@
           <div id="ingestObjectMeta" class="text-sm text-slate-400"></div>
         </div>
         <div class="card p-4">
-          <h3 class="font-medium mb-3">Excel / CSV 批量导入</h3>
-          <div class="grid grid-cols-2 gap-3 mb-3">
-            <div><label>目标对象类型 <span class="text-slate-500">(CSV 必填；xlsx 可留空使用 sheet 名)</span></label>
-              <select id="ingestObjectType" class="w-full">
-                <option value="">-- 选择对象类型 --</option>
-              </select>
-            </div>
-            <div><label>上传文件 <span class="text-slate-500">.xlsx / .csv</span></label>
-              <input id="ingestFile" type="file" accept=".xlsx,.csv" class="w-full text-xs" />
-            </div>
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-medium">实例列表 <span class="text-xs font-normal text-slate-500">当前所选对象已入库的实例，点行可编辑</span></h3>
+            <span id="instanceCount" class="text-xs text-slate-500"></span>
           </div>
-          <div class="flex gap-2 mb-3">
-            <button class="btn" onclick="uploadIngestFile()">上传生成候选</button>
-            <button class="btn secondary" onclick="downloadIngestTemplate()">下载 Excel 模板</button>
-          </div>
-          <p class="text-xs text-slate-500">Excel 表头建议与对象属性 ID 保持一致，否则未匹配列会被忽略。导入后先在候选列表审核，再点「入库」。</p>
+          <div id="instanceList" class="space-y-2 max-h-[300px] overflow-auto"></div>
         </div>
         <div class="card p-4">
-          <h3 class="font-medium mb-3">数据来源 Preview</h3>
-          <div class="flex gap-4 mb-3 text-xs">
-            <label class="flex items-center gap-1">
-              <input type="radio" name="ingestSourceKind" value="field_map" checked onchange="onIngestSourceKindChange()" />
-              字段映射
-            </label>
-            <label class="flex items-center gap-1">
-              <input type="radio" name="ingestSourceKind" value="llm" onchange="onIngestSourceKindChange()" />
-              LLM 文本抽取
-            </label>
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-medium">导入 / 添加实例 <span class="text-xs font-normal text-slate-500">仅作用于当前选中对象</span></h3>
+            <span id="singleImportTarget" class="badge"></span>
           </div>
-          <div class="grid grid-cols-2 gap-3 mb-3">
-            <div><label>目标对象类型</label><input id="ingestObjectTypeManual" class="w-full" placeholder="object_type" /></div>
-            <div id="fieldMapWrap"><label>字段映射 JSON</label><input id="ingestFieldMap" class="w-full" value='{"name":"attr_name"}' /></div>
-            <div id="llmEndpointWrap" class="hidden"><label>LLM Endpoint</label><input id="ingestLlmEndpoint" class="w-full" placeholder="https://api.openai.com/v1" /></div>
-            <div id="llmModelWrap" class="hidden"><label>LLM 模型</label><input id="ingestLlmModel" class="w-full" placeholder="gpt-4o-mini" /></div>
+          <div id="singleImportHint" class="text-sm text-slate-400">请先在左侧实体树选择一个对象，选择后此处才出现导入操作。</div>
+          <div id="singleImportBody" class="hidden">
+            <h4 class="text-sm font-medium mt-3 mb-2">① Excel / CSV 文件导入</h4>
+            <div class="grid grid-cols-2 gap-3 mb-3">
+              <div><label>上传文件 <span class="text-slate-500">.xlsx / .csv</span></label>
+                <input id="ingestFile" type="file" accept=".xlsx,.csv" class="w-full text-xs" />
+              </div>
+              <div class="flex items-end gap-2">
+                <button class="btn" onclick="uploadIngestFile()">上传生成候选</button>
+                <button class="btn secondary" onclick="downloadIngestTemplate()">下载模板</button>
+              </div>
+            </div>
+            <p class="text-xs text-slate-500 mb-4">Excel 表头建议与对象属性 ID 保持一致，未匹配列会被忽略。导入后到下方「候选审核」确认再入库。</p>
+            <h4 class="text-sm font-medium mb-2">② 粘贴记录 / LLM 文本抽取</h4>
+            <div class="flex gap-4 mb-3 text-xs">
+              <label class="flex items-center gap-1">
+                <input type="radio" name="ingestSourceKind" value="field_map" checked onchange="onIngestSourceKindChange()" />
+                字段映射
+              </label>
+              <label class="flex items-center gap-1">
+                <input type="radio" name="ingestSourceKind" value="llm" onchange="onIngestSourceKindChange()" />
+                LLM 文本抽取
+              </label>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mb-3">
+              <div id="fieldMapWrap"><label>字段映射 JSON</label><input id="ingestFieldMap" class="w-full" value='{"name":"attr_name"}' oninput="markTouched('ingestFieldMap')" /></div>
+              <div id="llmEndpointWrap" class="hidden"><label>LLM Endpoint</label><input id="ingestLlmEndpoint" class="w-full" placeholder="https://api.openai.com/v1" /></div>
+              <div id="llmModelWrap" class="hidden"><label>LLM 模型</label><input id="ingestLlmModel" class="w-full" placeholder="gpt-4o-mini" /></div>
+            </div>
+            <label id="ingestInputLabel">源记录 JSON 数组</label>
+            <textarea id="ingestRecords" rows="5" class="w-full font-mono text-xs" oninput="markTouched('ingestRecords')">[{"name":"腾讯"},{"name":"宝钢"}]</textarea>
+            <button class="btn mt-3" onclick="previewIngest()">Preview</button>
+            <pre id="ingestPreviewResult" class="mt-3 hidden"></pre>
           </div>
-          <label id="ingestInputLabel">源记录 JSON 数组</label>
-          <textarea id="ingestRecords" rows="5" class="w-full font-mono text-xs">[{"name":"腾讯"},{"name":"宝钢"}]</textarea>
-          <button class="btn mt-3" onclick="previewIngest()">Preview</button>
-          <pre id="ingestPreviewResult" class="mt-3 hidden"></pre>
         </div>
         <div class="card p-4">
-          <div class="flex justify-between items-center mb-3">
-            <h3 class="font-medium">候选列表</h3>
+          <h3 class="font-medium mb-1">多对象批量导入 <span class="text-xs font-normal text-slate-500">逆向建模模式：Excel 每个 sheet 自动匹配对象，命中对象一次性生成候选，需逐条确认入库</span></h3>
+          <div class="grid grid-cols-2 gap-3 mb-3">
+            <div><label>上传文件 <span class="text-slate-500">.xlsx 多 sheet / .csv</span></label>
+              <input id="ingestFileGlobal" type="file" accept=".xlsx,.csv" class="w-full text-xs" />
+            </div>
+            <div class="flex items-end gap-2">
+              <button class="btn" onclick="uploadIngestFileGlobal()">批量上传（多对象）</button>
+              <span id="ingestUploadMsgGlobal" class="text-xs text-slate-400"></span>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500">与「导入 / 添加实例」的区别：无需选中对象，按 sheet 名匹配，可把实例批量导入全部命中对象；结果统一进入下方「候选审核」。</p>
+        </div>
+        <div class="card p-4">
+          <div class="flex justify-between items-center mb-2 flex-wrap gap-2">
+            <h3 class="font-medium">候选审核 <span class="text-xs font-normal text-slate-500">自动抽取的实例，需人工审核</span></h3>
             <div class="flex items-center gap-2">
               <select id="candidateFilterStatus" class="text-xs py-1 px-2" onchange="loadCandidates()">
                 <option value="">全部状态</option>
@@ -219,9 +238,15 @@
                 <option value="rejected">已驳回</option>
               </select>
               <button class="btn secondary" onclick="loadCandidates()">刷新</button>
+              <button class="btn secondary" onclick="batchCandidates('approve')">批量批准</button>
+              <button class="btn secondary" onclick="batchCandidates('reject')">批量驳回</button>
+              <button class="btn secondary" onclick="batchCandidates('restore')">批量恢复待审核</button>
+              <button class="btn secondary" style="background:#991b1b" onclick="batchCandidates('delete')">批量删除</button>
             </div>
           </div>
-          <div id="candidateList" class="space-y-2 max-h-[360px] overflow-auto"></div>
+          <div class="text-xs text-slate-500 mb-2">批量范围：批准/驳回 → 待审核；恢复 → 已驳回；删除 → 已驳回/已入库。勾选左侧复选框选择行。</div>
+          <div id="candidateList" class="max-h-[420px] overflow-auto"></div>
+          <div id="candidateTotal" class="text-xs text-slate-500 mt-2"></div>
         </div>
 
         <div id="instanceDetailPanel" class="card p-4 hidden">
@@ -264,31 +289,71 @@
 
     <!-- 推理页 -->
     <section id="inference" class="tab-content hidden grid grid-cols-12 gap-4">
-      <div class="col-span-12 lg:col-span-4 card p-4">
-        <h3 class="font-medium mb-3">选择本体</h3>
-        <select id="inferOntology" class="w-full mb-3" onchange="loadInference()"></select>
-        <p class="text-xs text-slate-400">展示 OWL2-RL 风格推理链路。</p>
+      <div class="col-span-12 lg:col-span-4 flex flex-col gap-4">
+        <div class="card p-4">
+          <h3 class="font-medium mb-3">选择本体</h3>
+          <select id="inferOntology" class="w-full mb-3" onchange="loadInference()"></select>
+          <p class="text-xs text-slate-400">下方两块推理：① 业务影响推理（实例值变化 → 下游影响）；② 模式层推理（本体公理推导）。</p>
+        </div>
+        <div class="card p-4">
+          <h3 class="font-medium mb-2">业务影响推理 <span class="text-xs font-normal text-slate-500">实例值变化 → 下游业务影响</span></h3>
+          <p class="text-xs text-slate-400 mb-3">例：采购订单的审批日期推迟 3 天 → 推断引用该订单的后续计划节点哪些日期需要联动。规则：R1 直接引用回溯、R2 时间链传导（一跳），结果需人工确认。</p>
+          <div class="space-y-2">
+            <div><label>目标实例</label>
+              <select id="impactInstance" class="w-full" onchange="onImpactInstanceChange()"><option value="">-- 选择实例 --</option></select>
+            </div>
+            <div><label>变化属性</label>
+              <select id="impactAttribute" class="w-full" onchange="loadImpactPreview()"></select>
+            </div>
+            <div><label>新值 <span class="text-slate-500">(日期属性建议填 YYYY-MM-DD)</span></label>
+              <input id="impactNewValue" class="w-full" placeholder="如 2026-11-01" />
+            </div>
+            <button class="btn" onclick="runImpactInference()">运行影响推理</button>
+          </div>
+        </div>
       </div>
-      <div class="col-span-12 lg:col-span-8 card p-4">
-        <h3 class="font-medium mb-3">推理步骤</h3>
-        <div id="inferenceSteps" class="space-y-2 max-h-[600px] overflow-auto"></div>
+      <div class="col-span-12 lg:col-span-8 flex flex-col gap-4">
+        <div class="card p-4">
+          <h3 class="font-medium mb-2">影响推理结果</h3>
+          <div id="impactResult" class="text-sm text-slate-500">选择实例与变化属性后点击「运行影响推理」。</div>
+        </div>
+        <div class="card p-4">
+          <div class="flex items-center justify-between mb-1">
+            <h3 class="font-medium">模式层推理（OWL2-RL 风格）</h3>
+            <span class="text-xs text-slate-500">公理推导：inverseOf 对称性 / subClassOf 传递 / 属性域值域继承（与具体实例无关）</span>
+          </div>
+          <div id="inferenceSteps" class="space-y-2 max-h-[400px] overflow-auto"></div>
+        </div>
       </div>
     </section>
 
     <!-- MCP 页 -->
     <section id="mcp" class="tab-content hidden grid grid-cols-12 gap-4">
-      <div class="col-span-12 lg:col-span-4 card p-4">
-        <h3 class="font-medium mb-3">MCP Server 管理</h3>
-        <div class="mb-3">
-          <label>发布到 MCP 的本体</label>
-          <select id="mcpOntology" class="w-full mb-2"></select>
-          <div class="text-xs text-slate-500">发布后，外部 Agent 可通过 SSE 端点调用工具。</div>
+      <div class="col-span-12 lg:col-span-4 flex flex-col gap-4">
+        <div class="card p-4">
+          <h3 class="font-medium mb-3">MCP Server 管理</h3>
+          <div class="mb-3">
+            <label>发布到 MCP 的本体</label>
+            <select id="mcpOntology" class="w-full mb-2"></select>
+            <div class="text-xs text-slate-500">发布后，外部 Agent 可通过 SSE 端点调用工具。同一项目可发布多个本体（共享端点）。</div>
+          </div>
+          <div class="flex gap-2 mb-3">
+            <button class="btn" onclick="publishMcpServer()">发布 / 更新</button>
+            <button class="btn secondary" onclick="unpublishMcpServer()">取消发布（整个项目）</button>
+          </div>
+          <div id="mcpStatusBox" class="text-sm"></div>
         </div>
-        <div class="flex gap-2 mb-3">
-          <button class="btn" onclick="publishMcpServer()">发布 / 更新</button>
-          <button class="btn secondary" onclick="unpublishMcpServer()">取消发布</button>
+        <div class="card p-4">
+          <h3 class="font-medium mb-2">多项目共存</h3>
+          <div id="mcpCoexist" class="space-y-1"></div>
         </div>
-        <div id="mcpStatusBox" class="text-sm"></div>
+        <div class="card p-4 text-xs text-slate-400 space-y-1.5">
+          <h3 class="font-medium text-sm text-slate-200 mb-1">端点规则</h3>
+          <div>• 每个项目一个 MCP Server：SSE 端点 <code class="text-slate-300">/mcp/{{project_id}}</code>，消息端点 <code class="text-slate-300">/mcp/{{project_id}}/messages/</code>。</div>
+          <div>• 项目内多个本体可先后发布，共享同一端点与工具集（工具按 ontology_id 参数区分本体）。</div>
+          <div>• 多个项目可同时发布，各自端点独立共存、互不影响。</div>
+          <div>• 发布状态保存在内存中，后端重启后需重新发布（本体数据不受影响）。</div>
+        </div>
       </div>
       <div class="col-span-12 lg:col-span-8 flex flex-col gap-4">
         <div class="card p-4">
@@ -306,12 +371,15 @@
     <section id="action" class="tab-content hidden grid grid-cols-12 gap-4">
       <div class="col-span-12 lg:col-span-4 flex flex-col gap-4">
         <div class="card p-4">
-          <div class="flex justify-between items-center mb-3">
+          <div class="flex justify-between items-center mb-1">
             <h3 class="font-medium">业务动作</h3>
             <div class="flex gap-2">
               <button class="btn" onclick="startCreateAction()">+ 新建</button>
               <button class="btn secondary" onclick="showActionTemplates()">模板</button>
             </div>
+          </div>
+          <div class="mb-3">
+            <span class="badge draft" title="当前业务动作模块仅展示与 Dry Run 预览；回写业务系统（webhook/MCP 外呼）为未开发能力，后端已拦截。">仅展示 · 回写未开发</span>
           </div>
           <div class="mb-3">
             <select id="actionCategoryFilter" class="w-full text-xs" onchange="renderActionList()">
@@ -387,9 +455,10 @@
             <h3 class="font-medium">输入参数</h3>
             <div class="flex gap-2">
               <button class="btn secondary" onclick="runActionDry()">Dry Run 预览</button>
-              <button class="btn" onclick="runActionExecute()">触发执行</button>
+              <button class="btn" id="actionExecuteBtn" onclick="runActionExecute()" disabled title="回写业务系统为未开发能力（仅展示模式）">触发执行（未开放）</button>
             </div>
           </div>
+          <div class="mb-3 p-2 rounded-lg bg-slate-800/40 text-xs text-slate-500">当前业务动作页为「仅展示」模式：可定义动作与 Dry Run 预览执行计划；「触发执行 / 确认回写」待回写能力开发后开放（后端已拦截外呼）。</div>
           <div id="actionForm" class="mb-3 space-y-4"></div>
           <div id="actionPendingBox" class="hidden mb-3 p-3 rounded-lg border border-amber-600/40 bg-amber-900/20">
             <div class="flex items-center justify-between mb-2">
@@ -397,7 +466,7 @@
               <span class="text-xs text-slate-400" id="actionToken"></span>
             </div>
             <pre id="actionPlanned" class="mb-2"></pre>
-            <button class="btn success" onclick="runActionConfirm()">确认并回写</button>
+            <button class="btn success" id="actionConfirmBtn" onclick="runActionConfirm()" disabled title="回写业务系统为未开发能力（仅展示模式）">确认并回写（未开放）</button>
           </div>
           <div id="actionResultBox" class="hidden">
             <label>执行结果</label>

@@ -121,7 +121,21 @@ def _build_shapes(g: Graph, objects, obj_by_id, ontology) -> None:
             g.add((node_shape, SH.property, ps))
             g.add((ps, SH.path, prop))
             if tgt:
-                g.add((ps, SH["class"], URIRef(BASE + _local(tgt["id"]))))
+                # 关系值双形态（与 rdf_sync/write_relations 约定一致）：
+                # 可解析时为目标类实例引用（sh:class）；未解析时保留目标 stable_key 字面量
+                # （sh:datatype 取目标 stable_key 属性类型），物化建边时再解析。
+                tgt_sk = tgt.get("stable_key")
+                sk_attr = next((a for a in tgt.get("attributes", []) if a["id"] == tgt_sk), None)
+                sk_dt = _xsd_for(sk_attr.get("data_type", "string")) if sk_attr else XSD.string
+                list0, list1 = BNode(), BNode()
+                shape_cls, shape_lit = BNode(), BNode()
+                g.add((ps, SH["or"], list0))
+                g.add((list0, RDF.first, shape_cls))
+                g.add((shape_cls, SH["class"], URIRef(BASE + _local(tgt["id"]))))
+                g.add((list0, RDF.rest, list1))
+                g.add((list1, RDF.first, shape_lit))
+                g.add((shape_lit, SH["datatype"], sk_dt))
+                g.add((list1, RDF.rest, RDF.nil))
 
     # 全局约束（仅处理 unique 规则）
     for cst in ontology.get("constraints", []):
@@ -162,12 +176,30 @@ def translate_to_shacl(ontology: dict[str, Any]) -> Graph:
 
 
 def build_instance_graph(ontology: dict[str, Any], instances: list[dict[str, Any]]) -> Graph:
-    """候选/样本实例 → ABox 数据图（供 SHACL 校验）。"""
+    """候选/样本实例 → ABox 数据图（供 SHACL 校验）。
+
+    关系字段约定（与 rdf_sync / write_relations 一致）：值为目标实例的 stable_key 值。
+    同批次内可解析时指向目标实例 subject（sh:class 形态）；否则保留字面量（sh:datatype 形态），
+    由物化建边（write_relations）在落库时解析到库内既有实例。
+    """
     g = Graph()
     g.bind("ont", BASE)
-    obj_by_id = {o["id"]: o for o in ontology.get("objects", [])}
-    attr_ids = {o["id"]: {a["id"] for a in o.get("attributes", [])} for o in ontology.get("objects", [])}
-    rel_ids = {o["id"]: {r["id"] for r in o.get("relations", [])} for o in ontology.get("objects", [])}
+    objects = ontology.get("objects", [])
+    obj_by_id = {o["id"]: o for o in objects}
+    attr_ids = {o["id"]: {a["id"] for a in o.get("attributes", [])} for o in objects}
+    rel_ids = {o["id"]: {r["id"] for r in o.get("relations", [])} for o in objects}
+    rel_by_id = {o["id"]: {r["id"]: r for r in o.get("relations", [])} for o in objects}
+    # 批次内 stable_key 值 → 实例 subject（按对象类型分桶，避免不同对象同值串号）
+    key_to_subj: dict[str, dict[str, URIRef]] = {}
+    for i, inst in enumerate(instances):
+        otype = inst.get("object_type") or inst.get("type")
+        o = obj_by_id.get(otype or "")
+        if not otype or not o:
+            continue
+        sk = o.get("stable_key")
+        v = inst.get(sk) if sk else None
+        if v is not None:
+            key_to_subj.setdefault(otype, {}).setdefault(str(v), URIRef(BASE + "inst_" + str(i)))
     for i, inst in enumerate(instances):
         otype = inst.get("object_type") or inst.get("type")
         if not otype or otype not in obj_by_id:
@@ -180,7 +212,10 @@ def build_instance_graph(ontology: dict[str, Any], instances: list[dict[str, Any
             if k in attr_ids.get(otype, set()):
                 g.add((subj, URIRef(BASE + _local(k)), Literal(v)))
             elif k in rel_ids.get(otype, set()):
-                g.add((subj, URIRef(BASE + _local(k)), URIRef(BASE + _local(str(v)))))
+                rel_def = rel_by_id.get(otype, {}).get(k)
+                tgt_type = rel_def.get("target_object") if rel_def else None
+                target = key_to_subj.get(tgt_type, {}).get(str(v)) if tgt_type else None
+                g.add((subj, URIRef(BASE + _local(k)), target if target is not None else Literal(v)))
     return g
 
 

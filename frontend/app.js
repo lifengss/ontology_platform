@@ -121,7 +121,10 @@ async function api(path, opts = {}) {
     const elapsed = Math.round(performance.now() - start);
     if (!r.ok) {
       clientLog('error', `API ${opts.method || 'GET'} ${path} failed`, { status: r.status, message: j.error?.message, elapsed_ms: elapsed });
-      throw new Error(j.error?.message || `HTTP ${r.status}`);
+      const err = new Error(j.error?.message || `HTTP ${r.status}`);
+      err.code = j.error?.code || null;
+      err.details = j.error?.details || null; // 2.2：保留后端 details（如 violations 明细）
+      throw err;
     }
     clientLog('info', `API ${opts.method || 'GET'} ${path} ok`, { status: r.status, elapsed_ms: elapsed });
     return j;
@@ -379,22 +382,6 @@ function renderOntologySelects() {
       sel.value = prev;
     }
   });
-  renderIngestObjectTypeOptions();
-}
-
-function renderIngestObjectTypeOptions() {
-  const sel = $('ingestObjectType');
-  if (!sel) return;
-  const ontologyId = $('ingestOntology').value;
-  const prev = sel.value;
-  sel.innerHTML = '<option value="">-- 选择对象类型 --</option>';
-  const ontology = state.ontologies.find(o => o.id === ontologyId);
-  if (!ontology) return;
-  const opts = (ontology.objects || []).map(o => '<option value="' + o.id + '">' + esc(o.name || o.id) + '</option>').join('');
-  sel.innerHTML += opts;
-  if (prev && (ontology.objects || []).find(o => o.id === prev)) {
-    sel.value = prev;
-  }
 }
 
 function selectOntology(o) {
@@ -457,7 +444,7 @@ function renderObjectForms() {
       '<div class="grid grid-cols-12 gap-2 items-end">' +
         '<div class="col-span-3"><label class="text-[10px] text-slate-500">关系 ID（英文/下划线）</label><input class="w-full rel-id" data-oidx="' + idx + '" data-ridx="' + ridx + '" value="' + esc(r.id) + '" placeholder="belongs_to" /></div>' +
         '<div class="col-span-3"><label class="text-[10px] text-slate-500">显示名称（中文）</label><input class="w-full rel-name" data-oidx="' + idx + '" data-ridx="' + ridx + '" value="' + esc(r.name) + '" placeholder="所属" /></div>' +
-        '<div class="col-span-3"><label class="text-[10px] text-slate-500">目标对象 ID</label><input class="w-full rel-target" data-oidx="' + idx + '" data-ridx="' + ridx + '" value="' + esc(r.target_object) + '" placeholder="obj_department" /></div>' +
+        '<div class="col-span-3"><label class="text-[10px] text-slate-500">目标对象 ID（自动补全）</label><input class="w-full rel-target" data-oidx="' + idx + '" data-ridx="' + ridx + '" value="' + esc(r.target_object) + '" placeholder="obj_department" list="relTargetList" /></div>' +
         '<div class="col-span-2">' + cardSelect('rel-card', idx, ridx, r.cardinality) + '</div>' +
         '<div class="col-span-1"><span class="remove-btn" onclick="removeRel(' + idx + ', ' + ridx + ')">删除</span></div>' +
       '</div>'
@@ -474,7 +461,16 @@ function renderObjectForms() {
       '<div class="form-section-title"><span>关系</span><button class="btn" onclick="addRel(' + idx + ')">+ 关系</button></div>' +
       '<div class="space-y-2">' + relHtml + '</div>' +
     '</div>';
-  }).join('');
+  }).join('') + relTargetDatalist();
+}
+
+// 2.1：关系"目标对象 ID"自动补全（本表单内全部对象）
+function relTargetDatalist() {
+  const opts = state.formObjects
+    .filter(o => o.id)
+    .map(o => '<option value="' + esc(o.id) + '">' + esc(o.name || '') + '</option>')
+    .join('');
+  return '<datalist id="relTargetList">' + opts + '</datalist>';
 }
 
 function typeSelect(cls, oidx, aidx, val) {
@@ -575,8 +571,18 @@ async function saveOntology() {
     closeEditor();
     loadOntologies();
   } catch (e) {
-    toast('保存失败: ' + e.message, 'err');
+    toast('保存失败: ' + _formatApiError(e), 'err');
   }
+}
+
+// 2.2：业务层校验失败时逐条展示具体失败项
+function _formatApiError(e) {
+  const v = e.details?.violations;
+  if (Array.isArray(v) && v.length) {
+    const lines = v.slice(0, 10).map(x => (typeof x === 'string' ? x : (x.message || JSON.stringify(x))));
+    return '业务层校验未通过，具体失败项：\n• ' + lines.join('\n• ') + (v.length > 10 ? '\n• …（共 ' + v.length + ' 项）' : '');
+  }
+  return e.message;
 }
 
 async function generateFromText() {
@@ -721,44 +727,75 @@ function viewGraph() {
 function onIngestOntologyChange() {
   state.selectedIngestObject = null;
   state.selectedInstance = null;
-  state.expandedTreeNodes = new Set(['__root__']);
+  const sel = $('ingestOntology').value;
+  const o = state.ontologies.find(x => x.id === sel);
+  state.expandedTreeNodes = new Set(o ? (o.objects || []).map(x => x.id) : []);
   closeInstanceDetail();
   renderIngestTarget();
   renderIngestObjectMeta(null);
-  renderIngestObjectTypeOptions();
-  $('ingestObjectTypeManual').value = '';
+  refreshSingleImportContext();
+}
+
+// ---- 1.5 左侧实体层级树：按 many_to_one 关系构建父子层级（Protege 风格） ----
+function buildObjectTree(ont) {
+  const objs = ont.objects || [];
+  const byId = new Map(objs.map(o => [o.id, o]));
+  const childrenOf = new Map();
+  const hasParent = new Set();
+  objs.forEach(o => (o.relations || []).forEach(r => {
+    if (r.cardinality === 'many_to_one' && byId.has(r.target_object)) {
+      if (!childrenOf.has(r.target_object)) childrenOf.set(r.target_object, []);
+      childrenOf.get(r.target_object).push(o.id);
+      hasParent.add(o.id);
+    }
+  }));
+  const placed = new Set();
+  const walk = id => { placed.add(id); (childrenOf.get(id) || []).forEach(walk); };
+  const roots = objs.filter(o => !hasParent.has(o.id)).map(o => o.id);
+  roots.forEach(walk);
+  objs.forEach(o => { if (!placed.has(o.id) && !roots.includes(o.id)) roots.push(o.id); });
+  return { roots, childrenOf };
 }
 
 function renderIngestTarget() {
   const id = $('ingestOntology').value;
   const o = state.ontologies.find(x => x.id === id);
-  if (!o) return $('ingestTarget').innerHTML = '';
+  const target = $('ingestTarget');
+  if (!o) { target.innerHTML = ''; return; }
   const instances = state.instances || [];
-  $('ingestTarget').innerHTML = (o.objects || []).map(obj => {
-    const objId = esc(obj.id);
-    const objName = esc(obj.name || obj.id);
-    const objInstances = instances.filter(it => it.object_type === obj.id);
-    const isExpanded = state.expandedTreeNodes.has(obj.id);
-    const isSelected = state.selectedIngestObject?.id === obj.id;
+  const { roots, childrenOf } = buildObjectTree(o);
+  const byId = new Map((o.objects || []).map(x => [x.id, x]));
+  const renderNode = objId => {
+    const obj = byId.get(objId);
+    if (!obj) return '';
+    const objInstances = instances.filter(it => it.object_type === objId);
+    const isExpanded = state.expandedTreeNodes.has(objId);
+    const isSelected = state.selectedIngestObject?.id === objId;
+    const hasChildren = (childrenOf.get(objId) || []).length > 0;
+    const caret = (hasChildren || objInstances.length) ? (isExpanded ? '▼' : '▶') : '·';
     const headerCls = isSelected ? 'bg-slate-800 border-slate-600' : 'border-transparent hover:bg-slate-800/40 hover:border-slate-700';
-    const caret = isExpanded ? '▼' : '▶';
-    const childCls = isExpanded ? '' : 'hidden';
-    const instRows = objInstances.map(inst => {
-      const instId = esc(inst.id || inst.node_id || '');
-      const instLabel = esc(_instanceLabel(inst));
-      const active = state.selectedInstance?.id === inst.id ? 'bg-slate-800 text-slate-200' : 'text-slate-400 hover:bg-slate-800/40 hover:text-slate-200';
-      return '<div class="py-1 px-2 rounded cursor-pointer ' + active + '" onclick="selectInstance(' + JSON.stringify(inst).replace(/"/g, '&quot;') + ')">' +
-        '<span class="text-xs text-slate-500">' + instId.slice(0, 8) + '</span> ' + instLabel + '</div>';
-    }).join('');
-    return '<div class="mb-1 rounded-lg border ' + headerCls + '">' +
+    let html = '<div class="rounded-lg border ' + headerCls + '">' +
       '<div class="p-2 flex items-center gap-1 cursor-pointer" onclick="toggleObjectTree(' + JSON.stringify(obj).replace(/"/g, '&quot;') + ')">' +
         '<span class="text-slate-500 w-3">' + caret + '</span>' +
-        '<div class="flex-1"><div class="flex justify-between"><span class="font-medium text-slate-200">' + objName + '</span><span class="text-xs text-slate-500">' + objId + '</span></div>' +
-        '<div class="text-xs text-slate-500">' + (obj.attributes?.length || 0) + ' 属性 · ' + (obj.relations?.length || 0) + ' 关系 · ' + objInstances.length + ' 实例</div></div>' +
-      '</div>' +
-      '<div id="tree-' + objId + '" class="pb-1 pl-6 ' + childCls + '">' + (instRows || '<div class="py-1 px-2 text-slate-600">暂无实例</div>') + '</div>' +
-    '</div>';
-  }).join('');
+        '<div class="flex-1"><div class="flex justify-between"><span class="font-medium text-slate-200">' + esc(obj.name || objId) + '</span><span class="text-xs text-slate-500">' + objInstances.length + ' 实例</span></div></div>' +
+      '</div>';
+    if (isExpanded) {
+      let body = '<div class="pb-1 pl-6">';
+      (childrenOf.get(objId) || []).forEach(cid => { body += renderNode(cid); });
+      const instRows = objInstances.map(inst => {
+        const instId = esc(inst.id || inst.node_id || '');
+        const active = state.selectedInstance?.id === inst.id ? 'bg-slate-800 text-slate-200' : 'text-slate-400 hover:bg-slate-800/40 hover:text-slate-200';
+        return '<div class="py-1 px-2 rounded cursor-pointer ' + active + '" onclick="selectInstance(' + JSON.stringify(inst).replace(/"/g, '&quot;') + ')">' +
+          '<span class="text-xs text-slate-500">' + instId.slice(0, 8) + '</span> ' + esc(_instanceLabel(inst)) + '</div>';
+      }).join('');
+      body += (instRows || (!hasChildren ? '<div class="py-1 px-2 text-slate-600">暂无实例</div>' : ''));
+      body += '</div>';
+      html += body;
+    }
+    html += '</div>';
+    return '<div class="mb-1">' + html + '</div>';
+  };
+  target.innerHTML = roots.map(r => renderNode(r)).join('') || '<div class="text-xs text-slate-400">该本体尚未定义对象</div>';
 }
 
 function _instanceLabel(inst) {
@@ -777,9 +814,28 @@ function toggleObjectTree(obj) {
     state.expandedTreeNodes.add(obj.id);
   }
   state.selectedIngestObject = obj;
+  state.selectedInstance = null;
   renderIngestTarget();
-  $('ingestObjectType').value = obj.id;
   renderIngestObjectMeta(obj);
+  refreshSingleImportContext();
+}
+
+// ---- 1.2 单对象导入卡片：选中对象后才出现导入操作 ----
+function refreshSingleImportContext() {
+  const obj = state.selectedIngestObject;
+  const hint = $('singleImportHint');
+  const body = $('singleImportBody');
+  const badge = $('singleImportTarget');
+  if (!hint || !body) return;
+  if (!obj) {
+    hint.classList.remove('hidden');
+    body.classList.add('hidden');
+    if (badge) badge.textContent = '';
+    return;
+  }
+  hint.classList.add('hidden');
+  body.classList.remove('hidden');
+  if (badge) badge.textContent = obj.name || obj.id;
 }
 
 function selectInstance(inst) {
@@ -791,9 +847,8 @@ function selectInstance(inst) {
 function selectIngestObject(obj) {
   state.selectedIngestObject = obj;
   renderIngestTarget();
-  $('ingestObjectType').value = obj.id;
-  $('ingestObjectTypeManual').value = obj.id;
   renderIngestObjectMeta(obj);
+  refreshSingleImportContext();
   if (!$('ingestFieldMap').dataset.touched) {
     $('ingestFieldMap').value = suggestFieldMapForObject(obj);
   }
@@ -805,27 +860,53 @@ function selectIngestObject(obj) {
 async function uploadIngestFile() {
   const ontologyId = $('ingestOntology').value;
   if (!ontologyId) return toast('请先选择本体', 'info');
+  const objectType = state.selectedIngestObject?.id || '';
+  if (!objectType) return toast('请先在左侧实体树选择目标对象', 'info');
   const fileInput = $('ingestFile');
   if (!fileInput.files || !fileInput.files[0]) return toast('请选择 Excel 或 CSV 文件', 'info');
-  const objectType = $('ingestObjectType').value || '';
   const formData = new FormData();
   formData.append('file', fileInput.files[0]);
   try {
-    const j = await api('/api/ingest/upload?ontology_id=' + encodeURIComponent(ontologyId) + (objectType ? '&object_type=' + encodeURIComponent(objectType) : ''), {
+    const j = await api('/api/ingest/upload?ontology_id=' + encodeURIComponent(ontologyId) + '&object_type=' + encodeURIComponent(objectType), {
       method: 'POST',
       body: formData,
     });
     const list = j.data.candidates || [j.data];
     const total = j.data.total || list.length;
-    toast('已生成 ' + total + ' 个候选，共 ' + list.reduce((s, c) => s + (c.instances || []).length, 0) + ' 条实例', 'ok');
+    toast('已为「' + (state.selectedIngestObject.name || objectType) + '」生成 ' + total + ' 个候选，共 ' + list.reduce((s, c) => s + (c.instances || []).length, 0) + ' 条实例，请在下方候选审核区确认后入库', 'ok');
     fileInput.value = '';
     loadCandidates();
   } catch (e) { toast('上传失败: ' + e.message, 'err'); }
 }
 
+// ---- 1.3 多对象批量导入（逆向建模：每个 sheet 自动匹配对象，全部命中对象生成候选） ----
+async function uploadIngestFileGlobal() {
+  const ontologyId = $('ingestOntology').value;
+  if (!ontologyId) return toast('请先选择本体', 'info');
+  const fileInput = $('ingestFileGlobal');
+  const msg = $('ingestUploadMsgGlobal');
+  if (!fileInput.files || !fileInput.files[0]) return toast('请选择 Excel 或 CSV 文件', 'info');
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  if (msg) msg.textContent = '上传中…';
+  try {
+    const j = await api('/api/ingest/upload?ontology_id=' + encodeURIComponent(ontologyId), { method: 'POST', body: formData });
+    const list = j.data.candidates || [j.data];
+    const total = j.data.total || list.length;
+    const cnt = list.reduce((s, c) => s + (c.instances || []).length, 0);
+    toast('多对象批量导入完成：命中 ' + total + ' 个对象、共 ' + cnt + ' 条实例（均为候选）。请在下方「候选审核」逐条确认入库', 'ok');
+    if (msg) msg.textContent = '已上传 ' + total + ' 组候选 / ' + cnt + ' 条';
+    fileInput.value = '';
+    loadCandidates();
+  } catch (e) {
+    toast('上传失败: ' + e.message, 'err');
+    if (msg) msg.textContent = '上传失败';
+  }
+}
+
 function downloadIngestTemplate() {
   const ontologyId = $('ingestOntology').value;
-  const objectType = $('ingestObjectType').value || $('ingestObjectTypeManual').value;
+  const objectType = state.selectedIngestObject?.id || '';
   if (!ontologyId || !objectType) return toast('请先选择本体和目标对象类型', 'info');
   const ontology = state.ontologies.find(o => o.id === ontologyId);
   const objDef = ontology && (ontology.objects || []).find(o => o.id === objectType);
@@ -1006,9 +1087,9 @@ async function saveObjectMeta() {
     const refreshed = o && (o.objects || []).find(obj => obj.id === state.selectedIngestObject.id);
     if (refreshed) {
       state.selectedIngestObject = refreshed;
-      $('ingestObjectType').value = refreshed.id;
       renderIngestTarget();
       renderIngestObjectMeta(refreshed);
+      refreshSingleImportContext();
       suggestFieldMap(refreshed);
     }
   } catch (e) { toast('保存失败: ' + e.message, 'err'); }
@@ -1106,8 +1187,8 @@ function suggestFieldMapForObject(objDef) {
 
 async function previewIngest() {
   const ontologyId = $('ingestOntology').value;
-  const objectType = $('ingestObjectTypeManual').value.trim();
-  if (!ontologyId || !objectType) return toast('请选择本体和目标对象', 'info');
+  const objectType = state.selectedIngestObject?.id || '';
+  if (!ontologyId || !objectType) return toast('请先在左侧实体树选择目标对象', 'info');
   const ontology = state.ontologies.find(o => o.id === ontologyId);
   const objDef = ontology && (ontology.objects || []).find(o => o.id === objectType);
   if (!objDef) return toast('未找到目标对象类型定义', 'err');
@@ -1167,26 +1248,120 @@ async function loadCandidates() {
   try {
     const j = await api(url);
     state.candidates = j.data.items || [];
-    const el = $('candidateList');
-    if (!state.candidates.length) { el.innerHTML = '<div class="text-sm text-slate-500">暂无候选</div>'; return; }
-    el.innerHTML = state.candidates.map(c => renderCandidateCard(c)).join('');
+    renderCandidateTable();
   } catch (e) { toast('加载候选失败: ' + e.message, 'err'); }
 }
 
-function renderCandidateCard(c) {
-  const statusColor = { pending: 'text-amber-400', imported: 'text-emerald-400', rejected: 'text-red-400' };
-  const statusText = { pending: '待审核', imported: '已入库', rejected: '已驳回' };
-  const insts = (c.instances || []).slice(0, 3).map((inst, idx) => '<div class="text-xs text-slate-400 pl-2 border-l-2 border-slate-700">#' + idx + ' ' + JSON.stringify(Object.fromEntries(Object.entries(inst).filter(([k]) => !k.startsWith('_')))).slice(0, 120) + '</div>').join('');
-  const more = (c.instances || []).length > 3 ? '<div class="text-xs text-slate-500">还有 ' + (c.instances.length - 3) + ' 条…</div>' : '';
-  const actions = c.status === 'pending'
-    ? '<button class="btn" onclick="approveCandidate(\'' + c.id + '\')">入库</button><button class="btn secondary" onclick="startReviewCandidate(\'' + c.id + '\')">审核</button><button class="btn secondary" onclick="rejectCandidate(\'' + c.id + '\')">驳回</button>'
-    : '<button class="btn secondary" onclick="startReviewCandidate(\'' + c.id + '\')">查看</button>';
-  return '<div class="p-2 rounded-lg border border-slate-700/50">' +
-    '<div class="flex justify-between"><span class="text-sm font-medium">' + c.id + '</span><span class="text-xs ' + (statusColor[c.status] || 'text-slate-400') + '">' + (statusText[c.status] || c.status) + '</span></div>' +
-    '<div class="text-xs text-slate-400 mb-1">' + (c.object_type || '') + ' · instances: ' + (c.instances?.length || 0) + '</div>' +
-    insts + more +
-    '<div class="mt-2 flex gap-2">' + actions + '</div>' +
-  '</div>';
+// ---- 1.4 候选审核：表格 + 逐行按钮 + 复选框批量操作 ----
+function renderCandidateTable() {
+  const el = $('candidateList');
+  const totalEl = $('candidateTotal');
+  const list = state.candidates || [];
+  if (totalEl) totalEl.textContent = '共 ' + list.length + ' 组候选';
+  if (!list.length) {
+    el.innerHTML = '<div class="text-sm text-slate-500">暂无候选。上传文件或 Preview 后，自动抽取的实例会出现在这里等待审核。</div>';
+    return;
+  }
+  const statusBadge = {
+    pending: '<span class="badge warning">待审核</span>',
+    imported: '<span class="badge success">已入库</span>',
+    rejected: '<span class="badge danger">已驳回</span>',
+  };
+  let html = '<table class="w-full text-xs border-collapse"><thead><tr class="text-slate-400">' +
+    '<th class="border-b border-slate-700 p-1 w-8"><input type="checkbox" id="candCheckAll" title="全选" /></th>' +
+    '<th class="border-b border-slate-700 p-1 text-left">候选 ID</th>' +
+    '<th class="border-b border-slate-700 p-1 text-left">对象</th>' +
+    '<th class="border-b border-slate-700 p-1 text-left">实例数</th>' +
+    '<th class="border-b border-slate-700 p-1 text-left">来源</th>' +
+    '<th class="border-b border-slate-700 p-1 text-left">状态</th>' +
+    '<th class="border-b border-slate-700 p-1 text-left">行操作</th>' +
+    '</tr></thead><tbody>';
+  list.forEach(c => {
+    const cid = esc(c.id);
+    const isPending = c.status === 'pending';
+    const isRejected = c.status === 'rejected';
+    const isImported = c.status === 'imported';
+    let actions = '';
+    if (isPending) {
+      actions = '<button class="btn text-xs" onclick="approveCandidate(\'' + cid + '\')">批准入库</button>' +
+        '<button class="btn secondary text-xs" onclick="startReviewCandidate(\'' + cid + '\')">编辑</button>' +
+        '<button class="btn secondary text-xs" onclick="rejectCandidate(\'' + cid + '\')">驳回</button>';
+    } else if (isRejected) {
+      actions = '<button class="btn secondary text-xs" onclick="startReviewCandidate(\'' + cid + '\')">查看</button>' +
+        '<button class="btn secondary text-xs" onclick="revertCandidate(\'' + cid + '\')">恢复待审核</button>' +
+        '<button class="btn secondary text-xs" style="background:#991b1b" onclick="deleteCandidateRow(\'' + cid + '\')">删除</button>';
+    } else if (isImported) {
+      actions = '<button class="btn secondary text-xs" onclick="startReviewCandidate(\'' + cid + '\')">查看</button>' +
+        '<button class="btn secondary text-xs" style="background:#991b1b" onclick="deleteCandidateRow(\'' + cid + '\')">删除</button>';
+    }
+    html += '<tr class="border-b border-slate-800">' +
+      '<td class="p-1"><input type="checkbox" class="cand-check" value="' + cid + '" /></td>' +
+      '<td class="p-1 font-mono text-slate-500">' + cid.slice(0, 8) + '</td>' +
+      '<td class="p-1 font-mono">' + esc(c.object_type || '-') + '</td>' +
+      '<td class="p-1">' + (c.instances?.length || 0) + '</td>' +
+      '<td class="p-1 text-slate-400">' + esc(c.source || '-') + '</td>' +
+      '<td class="p-1">' + (statusBadge[c.status] || esc(c.status || '')) + '</td>' +
+      '<td class="p-1"><div class="flex gap-1 flex-wrap">' + actions + '</div></td>' +
+      '</tr>';
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+  const all = $('candCheckAll');
+  if (all) all.onchange = () => document.querySelectorAll('.cand-check').forEach(cb => { cb.checked = all.checked; });
+}
+
+function _checkedCandidateIds() {
+  return Array.from(document.querySelectorAll('.cand-check:checked')).map(cb => cb.value);
+}
+
+function _uncheckCandidates() {
+  document.querySelectorAll('.cand-check').forEach(cb => { cb.checked = false; });
+  const all = $('candCheckAll');
+  if (all) all.checked = false;
+}
+
+async function batchCandidates(action) {
+  const ids = _checkedCandidateIds();
+  if (!ids.length) return toast('请先勾选要操作的候选行', 'info');
+  const labels = { approve: '批量批准', reject: '批量驳回', restore: '批量恢复待审核', delete: '批量删除' };
+  if (action === 'delete' && !confirm('确认删除选中的 ' + ids.length + ' 组候选？此操作不可恢复。')) return;
+  try {
+    if (action === 'approve' || action === 'reject') {
+      const j = await api('/api/ingest/candidates/batch-' + action, { method: 'POST', body: JSON.stringify({ candidate_ids: ids }) });
+      const d = j.data || {};
+      toast(labels[action] + '完成：生效 ' + (d.affected || 0) + ' 组' + (d.skipped ? '，跳过 ' + d.skipped + ' 组（状态不符）' : ''), 'ok');
+    } else {
+      let done = 0, failed = 0;
+      for (const id of ids) {
+        try {
+          if (action === 'restore') await api('/api/ingest/candidates/' + id + '/revert', { method: 'POST', body: '{}' });
+          else await api('/api/ingest/candidates/' + id, { method: 'DELETE' });
+          done++;
+        } catch (e) { failed++; }
+      }
+      toast(labels[action] + '完成：' + done + ' 组' + (failed ? '，失败 ' + failed + ' 组' : ''), failed ? 'err' : 'ok');
+    }
+    _uncheckCandidates();
+    loadCandidates();
+    if (action === 'approve') loadInstances();
+  } catch (e) { toast('批量操作失败: ' + e.message, 'err'); }
+}
+
+async function revertCandidate(id) {
+  try {
+    await api('/api/ingest/candidates/' + id + '/revert', { method: 'POST', body: '{}' });
+    toast('候选已恢复为待审核', 'ok');
+    loadCandidates();
+  } catch (e) { toast('恢复失败: ' + e.message, 'err'); }
+}
+
+async function deleteCandidateRow(id) {
+  if (!confirm('确认删除该候选（含其全部实例数据）？')) return;
+  try {
+    await api('/api/ingest/candidates/' + id, { method: 'DELETE' });
+    toast('候选已删除', 'ok');
+    loadCandidates();
+  } catch (e) { toast('删除失败: ' + e.message, 'err'); }
 }
 
 async function approveCandidate(cid) {
@@ -1247,20 +1422,24 @@ function startReviewCandidate(cid) {
   const c = state.candidates.find(x => x.id === cid);
   if (!c) return toast('候选未找到', 'err');
   reviewingCandidateId = cid;
+  const readOnly = c.status !== 'pending';
   const objDef = getObjectDefForCandidate(c);
   const attrs = objDef?.attributes || [];
   const rels = objDef?.relations || [];
   const rows = (c.instances || []).map((inst, idx) => {
     const inputs = attrs.map(a => renderAttrInput(a, inst[a.id], idx)).join('') +
       rels.map(r => renderRelInput(r, inst[r.id], idx)).join('');
+    const delBtn = readOnly ? '' : ' <span class="cursor-pointer text-amber-400" onclick="deleteReviewInstance(' + idx + ')">删除</span>';
     return '<div class="p-3 rounded border border-slate-700/50 mb-2">' +
-      '<div class="flex justify-between text-xs text-slate-500 mb-2">#' + idx + ' <span class="cursor-pointer text-amber-400" onclick="deleteInstance(' + idx + ')">删除</span></div>' +
+      '<div class="flex justify-between text-xs text-slate-500 mb-2">#' + idx + delBtn + '</div>' +
       '<div class="grid grid-cols-2 gap-2">' + inputs + '</div>' +
     '</div>';
   }).join('');
-  const content = '<div class="space-y-2 max-h-[420px] overflow-auto mb-3">' + rows + '</div>' +
-    '<div class="flex gap-2"><button class="btn" onclick="saveReviewCandidate()">保存修改</button><button class="btn secondary" onclick="closeModal()">关闭</button></div>';
-  showModal('审核候选实例', content);
+  const saveBtn = readOnly ? '' : '<button class="btn" onclick="saveReviewCandidate()">保存修改</button>';
+  const readOnlyNote = readOnly ? '<div class="text-xs text-slate-500 mb-2">当前状态为「' + (c.status === 'imported' ? '已入库' : '已驳回') + '」，只读查看。</div>' : '';
+  const content = readOnlyNote + '<div class="space-y-2 max-h-[420px] overflow-auto mb-3">' + rows + '</div>' +
+    '<div class="flex gap-2">' + saveBtn + '<button class="btn secondary" onclick="closeModal()">关闭</button></div>';
+  showModal(readOnly ? '查看候选实例' : '审核候选实例', content, { readOnly });
 }
 
 function readAttrValue(attr, raw) {
@@ -1315,7 +1494,7 @@ async function saveReviewCandidate() {
   } catch (e) { toast('保存失败: ' + e.message, 'err'); }
 }
 
-async function deleteInstance(idx) {
+async function deleteReviewInstance(idx) {
   if (!reviewingCandidateId) return;
   try {
     await api('/api/ingest/candidates/' + reviewingCandidateId + '/instances/' + idx, { method: 'DELETE' });
@@ -1334,13 +1513,34 @@ async function loadInstances() {
     const j = await api(url);
     state.instances = j.data.items || [];
     renderIngestTarget();
-    const el = $('candidateList');
-    if (!state.instances.length) { el.innerHTML = '<div class="text-sm text-slate-500">该对象下暂无已入库实例</div>'; return; }
-    el.innerHTML = state.instances.map(inst => '<div class="p-2 rounded-lg border border-slate-700/50">' +
-      '<div class="flex justify-between"><span class="text-sm font-medium">' + esc(inst.object_type || '') + '</span><span class="text-xs text-slate-500">' + esc(inst.id || inst.node_id || '') + '</span></div>' +
-      '<pre class="text-xs text-slate-400">' + esc(JSON.stringify(inst.props || inst.instance || inst, null, 2)) + '</pre>' +
-    '</div>').join('');
+    renderInstanceList();
   } catch (e) { toast('加载实例失败: ' + e.message, 'err'); }
+}
+
+// ---- 1.1 独立实例列表区（静态信息下方，点击行可编辑） ----
+function renderInstanceList() {
+  const el = $('instanceList');
+  if (!el) return;
+  const countEl = $('instanceCount');
+  const list = state.instances || [];
+  const scope = state.selectedIngestObject ? '「' + (state.selectedIngestObject.name || state.selectedIngestObject.id) + '」' : '全部对象';
+  if (countEl) countEl.textContent = scope + ' 共 ' + list.length + ' 条';
+  if (!list.length) {
+    el.innerHTML = '<div class="text-sm text-slate-500">暂无已入库实例。选中左侧对象后使用「导入 / 添加实例」，或使用上方「多对象批量导入」。</div>';
+    return;
+  }
+  el.innerHTML = list.map(inst => {
+    const data = inst.instance || inst.props || inst;
+    const preview = Object.entries(data)
+      .filter(([k]) => !String(k).startsWith('_'))
+      .slice(0, 5)
+      .map(([k, v]) => esc(k) + '=' + esc(typeof v === 'object' ? JSON.stringify(v) : v))
+      .join('　');
+    const active = state.selectedInstance?.id === inst.id ? 'border-amber-500/60 bg-slate-800/60' : 'border-slate-700/50 hover:border-slate-600';
+    return '<div class="p-2 rounded-lg border ' + active + ' cursor-pointer" onclick="selectInstance(' + JSON.stringify(inst).replace(/"/g, '&quot;') + ')">' +
+      '<div class="flex justify-between"><span class="text-sm font-medium">' + esc(inst.object_type || '') + '</span><span class="text-xs text-slate-500">' + esc((inst.id || inst.node_id || '').slice(0, 16)) + '</span></div>' +
+      '<div class="text-xs text-slate-400 mt-1 truncate">' + preview + '</div></div>';
+  }).join('');
 }
 
 function renderInstanceDetail(inst) {
@@ -1483,7 +1683,7 @@ function closeInstanceDetail() {
   renderIngestTarget();
 }
 
-function showModal(title, content) {
+function showModal(title, content, opts) {
   let modal = $('ingestModal');
   if (!modal) {
     modal = document.createElement('div');
@@ -1495,6 +1695,9 @@ function showModal(title, content) {
   }
   $('ingestModalTitle').textContent = title;
   $('ingestModalBody').innerHTML = content;
+  if (opts && opts.readOnly) {
+    document.querySelectorAll('#ingestModalBody input, #ingestModalBody textarea, #ingestModalBody select').forEach(i => { i.disabled = true; });
+  }
   modal.classList.remove('hidden');
 }
 
@@ -1505,16 +1708,52 @@ function closeModal() {
 
 // ---- MCP ----
 async function loadMcpStatus() {
+  const box = $('mcpStatusBox');
+  let globalData = null;
   try {
+    // 5.2：多项目共存视图（不带 project_id 的全局状态）
+    try {
+      const g = await api('/api/mcp/server/status', { projectId: null, namespace: null });
+      globalData = g.data || {};
+    } catch (e) { /* 全局状态不可用不阻断 */ }
     const j = await api('/api/mcp/server/status');
     const d = j.data || {};
-    const box = $('mcpStatusBox');
     if (d.published) {
-      box.innerHTML = '<div class="ok">已发布</div><div class="text-xs text-slate-400">端点: ' + esc(d.endpoint || '') + '</div><div class="text-xs text-slate-400">工具: ' + (d.tools || []).join(', ') + '</div>';
+      const ontList = (d.published_ontologies || []).map(o =>
+        '<div class="flex justify-between items-center p-1.5 rounded border border-slate-700/50 text-xs">' +
+        '<span>' + esc(o.name || o.ontology_id) + '</span>' +
+        '<span class="cursor-pointer text-amber-400" title="仅下线该本体" onclick="unpublishMcpOntology(\'' + o.ontology_id + '\')">下线</span>' +
+        '</div>'
+      ).join('') || '<div class="text-xs text-slate-500">（未记录本体清单）</div>';
+      box.innerHTML = '<div class="text-emerald-400 font-medium mb-1">已发布</div>' +
+        '<div class="text-xs text-slate-400 mb-1">SSE 端点: <code class="text-slate-300">' + esc(d.endpoint || '') + '</code></div>' +
+        '<div class="text-xs text-slate-400 mb-2">消息端点: <code class="text-slate-300">' + esc(d.messages_endpoint || '') + '</code></div>' +
+        '<div class="text-xs text-slate-500 mb-1">已发布本体（' + (d.published_ontologies || []).length + ' 个，共享同一端点与工具）:</div>' +
+        '<div class="space-y-1 max-h-[160px] overflow-auto">' + ontList + '</div>' +
+        '<div class="text-xs text-slate-500 mt-2">工具: ' + (d.tools || []).join(', ') + '</div>';
     } else {
-      box.innerHTML = '<div class="text-slate-400">当前项目未发布 MCP Server</div>';
+      box.innerHTML = '<div class="text-slate-400">当前项目未发布 MCP Server。选择上方本体后点击「发布 / 更新」。</div>';
+    }
+    // 5.2：多项目共存状态
+    const projects = (globalData && globalData.published_projects) || [];
+    const coexEl = $('mcpCoexist');
+    if (coexEl) {
+      coexEl.innerHTML = projects.length
+        ? projects.map(p => '<div class="flex justify-between text-xs p-1.5 rounded border border-slate-700/50">' +
+            '<span>' + esc(p.project_id.slice(0, 8)) + '…</span>' +
+            '<span class="text-slate-400">' + esc(p.endpoint) + ' · ' + (p.published_ontologies || []).length + ' 本体</span></div>').join('')
+        : '<div class="text-xs text-slate-500">当前无项目处于发布状态</div>';
     }
   } catch (e) { toast('加载 MCP 状态失败: ' + e.message, 'err'); }
+}
+
+// 5.1：按本体取消发布（清单清空后项目 Server 自动下线）
+async function unpublishMcpOntology(ontologyId) {
+  try {
+    await api('/api/mcp/server/unpublish?ontology_id=' + encodeURIComponent(ontologyId), { method: 'POST', body: '{}' });
+    toast('已下线该本体的 MCP 发布', 'ok');
+    loadMcpStatus();
+  } catch (e) { toast('下线失败: ' + e.message, 'err'); }
 }
 
 async function loadMcpTools() {
@@ -1683,8 +1922,118 @@ async function loadInference() {
       '<div class="text-xs text-slate-400 mt-1">前提: ' + esc((s.premises || []).join('；')) + '</div>' +
       '<div class="text-xs text-emerald-400">结论: ' + esc(s.conclusion || '') + '</div>' +
       '</div>'
-    ).join('') : '<div class="text-sm text-slate-500">无推理结论</div>';
+    ).join('') : '<div class="text-sm text-slate-500">无推理结论（该本体未发现可推导的隐含公理）</div>';
   } catch (e) { toast('加载推理失败: ' + e.message, 'err'); }
+  loadImpactInstances(id);
+}
+
+// ---- 3.1 业务影响推理（实例值变化 → 下游业务影响） ----
+let impactInstances = [];
+
+async function loadImpactInstances(ontologyId) {
+  const id = ontologyId || $('inferOntology').value;
+  if (!id) return;
+  try {
+    const ji = await api('/api/ingest/instances?ontology_id=' + encodeURIComponent(id) + '&pageSize=200');
+    impactInstances = (ji.data && ji.data.items) || [];
+    const sel = $('impactInstance');
+    if (!sel) return;
+    sel.innerHTML = impactInstances.length
+      ? impactInstances.map(inst => {
+          const d = inst.instance || inst.props || inst;
+          const label = d.name || d.title || d.code || (inst.id || '').slice(0, 8);
+          return '<option value="' + esc(inst.id) + '">' + esc(inst.object_type) + ' · ' + esc(label) + '</option>';
+        }).join('')
+      : '<option value="">-- 暂无实例 --</option>';
+    onImpactInstanceChange();
+  } catch (e) { /* 实例加载失败不阻断模式层推理展示 */ }
+}
+
+function onImpactInstanceChange() {
+  const inst = impactInstances.find(x => x.id === $('impactInstance').value);
+  const attrSel = $('impactAttribute');
+  const newVal = $('impactNewValue');
+  if (!inst || !attrSel) return;
+  const d = inst.instance || inst.props || inst;
+  const entries = Object.entries(d).filter(([k, v]) => !String(k).startsWith('_') && v !== null && v !== '');
+  attrSel.innerHTML = entries.map(([k, v]) =>
+    '<option value="' + esc(k) + '"' + (newVal && newVal.dataset.attr === k ? '' : '') + '>' + esc(k) + '（当前: ' + esc(String(typeof v === 'object' ? JSON.stringify(v) : v).slice(0, 24)) + '）</option>'
+  ).join('') || '<option value="">-- 无可用属性 --</option>';
+  newVal.dataset.attr = '';
+  loadImpactPreview();
+}
+
+function loadImpactPreview() {
+  const inst = impactInstances.find(x => x.id === $('impactInstance').value);
+  const attr = $('impactAttribute').value;
+  const newVal = $('impactNewValue');
+  if (!inst || !attr) { newVal.placeholder = '如 2026-11-01'; newVal.dataset.attr = ''; return; }
+  const d = inst.instance || inst.props || inst;
+  const cur = d[attr];
+  newVal.placeholder = '如 2026-11-01';
+  if (!newVal.dataset.attr) { newVal.dataset.attr = attr; }
+  if (newVal.dataset.attr === attr && !newVal.value) {
+    // 日期类属性默认给出 +3 天示例
+    const m = String(cur).match(/^(\d{4}-\d{2}-\d{2})/);
+    if (m) {
+      const dt = new Date(m[1] + 'T00:00:00');
+      dt.setDate(dt.getDate() + 3);
+      newVal.value = dt.toISOString().slice(0, 10);
+    }
+  }
+}
+
+async function runImpactInference() {
+  const ontologyId = $('inferOntology').value;
+  const instanceId = $('impactInstance').value;
+  const attribute = $('impactAttribute').value;
+  const newValue = $('impactNewValue').value.trim();
+  const out = $('impactResult');
+  if (!ontologyId || !instanceId || !attribute || !newValue) {
+    return toast('请选择本体、实例、变化属性并填写新值', 'info');
+  }
+  out.innerHTML = '<div class="text-slate-400">推理中…</div>';
+  try {
+    const j = await api('/api/inference/impact', {
+      method: 'POST',
+      body: JSON.stringify({ ontology_id: ontologyId, instance_id: instanceId, attribute, new_value: newValue }),
+    });
+    const r = j.data || {};
+    const src = r.source || {};
+    const rows = (r.impacted || []);
+    let html = '<div class="p-2 rounded-lg bg-slate-800/50 text-xs mb-3">' +
+      '<b>变化源</b>：' + esc(src.object_type || '') + '（' + esc(src.label || src.instance_id || '') + '）的 <b>' + esc(attribute) + '</b>：' +
+      esc(String(src.old_value ?? '')) + ' → <b>' + esc(newValue) + '</b>' +
+      (src.delta_days !== null && src.delta_days !== undefined ? '（' + (src.delta_days > 0 ? '推迟' : '提前') + ' ' + Math.abs(src.delta_days) + ' 天）' : '') +
+      '</div>';
+    html += '<div class="text-xs text-slate-400 mb-3">' + esc(r.explanation || '') + '</div>';
+    if (!rows.length) {
+      html += '<div class="text-sm text-slate-500">未发现受影响的下游实例。</div>';
+    } else {
+      html += '<table class="w-full text-xs border-collapse"><thead><tr class="text-slate-400">' +
+        '<th class="border-b border-slate-700 p-1 text-left">受影响实例</th>' +
+        '<th class="border-b border-slate-700 p-1 text-left">推断变化（需人工确认）</th>' +
+        '<th class="border-b border-slate-700 p-1 text-left">推理依据</th>' +
+        '</tr></thead><tbody>';
+      rows.forEach(item => {
+        const changes = (item.inferred_changes || []).map(c =>
+          '<div class="mb-1">' + esc(c.attribute) + ': <span class="text-slate-400">' + esc(String(c.current)) + '</span> → <span class="text-amber-300">' + esc(c.inferred) + '</span>' +
+          ' <span class="badge ' + (c.confidence === 'high' ? 'draft' : 'active') + '">' + (c.confidence === 'high' ? '高置信' : '中置信') + '</span></div>'
+        ).join('') || '<span class="text-slate-500">仅直接引用，无值级推断</span>';
+        html += '<tr class="border-b border-slate-800 align-top">' +
+          '<td class="p-1">' + esc(item.object_type) + '<div class="text-slate-500">' + esc(item.label || item.instance_id) + '</div></td>' +
+          '<td class="p-1">' + changes + '</td>' +
+          '<td class="p-1 text-slate-400">' + esc(item.reason || '') + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table>';
+      html += '<div class="text-xs text-slate-500 mt-2">规则：' + esc((r.rules || []).join('；')) + '</div>';
+    }
+    out.innerHTML = html;
+  } catch (e) {
+    out.innerHTML = '<div class="text-red-400 text-sm">推理失败：' + esc(e.message) + '</div>';
+    toast('影响推理失败: ' + e.message, 'err');
+  }
 }
 
 // ---- LLM 设置 ----

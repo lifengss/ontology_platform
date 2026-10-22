@@ -7,6 +7,13 @@ updated: 2026-10-22
 
 # 操作日志
 
+## [2026-10-22] feat | 11 项功能修复闭环 + 全量 E2E 全绿（PASS=33 FAIL=0）
+- 后端：候选批量 approve/reject/revert/delete、field_map 允许关系字段、422 校验失败明细（details.violations）、MCP 按本体发布清单+多项目共存（/mcp/{project_id}）、新增 reasoning/impact_inference.py（R1 直接引用回溯 + R2 时间链传导，POST /api/inference/impact）、action display-only 门。
+- 前端：实例列表直出、候选表格+批量操作、实体树、关系目标联想、校验明细展示、动作页仅展示标记、MCP 发布清单（详见 TASK_CHECKPOINT §12/§13）。
+- SHACL：关系值双形态（实例引用 sh:class 或 stable_key 字面量 sh:datatype），build_instance_graph 同批次内解析，解决字面量关系值阻断 approve。
+- 新增 scripts/e2e_regression_test.py（33 项检查）、scripts/restart_backend.py（干净重启+健康探测；修复函数作用域 import urllib.error 导致的 UnboundLocalError 误报）。
+- 回归：VS2/业务门单测 11/11 通过。
+
 ## [2026-10-21] feat | NL 查询真正查到数据（链路闭环 + E2E 全绿）
 - Fuseki 5.1 可写化：`--loc`/`--tdb` 对已存在目录会强制建只读库，改为显式配置文件 `backend/fuseki-config.ttl`（`tdb:DatasetTDB`，2016/tdb 命名空间）启动；`scripts/start_mvp_local.ps1` 优先读该配置。
 - `jena_adapter/client.py`：查询 URL 由 `/sparql` 修正为 `POST /{service}/query`；新增 `_ensure_prefixes` 自动补 LLM 漏写的 `PREFIX ont:`（前导声明不加句点）。
