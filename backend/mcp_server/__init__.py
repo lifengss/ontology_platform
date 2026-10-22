@@ -282,3 +282,14 @@ def _load_instances(project_id: str, ontology_id: str) -> list[dict[str, Any]]:
         logger.warning("读取实例存储失败: project=%s err=%s", project_id, e)
         return []
     return [r for r in records if (r or {}).get("ontology_id") == ontology_id]
+
+
+_mcp_server: "McpServer | None" = None
+
+
+def get_mcp_server() -> McpServer:
+    """进程内唯一 McpServer 实例（发布状态在内存中，必须单例共享）。"""
+    global _mcp_server
+    if _mcp_server is None:
+        _mcp_server = McpServer()
+    return _mcp_server

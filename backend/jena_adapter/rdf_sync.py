@@ -164,6 +164,38 @@ def sync_ontology(project_id: str, ontology_id: str) -> dict:
     return result
 
 
+def delete_ontology(project_id: str, ontology_id: str) -> dict:
+    """删除本体在 RDF 存储中的全量图（本体删除时调用，防止残留幽灵三元组）。
+
+    - Fuseki 可达：清空对应命名图；
+    - 不可达：删除本地 data/projects/<pid>/ontology_<oid>.ttl。
+    """
+    if _is_reachable():
+        settings = get_settings()
+        url = f"{settings.jena_base_url.rstrip('/')}/{settings.jena_dataset}/update"
+        update = f"DELETE WHERE {{ GRAPH <{graph_uri_for(ontology_id)}> {{ ?s ?p ?o . }} }}"
+        req = urllib.request.Request(
+            url, data=update.encode("utf-8"), method="POST",
+            headers={"Content-Type": "application/sparql-update"},
+        )
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            if resp.status >= 400:
+                raise RuntimeError(f"Fuseki update 失败 status={resp.status}")
+        result: dict = {"mode": REMOTE_MODE, "graph": graph_uri_for(ontology_id)}
+    else:
+        settings = get_settings()
+        base = os.path.join(settings.data_dir, "projects", project_id) if project_id else settings.data_dir
+        path = os.path.join(base, f"ontology_{ontology_id}.ttl")
+        removed = False
+        if os.path.exists(path):
+            os.remove(path)
+            removed = True
+        result = {"mode": FILE_MODE, "path": path, "removed": removed}
+    logger.info("rdf_sync delete ontology_id=%s project_id=%s mode=%s",
+                ontology_id, project_id, result.get("mode"))
+    return result
+
+
 def sync_all_projects(project_id: str | None = None) -> list[dict]:
     """全量回填：指定（或全部）项目下所有本体重建并写入。单条失败不中断。"""
     settings = get_settings()

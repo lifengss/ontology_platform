@@ -28,7 +28,7 @@ from config import get_settings
 from core.responses import ApiError, fail, success
 from jena_adapter.client import health as jena_health
 from logging_setup import get_logger, log_event
-from mcp_server import McpServer
+from mcp_server import get_mcp_server
 from neo4j_sync import Neo4jSync
 
 settings = get_settings()
@@ -103,7 +103,9 @@ app.include_router(system_router)
 
 
 # VS6: 由 mcp_server 模块通过 FastMCP 按项目挂载 /mcp/{project_id}（SSE）
-_mcp_server = McpServer()
+# 必须使用 get_mcp_server() 单例：发布状态（publish/unpublish）存在该实例内存中，
+# 直接 McpServer() 会造出第二个实例，导致 SSE 端点/状态端点看不到发布数据。
+_mcp_server = get_mcp_server()
 _mcp_server.mount(app)
 
 

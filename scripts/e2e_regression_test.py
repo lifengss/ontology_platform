@@ -133,9 +133,16 @@ def preview_candidate(project: str, ont_id: str, object_type: str, records: list
 
 def main():
     print("=" * 64)
-    print("0. 健康检查")
+    print("0. 健康检查（前置门禁：三个依赖服务必须全部可达，否则判测试不通过）")
     status, data = api("GET", "/health")
     if not check("health", status == 200, f"status={status}"):
+        sys.exit(1)
+    deps = (data.get("data") or {}).get("dependencies") or {}
+    # 后端三依赖（Jena/Neo4j/Postgres）均已安装：启动后仍不可达即环境/启动失败。
+    # 例外：仅「兜底降级逻辑」专项测试允许 degraded，本回归套件不允许。
+    bad = {k: v for k, v in deps.items() if v != "healthy"}
+    if not check("deps_all_reachable", not bad,
+                 f"degraded deps={deps} —— 请先执行 scripts/start-deps.ps1 启动依赖服务"):
         sys.exit(1)
 
     # 独立测试项目（不影响现有数据；顺带作为 5.2 多项目共存的第二项目）

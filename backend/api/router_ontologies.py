@@ -229,11 +229,73 @@ def patch_ontology_object(
 
 
 @router.delete("/{ontology_id}")
-def delete_ontology(ontology_id: str, project_id: str = Depends(project_id_param)):
-    if not _store_for(project_id).delete(ontology_id):
+def delete_ontology(
+    ontology_id: str,
+    force: bool = Query(default=False),
+    project_id: str = Depends(project_id_param),
+):
+    """删除本体，并级联清理其 MCP 发布状态、实例数据与 RDF 图。
+
+    - 若该本体处于 MCP 已发布状态：自动取消发布（内存态，随删除一并清除）；
+    - 若存在实例数据：默认 409 返回数量，需 force=true 二次确认才连带删除；
+    - force=true 时同时删除该本体的待审核导入候选（本体删除后已不可审批）。
+    """
+    store = _store_for(project_id)
+    rec = store.get(ontology_id)
+    if not rec:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
-    logger.info("delete_ontology id=%s project_id=%s", ontology_id, project_id)
-    return success({"deleted": True})
+
+    # 1) MCP 发布状态：自动取消发布（内存态，随删除清除）
+    unpublished = False
+    from mcp_server import get_mcp_server
+    mcp = get_mcp_server()
+    if ontology_id in mcp.published_ids(project_id):
+        mcp.unpublish(project_id, ontology_id)
+        unpublished = True
+
+    # 2) 实例数据：存在时需 force 二次确认
+    from core.instance_store import JsonlInstanceStore
+    inst_store = JsonlInstanceStore(project_id=project_id)
+    instances = inst_store.find(filters={"ontology_id": ontology_id}, limit=100000)
+    if instances and not force:
+        raise ApiError(
+            "CONFLICT",
+            f"该本体下还有 {len(instances)} 条实例数据，如需连同删除请用 force=true 再次确认",
+            http_status=409,
+            details={"instance_count": len(instances)},
+        )
+    instances_deleted = 0
+    if force and instances:
+        for r in instances:
+            if r.get("id") and inst_store.delete(r["id"]):
+                instances_deleted += 1
+
+    # 3) 该本体的待审核导入候选：本体删除后不可再审批，一并清理
+    candidates_deleted = 0
+    cand_store = JsonStore("ingest_candidates", project_id=project_id)
+    for c in cand_store.find(lambda r: r.get("ontology_id") == ontology_id):
+        cid = c.get("id")
+        if cid and cand_store.delete(cid):
+            candidates_deleted += 1
+
+    # 4) RDF 图（命名图/本地 TTL），失败不阻断主流程
+    try:
+        rdf_sync.delete_ontology(project_id, ontology_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("删除 RDF 图失败（不影响本体删除） ontology_id=%s: %s", ontology_id, e)
+
+    # 5) 本体记录
+    store.delete(ontology_id)
+    logger.info(
+        "delete_ontology id=%s project_id=%s force=%s unpublished=%s instances_deleted=%d candidates_deleted=%d",
+        ontology_id, project_id, force, unpublished, instances_deleted, candidates_deleted,
+    )
+    return success({
+        "deleted": True,
+        "unpublished": unpublished,
+        "instances_deleted": instances_deleted,
+        "candidates_deleted": candidates_deleted,
+    })
 
 
 @router.post("/{ontology_id}/enrich")

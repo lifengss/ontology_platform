@@ -83,12 +83,16 @@ def _name_has_time_hint(attr_id: str) -> bool:
 
 
 def _label(inst: dict[str, Any], obj_def: dict[str, Any] | None = None) -> str:
-    """实例展示名：业务名称属性（id 含 name）→ 通用键 → stable_key 值 → 实例 id。"""
+    """实例展示名：业务名称属性（中文属性名含 名称/名字，或属性 id 含 name/title/label，大小写不敏感）
+    → 通用键 → stable_key 值 → 实例 id。与前端 instanceDisplayLabel 保持一致。"""
     data = _instance_data(inst)
     if obj_def:
         for a in obj_def.get("attributes") or []:
             aid = str(a.get("id") or "")
-            if "name" in aid and data.get(aid):
+            aname = str(a.get("name") or "")
+            is_name_attr = ("名称" in aname or "名字" in aname
+                            or any(h in aid.lower() for h in ("name", "title", "label")))
+            if is_name_attr and data.get(aid):
                 return str(data[aid])
     for key in ("name", "title", "code"):
         if data.get(key):

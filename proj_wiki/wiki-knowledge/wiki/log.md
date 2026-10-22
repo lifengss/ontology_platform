@@ -7,6 +7,16 @@ updated: 2026-10-22
 
 # 操作日志
 
+## [2026-10-22] feat | 本体删除/修改管理 + 依赖服务可达性门禁 + 推理页业务友好显示
+- 本体管理（建模页 + MCP 页均可删/改）：建模页列表项 hover 出「编辑/删除」，详情面板与 MCP 发布清单均加「修改/删除」按钮；修复保存恒走 POST 产生重复本体的 bug（编辑改走 PUT）；ingest 页"在建模页编辑"坏调用 renderOntologyDetail 改 selectOntology。
+- DELETE 级联清理（backend/api/router_ontologies.py）：顺序为 MCP unpublish → 实例存在时 409（details.instance_count，`?force=true` 连带删除）→ 清待审核候选 → 清 RDF（Fuseki `DELETE WHERE GRAPH` / 本地 ontology_<oid>.ttl，失败不阻断）→ 删本体记录；前端 409 二次确认后带 force 重试。
+- McpServer 收敛为进程内单例 `get_mcp_server()`（router_mcp 与 main.py 共用）：修复 main.py 直接 `McpServer()` 造成第二实例、SSE/状态端点看不到发布数据的问题。
+- 依赖服务可达性门禁：新增 `scripts/start-deps.ps1`（幂等启动 Jena 3030 / Neo4j 7474+7687 / Postgres 5432 并逐一校验，不可达 exit 1；探测用 127.0.0.1，PG 用 DSN 级 `psql -d ont` 而非裸 TCP，缺库自动 createdb；Jena 探测根 URL——`GET /ontology` 无尾斜杠按设计返回 400）；E2E 第 0 步新增前置检查 `deps_all_reachable`：/health 三依赖任一非 healthy 立即判失败（兜底降级专项测试除外）。
+- PG 数据目录收敛到规范集群 `deps/pgsql/data`（setup-local-deps.ps1 建库）：start_mvp_local.ps1 历史用 `backend/data/pgdata`（initdb 但从不 createdb ont），导致 /health 的 DSN 探测 postgres=unavailable。
+- 推理页业务友好显示（用户反馈"全是 id 看不懂"）：目标实例/变化属性改为自绘两行式下拉（原生 select 的 option 不支持 HTML）——主行语义 label（对象中文名·实例展示名 / 属性中文名（当前值）），次行小字 monospace id；属性选项排除系统字段 object_type 与 `_` 前缀字段；推理结果（变化源/受影响实例/推断变化）同样 label 主显 + id 小字。
+- 实例展示名统一算法（前端 instanceDisplayLabel 与后端 `_label` 对齐）：业务名称属性（中文属性名含 名称/名字 或属性 id 含 name/title/label，大小写不敏感）→ 通用键 name/title/code → stable_key 值 → 实例 id；修复后端 `"name" in aid` 大小写敏感导致 activityName 不命中、源实例显示编码 A040 而非"计划审批"的问题。
+- 验证：本体管理冒烟 12/12（409/force/自动下线）；浏览器实测推理页两行下拉与结果 label；全量 E2E PASS=34 FAIL=0（含新前置门禁）。
+
 ## [2026-10-22] feat | MCP 页重构：本体发布清单表格（分页）+ 移除"多项目共存"栏目
 - 前端 MCP 页重排：顶部"MCP 接入"说明卡（端点规则、发布粒度、内存态提示）→ 中部"本体发布清单（当前项目）"表格（序号/本体ID/名称/描述/实体数/实例数/管理[发布|取消发布]，每页 10 条翻页）→ 底部工具清单 + 调用示例。
 - 新增后端端点 `GET /api/mcp/ontologies?project_id=&page=&page_size=`（list_payload + server_published/published_count/endpoint 附加字段）；McpServer 增加公开只读访问器 published_ids()/server_active()。

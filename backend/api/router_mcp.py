@@ -12,13 +12,13 @@ from core.storage import JsonStore
 from ingestion import apply_field_map
 from logging_setup import get_logger
 from mcp_client import McpClient
-from mcp_server import McpServer
+from mcp_server import get_mcp_server
 from schemas.mcp import ConnectionConfig, ConnectionCreate
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 logger = get_logger("api.mcp")
 _client = McpClient()
-_server = McpServer()
+_server = get_mcp_server()
 
 
 def _connections_for(project_id: str) -> JsonStore:

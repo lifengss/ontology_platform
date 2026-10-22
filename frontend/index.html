@@ -15,6 +15,7 @@
     .btn:disabled { opacity: .5; cursor: not-allowed; }
     .btn.secondary { background: #1e293b; border: 1px solid var(--border); }
     .btn.success { background: #059669; }
+    .btn.danger { background: #dc2626; }
     .ok { color: var(--ok); } .bad { color: var(--bad); }
     .tab { padding: 8px 14px; border-bottom: 2px solid transparent; color: var(--muted); cursor: pointer; }
     .tab.active { color: var(--text); border-color: var(--accent); }
@@ -32,6 +33,19 @@
     .badge { font-size: 10px; padding: 2px 6px; border-radius: 10px; background: #1e293b; border: 1px solid var(--border); }
     .badge.draft { color: #fbbf24; border-color: #78350f; background: #451a03; }
     .badge.active { color: #34d399; border-color: #065f46; background: #064e3b; }
+    /* 两行式下拉（业务友好）：主行=语义 label，次行小字=id。原生 select 的 option 不支持 HTML，故自绘 */
+    .labeled-select { position: relative; }
+    .ls-trigger { width: 100%; min-height: 22px; background: #0b1222; border: 1px solid var(--border); border-radius: 6px; padding: 6px 28px 6px 10px; cursor: pointer; position: relative; }
+    .ls-trigger:hover { border-color: var(--accent); }
+    .ls-trigger::after { content: '▾'; position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 12px; }
+    .ls-main { display: block; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ls-sub { display: block; font-size: 11px; color: #64748b; margin-top: 2px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ls-empty { color: var(--muted); }
+    .ls-panel { position: absolute; z-index: 60; top: calc(100% + 4px); left: 0; right: 0; max-height: 300px; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 10px 28px rgba(0,0,0,.45); }
+    .ls-opt { padding: 7px 10px; cursor: pointer; border-bottom: 1px solid rgba(42,54,94,.5); }
+    .ls-opt:last-child { border-bottom: none; }
+    .ls-opt:hover { background: rgba(79,140,255,.12); }
+    .ls-opt.selected { background: rgba(79,140,255,.2); }
   </style>
 </head>
 <body class="h-screen overflow-hidden flex flex-col">
@@ -144,6 +158,7 @@
               <button class="btn secondary" onclick="validateOntology()">校验</button>
               <button class="btn secondary" onclick="exportOntology()">导出 TTL</button>
               <button class="btn secondary" onclick="viewGraph()">看图谱</button>
+              <button class="btn danger" onclick="deleteCurrentOntology()">删除</button>
             </div>
           </div>
           <pre id="detailBody" class="text-xs"></pre>
@@ -300,10 +315,18 @@
           <p class="text-xs text-slate-400 mb-3">例：采购订单的审批日期推迟 3 天 → 推断引用该订单的后续计划节点哪些日期需要联动。规则：R1 直接引用回溯、R2 时间链传导（一跳），结果需人工确认。</p>
           <div class="space-y-2">
             <div><label>目标实例</label>
-              <select id="impactInstance" class="w-full" onchange="onImpactInstanceChange()"><option value="">-- 选择实例 --</option></select>
+              <div class="labeled-select" id="impactInstanceBox">
+                <div class="ls-trigger" id="impactInstanceTrigger"></div>
+                <div class="ls-panel hidden" id="impactInstancePanel"></div>
+                <input type="hidden" id="impactInstance" value="" />
+              </div>
             </div>
             <div><label>变化属性</label>
-              <select id="impactAttribute" class="w-full" onchange="loadImpactPreview()"></select>
+              <div class="labeled-select" id="impactAttributeBox">
+                <div class="ls-trigger" id="impactAttributeTrigger"></div>
+                <div class="ls-panel hidden" id="impactAttributePanel"></div>
+                <input type="hidden" id="impactAttribute" value="" />
+              </div>
             </div>
             <div><label>新值 <span class="text-slate-500">(日期属性建议填 YYYY-MM-DD)</span></label>
               <input id="impactNewValue" class="w-full" placeholder="如 2026-11-01" />
@@ -356,7 +379,7 @@
                   <th class="border-b border-slate-700 p-1 text-left">描述</th>
                   <th class="border-b border-slate-700 p-1 text-center w-16">实体数</th>
                   <th class="border-b border-slate-700 p-1 text-center w-16">实例数</th>
-                  <th class="border-b border-slate-700 p-1 text-left w-36">管理</th>
+                  <th class="border-b border-slate-700 p-1 text-left w-56">管理</th>
                 </tr>
               </thead>
               <tbody id="mcpOntoBody"></tbody>

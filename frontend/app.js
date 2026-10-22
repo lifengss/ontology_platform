@@ -2,7 +2,7 @@ const API_BASE = (location.hostname === 'localhost' && location.port === '8000')
 const $ = id => document.getElementById(id);
 let state = {
   ontologies: [], candidates: [], graphTab: 'schema',
-  currentOntology: null, filter: 'all', editorMode: 'form', formObjects: [],
+  currentOntology: null, editingId: null, filter: 'all', editorMode: 'form', formObjects: [],
   projects: [], currentProject: null,
   namespaces: [], currentNamespace: null,
   actions: [], currentAction: null, actionToken: null,
@@ -122,6 +122,7 @@ async function api(path, opts = {}) {
     if (!r.ok) {
       clientLog('error', `API ${opts.method || 'GET'} ${path} failed`, { status: r.status, message: j.error?.message, elapsed_ms: elapsed });
       const err = new Error(j.error?.message || `HTTP ${r.status}`);
+      err.status = r.status;
       err.code = j.error?.code || null;
       err.details = j.error?.details || null; // 2.2：保留后端 details（如 violations 明细）
       throw err;
@@ -251,6 +252,10 @@ async function setProject(id) {
     const sel = $(selId);
     if (sel) sel.innerHTML = '';
   });
+  // 清空推理页两行下拉的残留选择（实例/属性属于旧项目数据）
+  if (impactInstanceLS) impactInstanceLS.setValue('');
+  if (impactAttributeLS) impactAttributeLS.setValue('');
+  impactInstances = [];
   await loadNamespaces();
   await loadOntologies();
   await loadActions();
@@ -360,9 +365,13 @@ function renderOntologyList() {
   if (!items.length) { el.innerHTML = '<div class="text-sm text-slate-500">暂无本体</div>'; return; }
   el.innerHTML = items.map(o => {
     const status = o.status || 'active';
-    return '<div class="p-2 rounded-lg hover:bg-slate-800/60 cursor-pointer border border-transparent hover:border-slate-700 ' + (state.currentOntology?.id === o.id ? 'bg-slate-800 border-slate-700' : '') + '" onclick="selectOntology(' + JSON.stringify(o).replace(/"/g, '&quot;') + ')">' +
+    return '<div class="group p-2 rounded-lg hover:bg-slate-800/60 cursor-pointer border border-transparent hover:border-slate-700 ' + (state.currentOntology?.id === o.id ? 'bg-slate-800 border-slate-700' : '') + '" onclick="selectOntology(' + JSON.stringify(o).replace(/"/g, '&quot;') + ')">' +
       '<div class="flex justify-between items-center"><span class="font-medium text-sm">' + esc(o.name) + '</span><span class="badge ' + status + '">' + (status === 'draft' ? '草稿' : '已发布') + '</span></div>' +
       '<div class="text-xs text-slate-500">' + o.id + ' · ' + (o.objects?.length || 0) + ' 对象</div>' +
+      '<div class="mt-1 flex gap-3 text-xs opacity-0 group-hover:opacity-100 hover:opacity-100">' +
+        '<span class="text-sky-400" onclick="event.stopPropagation(); editListOntology(&quot;' + o.id + '&quot;)">编辑</span>' +
+        '<span class="text-red-400" onclick="event.stopPropagation(); deleteListOntology(&quot;' + o.id + '&quot;)">删除</span>' +
+      '</div>' +
     '</div>';
   }).join('');
 }
@@ -401,6 +410,7 @@ function selectOntology(o) {
 
 function startCreate() {
   state.currentOntology = null;
+  state.editingId = null;
   $('editorCard').classList.remove('hidden');
   $('detailPanel').classList.add('hidden');
   $('editorTitle').textContent = '新建本体';
@@ -417,7 +427,7 @@ function startCreate() {
   renderObjectForms();
 }
 
-function closeEditor() { $('editorCard').classList.add('hidden'); }
+function closeEditor() { $('editorCard').classList.add('hidden'); state.editingId = null; }
 
 function setEditorMode(mode) {
   state.editorMode = mode;
@@ -565,11 +575,18 @@ function collectFormOntology() {
 
 async function saveOntology() {
   const payload = collectFormOntology();
+  const isEdit = !!state.editingId;
   try {
-    const j = await api('/api/ontologies', { method: 'POST', body: JSON.stringify(payload) });
-    toast('本体已保存: ' + j.data.name, 'ok');
+    // 编辑既有本体走 PUT（原地更新，不再重复新建）；新建走 POST
+    const j = isEdit
+      ? await api('/api/ontologies/' + state.editingId, { method: 'PUT', body: JSON.stringify(payload) })
+      : await api('/api/ontologies', { method: 'POST', body: JSON.stringify(payload) });
+    toast((isEdit ? '本体已更新: ' : '本体已保存: ') + j.data.name, 'ok');
+    state.editingId = null;
     closeEditor();
-    loadOntologies();
+    await loadOntologies();
+    const target = state.ontologies.find(x => x.id === j.data.id);
+    if (target) selectOntology(target);
   } catch (e) {
     toast('保存失败: ' + _formatApiError(e), 'err');
   }
@@ -648,6 +665,7 @@ async function pollJob(jobId) {
 function editCurrentOntology() {
   if (!state.currentOntology) return;
   const o = state.currentOntology;
+  state.editingId = o.id;
   $('editorCard').classList.remove('hidden');
   $('detailPanel').classList.add('hidden');
   $('editorTitle').textContent = '编辑本体';
@@ -674,6 +692,61 @@ async function publishCurrent() {
   } catch (e) {
     toast('发布失败: ' + e.message, 'err');
   }
+}
+
+// ---- 本体删除（后端级联：MCP 自动下线 + 实例 + 待审核候选 + RDF 图）----
+function editListOntology(oid) {
+  const o = state.ontologies.find(x => x.id === oid);
+  if (!o) return toast('本体不存在（可能已删除）', 'err');
+  selectOntology(o);
+  editCurrentOntology();
+}
+
+function deleteListOntology(oid) { deleteOntologyById(oid); }
+
+function deleteCurrentOntology() {
+  if (!state.currentOntology) return;
+  deleteOntologyById(state.currentOntology.id);
+}
+
+async function deleteOntologyById(oid) {
+  const o = state.ontologies.find(x => x.id === oid)
+    || (state.currentOntology && state.currentOntology.id === oid ? state.currentOntology : null);
+  const name = (o && o.name) || oid;
+  if (!confirm('确认删除本体「' + name + '」？\n\n将同时清理其 MCP 发布状态与待审核导入候选；若存在实例数据会再次确认。此操作不可恢复。')) return;
+  try {
+    await _doDeleteOntology(oid);
+  } catch (e) {
+    toast('删除失败: ' + e.message, 'err');
+  }
+}
+
+async function _doDeleteOntology(oid) {
+  let j;
+  try {
+    j = await api('/api/ontologies/' + oid, { method: 'DELETE' });
+  } catch (e) {
+    if (e.status === 409 && e.details && e.details.instance_count) {
+      const n = e.details.instance_count;
+      if (!confirm('该本体下还有 ' + n + ' 条实例数据。\n\n确认删除本体及其全部实例数据？此操作不可恢复。')) return;
+      j = await api('/api/ontologies/' + oid + '?force=true', { method: 'DELETE' });
+    } else {
+      throw e;
+    }
+  }
+  const d = j.data || {};
+  toast('本体已删除' + (d.instances_deleted ? '，清理实例 ' + d.instances_deleted + ' 条' : '')
+    + (d.candidates_deleted ? '，清理候选 ' + d.candidates_deleted + ' 条' : '')
+    + (d.unpublished ? '，已自动取消 MCP 发布' : ''), 'ok');
+  if (state.currentOntology && state.currentOntology.id === oid) {
+    state.currentOntology = null;
+    state.editingId = null;
+    $('detailPanel').classList.add('hidden');
+    closeEditor();
+  }
+  const activeTab = document.querySelector('.tab-content:not(.hidden)');
+  if (activeTab && activeTab.id === 'mcp') loadMcpOntologies(mcpList.page);
+  await loadOntologies();
 }
 
 async function validateOntology() {
@@ -1088,7 +1161,7 @@ function editOntologyInModeling() {
   const o = state.ontologies.find(x => x.id === oid);
   if (o) {
     state.currentOntology = o;
-    renderOntologyDetail(o);
+    selectOntology(o);
     editCurrentOntology();
   }
 }
@@ -1725,7 +1798,12 @@ function renderMcpList() {
         '<td class="p-1 text-slate-400 max-w-[280px] truncate" title="' + esc(o.description || '') + '">' + esc(o.description || '-') + '</td>' +
         '<td class="p-1 text-center">' + (o.entity_count ?? 0) + '</td>' +
         '<td class="p-1 text-center">' + (o.instance_count ?? 0) + '</td>' +
-        '<td class="p-1 whitespace-nowrap"><span class="mr-2 ' + (o.published ? 'text-emerald-400' : 'text-slate-500') + '">' + (o.published ? '已发布' : '未发布') + '</span>' + act + '</td>' +
+        '<td class="p-1 whitespace-nowrap">' +
+          '<span class="mr-2 ' + (o.published ? 'text-emerald-400' : 'text-slate-500') + '">' + (o.published ? '已发布' : '未发布') + '</span>' +
+          '<span class="mr-2 text-sky-400 cursor-pointer" title="在建模页打开编辑" onclick="mcpEditOntology(\'' + o.ontology_id + '\')">修改</span>' +
+          '<span class="mr-2 text-red-400 cursor-pointer" title="删除本体及其实例/候选数据" onclick="mcpDeleteOntology(\'' + o.ontology_id + '\')">删除</span>' +
+          act +
+        '</td>' +
         '</tr>';
     }).join('');
   }
@@ -1752,6 +1830,22 @@ async function mcpTogglePublish(ontologyId, publish) {
     loadMcpOntologies();
   } catch (e) { toast((publish ? '发布失败: ' : '取消发布失败: ') + e.message, 'err'); }
 }
+
+// MCP 页：跳转到建模页打开该本体的编辑表单
+async function mcpEditOntology(oid) {
+  try {
+    await loadOntologies();
+    const o = state.ontologies.find(x => x.id === oid);
+    if (!o) return toast('本体不存在（可能已被删除）', 'err');
+    switchTab('modeling');
+    state.currentOntology = o;
+    selectOntology(o);
+    editCurrentOntology();
+  } catch (e) { toast('打开编辑失败: ' + e.message, 'err'); }
+}
+
+// MCP 页：删除本体（复用建模页级联删除逻辑，含确认与实例二次确认）
+function mcpDeleteOntology(oid) { deleteOntologyById(oid); }
 
 async function loadMcpTools() {
   try {
@@ -1887,6 +1981,73 @@ function drawGraph(data) {
   });
 }
 
+// ---- 两行式下拉（业务友好）：主行=语义 label，次行小字=id ----
+// 原生 select 的 option 不支持 HTML（无法两行/小字），故自绘；值仍存同名 hidden input，
+// 既有 $('impactInstance').value 读取点无需改动。
+function bindLabeledSelect(cfg) {
+  const trigger = $(cfg.triggerId), panel = $(cfg.panelId), hidden = $(cfg.hiddenId);
+  const emptyText = cfg.emptyText || '-- 请选择 --';
+  let options = [];
+  function renderTrigger() {
+    const sel = options.find(o => o.value === hidden.value);
+    trigger.innerHTML = sel
+      ? '<span class="ls-main">' + esc(sel.main) + '</span><span class="ls-sub">' + esc(sel.sub || '') + '</span>'
+      : '<span class="ls-main ls-empty">' + esc(emptyText) + '</span>';
+  }
+  function renderPanel() {
+    panel.innerHTML = options.length
+      ? options.map(o => '<div class="ls-opt' + (o.value === hidden.value ? ' selected' : '') + '" data-v="' + esc(o.value).replace(/"/g, '&quot;') + '">' +
+          '<span class="ls-main">' + esc(o.main) + '</span><span class="ls-sub">' + esc(o.sub || '') + '</span></div>').join('')
+      : '<div class="ls-opt"><span class="ls-main ls-empty">' + esc(emptyText) + '</span></div>';
+    panel.querySelectorAll('.ls-opt[data-v]').forEach(el => {
+      el.addEventListener('click', () => {
+        hidden.value = el.dataset.v;
+        panel.classList.add('hidden');
+        renderTrigger();
+        if (cfg.onChange) cfg.onChange(hidden.value);
+      });
+    });
+  }
+  trigger.addEventListener('click', e => {
+    e.stopPropagation();
+    panel.classList.toggle('hidden');
+    if (!panel.classList.contains('hidden')) renderPanel();
+  });
+  document.addEventListener('click', e => {
+    if (!e.target.closest('#' + cfg.boxId)) panel.classList.add('hidden');
+  });
+  renderTrigger();
+  return {
+    setOptions(list) { options = list || []; renderTrigger(); renderPanel(); },
+    setValue(v) { hidden.value = v || ''; renderTrigger(); },
+    get value() { return hidden.value; },
+  };
+}
+
+// 推理页 label 解析：对象/属性 id → 中文语义名（来自当前选中本体的完整定义）
+function getInferLabelMaps() {
+  const ont = state.ontologies.find(o => o.id === $('inferOntology').value) || {};
+  const objById = new Map((ont.objects || []).map(o => [o.id, o]));
+  return {
+    ont,
+    objName: ot => ((objById.get(ot) || {}).name) || ot,
+    attrName: (ot, aid) => ((objById.get(ot) || {}).attributes || []).find(a => a.id === aid)?.name || aid,
+  };
+}
+
+// 实例展示名：优先业务名称属性（名称/name/title/label）→ stable_key → 首个非空属性 → 实例 id
+function instanceDisplayLabel(inst, maps) {
+  const d = inst.instance || inst.props || inst;
+  const obj = (maps.ont.objects || []).find(o => o.id === inst.object_type) || {};
+  const attrs = obj.attributes || [];
+  const has = a => a && d[a.id] !== undefined && d[a.id] !== null && String(d[a.id]) !== '';
+  const byName = attrs.find(a => /名称|名字|简称|name|title|label/i.test(a.name || '') || /name|title|label/i.test(a.id || ''));
+  const byStable = obj.stable_key ? attrs.find(a => a.id === obj.stable_key) : null;
+  const first = attrs.find(has);
+  const label = has(byName) ? d[byName.id] : has(byStable) ? d[byStable.id] : has(first) ? d[first.id] : null;
+  return label !== null && label !== undefined ? String(label) : String(inst.id || '').slice(0, 8);
+}
+
 // ---- 推理 ----
 async function loadInference() {
   const id = $('inferOntology').value;
@@ -1908,6 +2069,8 @@ async function loadInference() {
 
 // ---- 3.1 业务影响推理（实例值变化 → 下游业务影响） ----
 let impactInstances = [];
+let impactInstanceLS = null;
+let impactAttributeLS = null;
 
 async function loadImpactInstances(ontologyId) {
   const id = ontologyId || $('inferOntology').value;
@@ -1915,29 +2078,39 @@ async function loadImpactInstances(ontologyId) {
   try {
     const ji = await api('/api/ingest/instances?ontology_id=' + encodeURIComponent(id) + '&pageSize=200');
     impactInstances = (ji.data && ji.data.items) || [];
-    const sel = $('impactInstance');
-    if (!sel) return;
-    sel.innerHTML = impactInstances.length
-      ? impactInstances.map(inst => {
-          const d = inst.instance || inst.props || inst;
-          const label = d.name || d.title || d.code || (inst.id || '').slice(0, 8);
-          return '<option value="' + esc(inst.id) + '">' + esc(inst.object_type) + ' · ' + esc(label) + '</option>';
-        }).join('')
-      : '<option value="">-- 暂无实例 --</option>';
+    if (!impactInstanceLS) return;
+    const maps = getInferLabelMaps();
+    // 两行选项：主行=对象中文名·实例展示名；次行小字=对象id·实例id
+    impactInstanceLS.setOptions(impactInstances.map(inst => ({
+      value: inst.id,
+      main: (maps.objName(inst.object_type) || inst.object_type) + ' · ' + instanceDisplayLabel(inst, maps),
+      sub: (inst.object_type || '') + ' · ' + (inst.id || ''),
+    })));
+    impactAttributeLS.setValue('');
     onImpactInstanceChange();
   } catch (e) { /* 实例加载失败不阻断模式层推理展示 */ }
 }
 
 function onImpactInstanceChange() {
   const inst = impactInstances.find(x => x.id === $('impactInstance').value);
-  const attrSel = $('impactAttribute');
   const newVal = $('impactNewValue');
-  if (!inst || !attrSel) return;
+  if (!impactAttributeLS) return;
+  if (!inst) {
+    impactAttributeLS.setOptions([]);
+    newVal.value = '';
+    newVal.dataset.attr = '';
+    return;
+  }
+  const maps = getInferLabelMaps();
   const d = inst.instance || inst.props || inst;
-  const entries = Object.entries(d).filter(([k, v]) => !String(k).startsWith('_') && v !== null && v !== '');
-  attrSel.innerHTML = entries.map(([k, v]) =>
-    '<option value="' + esc(k) + '"' + (newVal && newVal.dataset.attr === k ? '' : '') + '>' + esc(k) + '（当前: ' + esc(String(typeof v === 'object' ? JSON.stringify(v) : v).slice(0, 24)) + '）</option>'
-  ).join('') || '<option value="">-- 无可用属性 --</option>';
+  // 排除系统字段：_ 前缀（_source 等）与 object_type（实例类型标记，非业务属性）
+  const entries = Object.entries(d).filter(([k, v]) => !String(k).startsWith('_') && k !== 'object_type' && v !== null && v !== '');
+  // 两行选项：主行=属性中文名（当前值）；次行小字=属性id
+  impactAttributeLS.setOptions(entries.map(([k, v]) => ({
+    value: k,
+    main: maps.attrName(inst.object_type, k) + '（当前: ' + String(typeof v === 'object' ? JSON.stringify(v) : v).slice(0, 24) + '）',
+    sub: k,
+  })));
   newVal.dataset.attr = '';
   loadImpactPreview();
 }
@@ -1977,13 +2150,16 @@ async function runImpactInference() {
       method: 'POST',
       body: JSON.stringify({ ontology_id: ontologyId, instance_id: instanceId, attribute, new_value: newValue }),
     });
+    const maps = getInferLabelMaps();
     const r = j.data || {};
     const src = r.source || {};
     const rows = (r.impacted || []);
     let html = '<div class="p-2 rounded-lg bg-slate-800/50 text-xs mb-3">' +
-      '<b>变化源</b>：' + esc(src.object_type || '') + '（' + esc(src.label || src.instance_id || '') + '）的 <b>' + esc(attribute) + '</b>：' +
+      '<div class="ls-main text-[13px]"><b>变化源</b>：' + esc((maps.objName(src.object_type) || src.object_type || '') + ' · ' + (src.label || src.instance_id || '')) +
+      ' 的 <b>' + esc(maps.attrName(src.object_type, attribute)) + '</b>：' +
       esc(String(src.old_value ?? '')) + ' → <b>' + esc(newValue) + '</b>' +
-      (src.delta_days !== null && src.delta_days !== undefined ? '（' + (src.delta_days > 0 ? '推迟' : '提前') + ' ' + Math.abs(src.delta_days) + ' 天）' : '') +
+      (src.delta_days !== null && src.delta_days !== undefined ? '（' + (src.delta_days > 0 ? '推迟' : '提前') + ' ' + Math.abs(src.delta_days) + ' 天）' : '') + '</div>' +
+      '<div class="ls-sub">' + esc(src.object_type || '') + ' · ' + esc(src.instance_id || '') + ' · ' + esc(attribute) + '</div>' +
       '</div>';
     html += '<div class="text-xs text-slate-400 mb-3">' + esc(r.explanation || '') + '</div>';
     if (!rows.length) {
@@ -1996,12 +2172,18 @@ async function runImpactInference() {
         '</tr></thead><tbody>';
       rows.forEach(item => {
         const changes = (item.inferred_changes || []).map(c =>
-          '<div class="mb-1">' + esc(c.attribute) + ': <span class="text-slate-400">' + esc(String(c.current)) + '</span> → <span class="text-amber-300">' + esc(c.inferred) + '</span>' +
-          ' <span class="badge ' + (c.confidence === 'high' ? 'draft' : 'active') + '">' + (c.confidence === 'high' ? '高置信' : '中置信') + '</span></div>'
+          '<div class="mb-1.5">' +
+          '<div>' + esc(maps.attrName(item.object_type, c.attribute)) + ': <span class="text-slate-400">' + esc(String(c.current)) + '</span> → <span class="text-amber-300">' + esc(c.inferred) + '</span>' +
+          ' <span class="badge ' + (c.confidence === 'high' ? 'draft' : 'active') + '">' + (c.confidence === 'high' ? '高置信' : '中置信') + '</span></div>' +
+          '<div class="ls-sub">' + esc(c.attribute) + '</div>' +
+          '</div>'
         ).join('') || '<span class="text-slate-500">仅直接引用，无值级推断</span>';
         html += '<tr class="border-b border-slate-800 align-top">' +
-          '<td class="p-1">' + esc(item.object_type) + '<div class="text-slate-500">' + esc(item.label || item.instance_id) + '</div></td>' +
-          '<td class="p-1">' + changes + '</td>' +
+          '<td class="p-1">' +
+          '<div class="ls-main">' + esc((maps.objName(item.object_type) || item.object_type) + ' · ' + (item.label || item.instance_id)) + '</div>' +
+          '<div class="ls-sub">' + esc(item.object_type || '') + ' · ' + esc(item.instance_id || '') + '</div>' +
+          '</td>' +
+          '<td class="p-1 text-xs">' + changes + '</td>' +
           '<td class="p-1 text-slate-400">' + esc(item.reason || '') + '</td>' +
           '</tr>';
       });
@@ -2624,6 +2806,17 @@ window.addEventListener('unhandledrejection', e => {
 // ---- init ----
 (async function init() {
   clientLog('info', 'app init');
+  // 推理页业务影响推理：两行式下拉（主行语义 label，次行小字 id）
+  impactInstanceLS = bindLabeledSelect({
+    boxId: 'impactInstanceBox', triggerId: 'impactInstanceTrigger', panelId: 'impactInstancePanel',
+    hiddenId: 'impactInstance', emptyText: '-- 选择实例 --',
+    onChange: () => onImpactInstanceChange(),
+  });
+  impactAttributeLS = bindLabeledSelect({
+    boxId: 'impactAttributeBox', triggerId: 'impactAttributeTrigger', panelId: 'impactAttributePanel',
+    hiddenId: 'impactAttribute', emptyText: '-- 选择属性 --',
+    onChange: () => loadImpactPreview(),
+  });
   checkHealth();
   await loadProjects();
   if (!state.projects.length) {
