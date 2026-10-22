@@ -1769,6 +1769,79 @@ function closeModal() {
 const MCP_PAGE_SIZE = 10;
 let mcpList = { page: 1, total: 0, items: [], meta: {} };
 
+// ---- MCP 页：一键复制与接入配置 ----
+// 通用复制：优先 Clipboard API（127.0.0.1/localhost 属安全上下文可用），
+// 加 1.5s 超时竞速（个别环境下写入会挂起），失败回退 execCommand（用户手势下可用）
+async function copyText(text, label) {
+  label = label || '内容';
+  let ok = false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await Promise.race([
+        navigator.clipboard.writeText(text),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('clipboard timeout')), 1500)),
+      ]);
+      ok = true;
+    } catch (e) { /* 回退 execCommand */ }
+  }
+  if (!ok) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      ok = document.execCommand('copy');
+      ta.remove();
+    } catch (e2) { ok = false; }
+  }
+  toast(ok ? label + '已复制' : '复制失败，请手动选择复制', ok ? 'ok' : 'err');
+}
+
+// 复制小图标：悬停提示「点击复制X」，点击复制并 toast
+// 注意：参数注入 onclick 属性（双引号定界），JSON.stringify 的引号必须转成 &quot;
+function copyIcon(text, label) {
+  const q = s => JSON.stringify(s).replace(/"/g, '&quot;');
+  return '<span class="ml-1 cursor-pointer text-slate-500 hover:text-sky-400" title="点击复制' + label + '" ' +
+    'onclick="event.stopPropagation();copyText(' + q(text) + ', ' + q(label) + ')">⧉</span>';
+}
+
+// MCP 对外连接基址：后端固定 uvicorn --host 0.0.0.0 --port 8000。
+// 注意不能取 location.host：前端可能跑在 8123 等静态端口，那不是后端。
+function mcpBaseUrl() {
+  if (location.protocol.startsWith('http') && location.port === '8000') return location.origin;
+  return 'http://127.0.0.1:8000';
+}
+
+// 当前项目行（项目 ID + 一键复制）
+function renderMcpProjectLine() {
+  const el = $('mcpProjectLine');
+  if (!el) return;
+  const p = state.currentProject || {};
+  el.innerHTML = p.id
+    ? '当前项目 <b class="text-slate-200">' + esc(p.name || p.id) + '</b> · 项目 ID <code class="text-slate-300">' + esc(p.id) + '</code>' + copyIcon(p.id, '项目ID')
+    : '';
+}
+
+// 完整 MCP Server 配置（当前项目），一键复制到 AI 平台
+function renderMcpServerConfig() {
+  const pre = $('mcpServerConfig');
+  if (!pre) return;
+  const project = state.currentProject || {};
+  const projectId = project.id || '<project_id>';
+  const url = mcpBaseUrl() + '/mcp/' + projectId;
+  const serverName = (project.name || 'ontology').replace(/[^A-Za-z0-9_\u4e00-\u9fa5-]/g, '').slice(0, 24) || 'ontology';
+  const text = JSON.stringify({ mcpServers: { [serverName]: { type: 'sse', url } } }, null, 2);
+  pre.textContent = text;
+  const btn = $('mcpCopyConfigBtn');
+  if (btn) btn.onclick = () => copyText(text, 'MCP Server 配置');
+  const hint = $('mcpConfigHint');
+  if (hint) {
+    const meta = (mcpList && mcpList.meta) || {};
+    hint.textContent = meta.server_published
+      ? '端点已在线：' + url + '（已发布 ' + (meta.published_count || 0) + ' 个本体）'
+      : '当前项目尚未发布本体，端点 ' + url + ' 暂不可用——先在上方清单发布任一本体即可生效，本配置无需改动。';
+  }
+}
+
 async function loadMcpOntologies(page) {
   const p = page || 1;
   try {
@@ -1776,6 +1849,8 @@ async function loadMcpOntologies(page) {
     const d = j.data || {};
     mcpList = { page: d.page || p, total: d.total || 0, items: d.items || [], meta: d };
     renderMcpList();
+    renderMcpProjectLine();
+    renderMcpServerConfig();
   } catch (e) { toast('加载本体发布清单失败: ' + e.message, 'err'); }
 }
 
@@ -1793,7 +1868,7 @@ function renderMcpList() {
         : '<span class="cursor-pointer text-emerald-400" title="发布到 /mcp/{项目id}" onclick="mcpTogglePublish(\'' + o.ontology_id + '\', true)">发布</span>';
       return '<tr class="border-b border-slate-800 hover:bg-slate-800/30">' +
         '<td class="p-1 text-slate-400">' + seq + '</td>' +
-        '<td class="p-1 font-mono text-slate-500" title="' + esc(o.ontology_id) + '">' + o.ontology_id.slice(0, 8) + '…</td>' +
+        '<td class="p-1 font-mono text-slate-500 whitespace-nowrap" title="' + esc(o.ontology_id) + '">' + o.ontology_id.slice(0, 8) + '…' + copyIcon(o.ontology_id, '本体ID') + '</td>' +
         '<td class="p-1">' + esc(o.name) + '</td>' +
         '<td class="p-1 text-slate-400 max-w-[280px] truncate" title="' + esc(o.description || '') + '">' + esc(o.description || '-') + '</td>' +
         '<td class="p-1 text-center">' + (o.entity_count ?? 0) + '</td>' +
@@ -1864,9 +1939,11 @@ async function loadMcpTools() {
 
 function showMcpExample(tool) {
   const example = tool.example || {};
-  const base = location.protocol + '//' + location.host;
+  const base = mcpBaseUrl();
   const projectId = state.currentProject?.id || '<project_id>';
-  const text = 'SSE endpoint: ' + base + '/mcp/' + projectId + '\n\n' + JSON.stringify(example, null, 2);
+  const text = 'SSE 端点（GET，连接入口，AI 平台配置只填这个）: ' + base + '/mcp/' + projectId +
+    '\n消息端点（POST，SSE 握手后客户端自动使用，无需手填）: ' + base + '/mcp/' + projectId + '/messages/' +
+    '\n\n' + JSON.stringify(example, null, 2);
   $('mcpExample').textContent = text;
 }
 

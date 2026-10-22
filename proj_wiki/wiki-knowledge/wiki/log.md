@@ -7,6 +7,15 @@ updated: 2026-10-22
 
 # 操作日志
 
+## [2026-10-22] feat | MCP 页易用性：ID 一键复制 + SSE/消息端点说明 + 一键复制完整 MCP Server 配置
+- 一键复制（用户反馈：本体 ID/项目 ID 是 MCP 调用要填的内容）：MCP 页发布清单「本体 ID」列与「当前项目」行加 ⧉ 复制图标，悬停提示「点击复制本体ID/项目ID」，点击后 toast「XX已复制」。通用 `copyText()`：Clipboard API（127.0.0.1 属安全上下文）+ 1.5s 超时竞速（个别环境写入会挂起）+ execCommand 回退，任何环境都有成功/失败反馈。
+- 踩坑：`copyIcon` 把 JSON.stringify 的双引号直接拼进双引号定界的 onclick 属性导致 handler 静默失效，参数须转 `&quot;`。
+- SSE/消息端点说明（用户疑问）：「MCP 接入」卡改为逐条解释——SSE 端点（GET /mcp/{项目id}）是 AI 客户端的连接入口（SSE 长连接、接收事件、获知消息端点）；消息端点（POST /mcp/{项目id}/messages/）是握手后发 JSON-RPC 请求（initialize/tools/list/tools/call）的地址，响应经 SSE 返回；AI 平台配置一般只填 SSE 端点，消息端点自动协商。调用示例同步改为真实双端点输出。
+- MCP Server 接入配置卡（发布清单下方）：按当前项目动态生成可直接粘贴的完整配置 `{"mcpServers":{"<项目名>":{"type":"sse","url":"http://127.0.0.1:8000/mcp/<项目id>"}}}`，一键复制；提示随发布状态切换（端点已在线/未发布暂不可用）。
+- 端口坑（重点）：配置 URL 不能用 location.host——前端常跑在 8123 静态端口，后端固定 `uvicorn --host 0.0.0.0 --port 8000`（与 app.js API_BASE 同一约定）；`mcpBaseUrl()` 仅在页面本身由 8000 服务时取 location.origin，否则固定 http://127.0.0.1:8000。AI 平台不在本机时把 127.0.0.1 换成运行平台机器的局域网 IP 即可（后端已监听所有网卡）。
+- 顺带修正：调用示例原用 location.host 会生成 8123 的错误 URL，一并改为 mcpBaseUrl()。
+- 验证：浏览器实测项目 ID/本体 ID/配置三处复制 toast 全部「已复制」；E2E 中 mcp_multi_project_coexist 一度失败——根因是我在浏览器里给 L6 项目发布过本体，残留的内存发布态使「发布项目数」断言多 1，取消发布（注意参数名是 project_id 而非 project）后 PASS=34 FAIL=0。
+
 ## [2026-10-22] feat | 本体删除/修改管理 + 依赖服务可达性门禁 + 推理页业务友好显示
 - 本体管理（建模页 + MCP 页均可删/改）：建模页列表项 hover 出「编辑/删除」，详情面板与 MCP 发布清单均加「修改/删除」按钮；修复保存恒走 POST 产生重复本体的 bug（编辑改走 PUT）；ingest 页"在建模页编辑"坏调用 renderOntologyDetail 改 selectOntology。
 - DELETE 级联清理（backend/api/router_ontologies.py）：顺序为 MCP unpublish → 实例存在时 409（details.instance_count，`?force=true` 连带删除）→ 清待审核候选 → 清 RDF（Fuseki `DELETE WHERE GRAPH` / 本地 ontology_<oid>.ttl，失败不阻断）→ 删本体记录；前端 409 二次确认后带 force 重试。

@@ -358,8 +358,11 @@
             <h3 class="font-medium text-sm text-slate-200">MCP 接入</h3>
             <div id="mcpStatusLine" class="text-sm"></div>
           </div>
+          <div id="mcpProjectLine" class="mt-2 text-xs text-slate-400"></div>
           <ul class="mt-2 space-y-1 text-xs text-slate-400 list-disc pl-4">
-            <li>每个项目一个 MCP Server：SSE 端点 <code class="text-slate-300">/mcp/{{project_id}}</code>，消息端点 <code class="text-slate-300">/mcp/{{project_id}}/messages/</code>——按项目区分，不同项目端点独立、可同时发布互不影响。</li>
+            <li><b class="text-slate-300">SSE 端点</b>（GET <code class="text-slate-300">/mcp/{项目id}</code>）：AI 客户端的「连接入口」——建立一条 Server-Sent Events 长连接，客户端在此接收服务端事件，并从中获知消息端点地址。</li>
+            <li><b class="text-slate-300">消息端点</b>（POST <code class="text-slate-300">/mcp/{项目id}/messages/</code>）：握手完成后，客户端把 JSON-RPC 请求（initialize / tools/list / tools/call 等）发到该地址，响应经 SSE 通道返回。配置 AI 平台时一般只填 SSE 端点，消息端点由客户端自动协商，无需手填。</li>
+            <li>每个项目一个 MCP Server：按项目区分，不同项目端点独立、可同时发布互不影响。</li>
             <li>发布粒度是「单个本体」：在本体发布清单中逐项发布/取消发布；同一项目多个已发布本体共享同一端点（工具按 ontology_id 参数区分本体），项目内无任何已发布本体时端点自动下线。</li>
             <li>发布后，支持 MCP 的外部 AI 助手/系统即可通过端点读取本项目的本体与实例。</li>
             <li>发布状态保存在内存中：后端重启后需重新发布（本体与实例数据不受影响）。</li>
@@ -391,6 +394,28 @@
               <button id="mcpNextBtn" class="btn secondary" onclick="loadMcpOntologies(mcpList.page + 1)">下一页</button>
             </div>
             <div id="mcpPageInfo" class="text-xs text-slate-500"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-span-12">
+        <div class="card p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-medium mb-0">MCP Server 接入配置（当前项目，可直接粘贴到 AI 平台）</h3>
+            <button id="mcpCopyConfigBtn" class="btn secondary" type="button">⧉ 复制配置</button>
+          </div>
+          <div class="grid grid-cols-12 gap-3">
+            <div class="col-span-12 lg:col-span-7">
+              <pre id="mcpServerConfig" class="text-xs bg-slate-900/60 border border-slate-700/60 rounded-lg p-3 overflow-x-auto m-0"></pre>
+            </div>
+            <div class="col-span-12 lg:col-span-5 text-xs text-slate-400">
+              <div id="mcpConfigHint" class="mb-2 text-slate-300"></div>
+              <ul class="list-disc pl-4 space-y-1 m-0">
+                <li>端口：后端固定监听 <code class="text-slate-300">0.0.0.0:8000</code>，配置中的 <code class="text-slate-300">http://127.0.0.1:8000</code> 即本机直连地址；若 AI 平台不在本机运行，把 <code class="text-slate-300">127.0.0.1</code> 换成运行本平台的机器局域网 IP 即可（后端已监听所有网卡）。</li>
+                <li>粘贴位置：AI 平台的 MCP / MCP Servers 设置（Claude Desktop 的 <code class="text-slate-300">claude_desktop_config.json</code>、Cherry Studio、CodeBuddy、Cursor 等），结构即 <code class="text-slate-300">mcpServers</code>。</li>
+                <li>只需填 SSE 端点；消息端点 <code class="text-slate-300">/messages/</code> 由客户端在 SSE 握手时自动协商，无需手填。</li>
+                <li>发布状态在内存中：后端重启后需在上方清单重新发布，本配置内容不变。</li>
+              </ul>
+            </div>
           </div>
         </div>
       </div>
