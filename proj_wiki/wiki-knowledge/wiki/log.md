@@ -7,6 +7,14 @@ updated: 2026-10-22
 
 # 操作日志
 
+## [2026-10-22] feat | MCP 页重构：本体发布清单表格（分页）+ 移除"多项目共存"栏目
+- 前端 MCP 页重排：顶部"MCP 接入"说明卡（端点规则、发布粒度、内存态提示）→ 中部"本体发布清单（当前项目）"表格（序号/本体ID/名称/描述/实体数/实例数/管理[发布|取消发布]，每页 10 条翻页）→ 底部工具清单 + 调用示例。
+- 新增后端端点 `GET /api/mcp/ontologies?project_id=&page=&page_size=`（list_payload + server_published/published_count/endpoint 附加字段）；McpServer 增加公开只读访问器 published_ids()/server_active()。
+- 移除"多项目共存"卡片与"取消发布（整个项目）"按钮：发布粒度始终是"单个本体"，项目端点在清单非空时自动上线、清空时自动下线，无独立的"项目发布"概念（原卡片为 5.1/5.2 修复时的补充展示，对业务用户造成误解）。
+- 修复实例读取的旧路径 bug：`mcp_server._load_instances` 与新端点实例统计原读已废弃的 `projects/{pid}/instances.jsonl`（已迁移为 `instances/<object_id>.jsonl` 分文件），统一改走 `core.instance_store.get_instance_store(project_id)`，与审批入库数据源一致。
+- 清理前端死代码：publishMcp/loadMcpStatus/publishMcpServer/unpublishMcpServer/unpublishMcpOntology。
+- 验证：新端点分页/实例数（27 实体/23 实例）/发布开关实测正确；全量 E2E PASS=33 FAIL=0；node --check 通过。
+
 ## [2026-10-22] feat | 11 项功能修复闭环 + 全量 E2E 全绿（PASS=33 FAIL=0）
 - 后端：候选批量 approve/reject/revert/delete、field_map 允许关系字段、422 校验失败明细（details.violations）、MCP 按本体发布清单+多项目共存（/mcp/{project_id}）、新增 reasoning/impact_inference.py（R1 直接引用回溯 + R2 时间链传导，POST /api/inference/impact）、action display-only 门。
 - 前端：实例列表直出、候选表格+批量操作、实体树、关系目标联想、校验明细展示、动作页仅展示标记、MCP 发布清单（详见 TASK_CHECKPOINT §12/§13）。

@@ -321,7 +321,7 @@ function switchTab(name) {
   if (name === 'graph') { loadOntologies().then(() => { renderOntologySelects(); loadGraph(); }); }
   if (name === 'inference') { loadOntologies().then(() => { renderOntologySelects(); loadInference(); }); }
   if (name === 'action') { loadActions(); }
-  if (name === 'mcp') { loadOntologies().then(() => { renderOntologySelects(); loadMcpStatus(); loadMcpTools(); }); }
+  if (name === 'mcp') { loadMcpOntologies(1); loadMcpTools(); }
   if (name === 'logs') { loadServerLogs(); }
   if (name === 'settings') { loadLLMSettings(); }
   _lastTab = name;
@@ -372,7 +372,7 @@ function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').
 function renderOntologySelects() {
   const active = state.ontologies.filter(o => (o.status || 'active') === 'active');
   const opts = active.map(o => '<option value="' + o.id + '">' + esc(o.name) + '</option>').join('');
-  ['ingestOntology', 'graphOntology', 'inferOntology', 'mcpOntology'].forEach(id => {
+  ['ingestOntology', 'graphOntology', 'inferOntology'].forEach(id => {
     const sel = $(id);
     if (!sel) return;
     const prev = sel.value;
@@ -673,20 +673,6 @@ async function publishCurrent() {
     loadOntologies();
   } catch (e) {
     toast('发布失败: ' + e.message, 'err');
-  }
-}
-
-async function publishMcp() {
-  if (!state.currentOntology) return;
-  try {
-    const j = await api('/api/mcp/server/publish?ontology_id=' + state.currentOntology.id, { method: 'POST', body: '{}' });
-    const d = j.data;
-    const msg = d.published
-      ? `MCP Server 已发布：${d.endpoint}`
-      : '发布失败：' + (d.error || '未知错误');
-    toast(msg, d.published ? 'ok' : 'err');
-  } catch (e) {
-    toast('MCP 发布失败: ' + e.message, 'err');
   }
 }
 
@@ -1707,53 +1693,64 @@ function closeModal() {
 }
 
 // ---- MCP ----
-async function loadMcpStatus() {
-  const box = $('mcpStatusBox');
-  let globalData = null;
+const MCP_PAGE_SIZE = 10;
+let mcpList = { page: 1, total: 0, items: [], meta: {} };
+
+async function loadMcpOntologies(page) {
+  const p = page || 1;
   try {
-    // 5.2：多项目共存视图（不带 project_id 的全局状态）
-    try {
-      const g = await api('/api/mcp/server/status', { projectId: null, namespace: null });
-      globalData = g.data || {};
-    } catch (e) { /* 全局状态不可用不阻断 */ }
-    const j = await api('/api/mcp/server/status');
+    const j = await api('/api/mcp/ontologies?page=' + p + '&page_size=' + MCP_PAGE_SIZE);
     const d = j.data || {};
-    if (d.published) {
-      const ontList = (d.published_ontologies || []).map(o =>
-        '<div class="flex justify-between items-center p-1.5 rounded border border-slate-700/50 text-xs">' +
-        '<span>' + esc(o.name || o.ontology_id) + '</span>' +
-        '<span class="cursor-pointer text-amber-400" title="仅下线该本体" onclick="unpublishMcpOntology(\'' + o.ontology_id + '\')">下线</span>' +
-        '</div>'
-      ).join('') || '<div class="text-xs text-slate-500">（未记录本体清单）</div>';
-      box.innerHTML = '<div class="text-emerald-400 font-medium mb-1">已发布</div>' +
-        '<div class="text-xs text-slate-400 mb-1">SSE 端点: <code class="text-slate-300">' + esc(d.endpoint || '') + '</code></div>' +
-        '<div class="text-xs text-slate-400 mb-2">消息端点: <code class="text-slate-300">' + esc(d.messages_endpoint || '') + '</code></div>' +
-        '<div class="text-xs text-slate-500 mb-1">已发布本体（' + (d.published_ontologies || []).length + ' 个，共享同一端点与工具）:</div>' +
-        '<div class="space-y-1 max-h-[160px] overflow-auto">' + ontList + '</div>' +
-        '<div class="text-xs text-slate-500 mt-2">工具: ' + (d.tools || []).join(', ') + '</div>';
-    } else {
-      box.innerHTML = '<div class="text-slate-400">当前项目未发布 MCP Server。选择上方本体后点击「发布 / 更新」。</div>';
-    }
-    // 5.2：多项目共存状态
-    const projects = (globalData && globalData.published_projects) || [];
-    const coexEl = $('mcpCoexist');
-    if (coexEl) {
-      coexEl.innerHTML = projects.length
-        ? projects.map(p => '<div class="flex justify-between text-xs p-1.5 rounded border border-slate-700/50">' +
-            '<span>' + esc(p.project_id.slice(0, 8)) + '…</span>' +
-            '<span class="text-slate-400">' + esc(p.endpoint) + ' · ' + (p.published_ontologies || []).length + ' 本体</span></div>').join('')
-        : '<div class="text-xs text-slate-500">当前无项目处于发布状态</div>';
-    }
-  } catch (e) { toast('加载 MCP 状态失败: ' + e.message, 'err'); }
+    mcpList = { page: d.page || p, total: d.total || 0, items: d.items || [], meta: d };
+    renderMcpList();
+  } catch (e) { toast('加载本体发布清单失败: ' + e.message, 'err'); }
 }
 
-// 5.1：按本体取消发布（清单清空后项目 Server 自动下线）
-async function unpublishMcpOntology(ontologyId) {
+function renderMcpList() {
+  const tb = $('mcpOntoBody');
+  const { items, page, total } = mcpList;
+  const meta = mcpList.meta || {};
+  if (!items.length) {
+    tb.innerHTML = '<tr><td colspan="7" class="p-3 text-center text-slate-500">当前项目暂无本体，请先在「建模」页创建</td></tr>';
+  } else {
+    tb.innerHTML = items.map((o, i) => {
+      const seq = (page - 1) * MCP_PAGE_SIZE + i + 1;
+      const act = o.published
+        ? '<span class="cursor-pointer text-amber-400" title="取消该本体的发布；项目内无已发布本体时端点自动下线" onclick="mcpTogglePublish(\'' + o.ontology_id + '\', false)">取消发布</span>'
+        : '<span class="cursor-pointer text-emerald-400" title="发布到 /mcp/{项目id}" onclick="mcpTogglePublish(\'' + o.ontology_id + '\', true)">发布</span>';
+      return '<tr class="border-b border-slate-800 hover:bg-slate-800/30">' +
+        '<td class="p-1 text-slate-400">' + seq + '</td>' +
+        '<td class="p-1 font-mono text-slate-500" title="' + esc(o.ontology_id) + '">' + o.ontology_id.slice(0, 8) + '…</td>' +
+        '<td class="p-1">' + esc(o.name) + '</td>' +
+        '<td class="p-1 text-slate-400 max-w-[280px] truncate" title="' + esc(o.description || '') + '">' + esc(o.description || '-') + '</td>' +
+        '<td class="p-1 text-center">' + (o.entity_count ?? 0) + '</td>' +
+        '<td class="p-1 text-center">' + (o.instance_count ?? 0) + '</td>' +
+        '<td class="p-1 whitespace-nowrap"><span class="mr-2 ' + (o.published ? 'text-emerald-400' : 'text-slate-500') + '">' + (o.published ? '已发布' : '未发布') + '</span>' + act + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+  const pages = Math.max(1, Math.ceil(total / MCP_PAGE_SIZE));
+  const statusEl = $('mcpStatusLine');
+  if (statusEl) {
+    statusEl.innerHTML = meta.server_published
+      ? '<span class="text-emerald-400">● 端点在线</span> <code class="text-slate-300">' + esc(meta.endpoint || '') + '</code>（已发布 ' + (meta.published_count || 0) + ' 个本体，共享该端点）'
+      : '<span class="text-slate-500">○ 端点未上线</span> 当前项目尚无已发布本体；发布任一本体后端点 <code class="text-slate-400">' + esc(meta.endpoint || '') + '</code> 自动上线';
+  }
+  const info = $('mcpPageInfo');
+  if (info) info.textContent = '第 ' + page + ' / ' + pages + ' 页 · 共 ' + total + ' 个本体';
+  const prev = $('mcpPrevBtn'), next = $('mcpNextBtn');
+  if (prev) prev.disabled = page <= 1;
+  if (next) next.disabled = page >= pages;
+}
+
+// 按本体发布/取消发布（项目内清单清空后 Server 自动下线）
+async function mcpTogglePublish(ontologyId, publish) {
   try {
-    await api('/api/mcp/server/unpublish?ontology_id=' + encodeURIComponent(ontologyId), { method: 'POST', body: '{}' });
-    toast('已下线该本体的 MCP 发布', 'ok');
-    loadMcpStatus();
-  } catch (e) { toast('下线失败: ' + e.message, 'err'); }
+    const url = (publish ? '/api/mcp/server/publish?ontology_id=' : '/api/mcp/server/unpublish?ontology_id=') + encodeURIComponent(ontologyId);
+    await api(url, { method: 'POST', body: '{}' });
+    toast(publish ? '已发布: ' + ontologyId : '已取消发布: ' + ontologyId, 'ok');
+    loadMcpOntologies();
+  } catch (e) { toast((publish ? '发布失败: ' : '取消发布失败: ') + e.message, 'err'); }
 }
 
 async function loadMcpTools() {
@@ -1777,24 +1774,6 @@ function showMcpExample(tool) {
   const projectId = state.currentProject?.id || '<project_id>';
   const text = 'SSE endpoint: ' + base + '/mcp/' + projectId + '\n\n' + JSON.stringify(example, null, 2);
   $('mcpExample').textContent = text;
-}
-
-async function publishMcpServer() {
-  const ontologyId = $('mcpOntology').value;
-  if (!ontologyId) return toast('请选择要发布的本体', 'info');
-  try {
-    const j = await api('/api/mcp/server/publish?ontology_id=' + encodeURIComponent(ontologyId), { method: 'POST', body: '{}' });
-    toast('MCP Server 已发布: ' + j.data.endpoint, 'ok');
-    loadMcpStatus();
-  } catch (e) { toast('发布失败: ' + e.message, 'err'); }
-}
-
-async function unpublishMcpServer() {
-  try {
-    await api('/api/mcp/server/unpublish', { method: 'POST', body: '{}' });
-    toast('已取消发布', 'ok');
-    loadMcpStatus();
-  } catch (e) { toast('取消发布失败: ' + e.message, 'err'); }
 }
 
 // ---- 图谱 ----

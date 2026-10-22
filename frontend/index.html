@@ -329,37 +329,55 @@
 
     <!-- MCP 页 -->
     <section id="mcp" class="tab-content hidden grid grid-cols-12 gap-4">
-      <div class="col-span-12 lg:col-span-4 flex flex-col gap-4">
+      <div class="col-span-12">
         <div class="card p-4">
-          <h3 class="font-medium mb-3">MCP Server 管理</h3>
-          <div class="mb-3">
-            <label>发布到 MCP 的本体</label>
-            <select id="mcpOntology" class="w-full mb-2"></select>
-            <div class="text-xs text-slate-500">发布后，外部 Agent 可通过 SSE 端点调用工具。同一项目可发布多个本体（共享端点）。</div>
+          <div class="flex flex-wrap items-center gap-x-8 gap-y-2">
+            <h3 class="font-medium text-sm text-slate-200">MCP 接入</h3>
+            <div id="mcpStatusLine" class="text-sm"></div>
           </div>
-          <div class="flex gap-2 mb-3">
-            <button class="btn" onclick="publishMcpServer()">发布 / 更新</button>
-            <button class="btn secondary" onclick="unpublishMcpServer()">取消发布（整个项目）</button>
-          </div>
-          <div id="mcpStatusBox" class="text-sm"></div>
-        </div>
-        <div class="card p-4">
-          <h3 class="font-medium mb-2">多项目共存</h3>
-          <div id="mcpCoexist" class="space-y-1"></div>
-        </div>
-        <div class="card p-4 text-xs text-slate-400 space-y-1.5">
-          <h3 class="font-medium text-sm text-slate-200 mb-1">端点规则</h3>
-          <div>• 每个项目一个 MCP Server：SSE 端点 <code class="text-slate-300">/mcp/{{project_id}}</code>，消息端点 <code class="text-slate-300">/mcp/{{project_id}}/messages/</code>。</div>
-          <div>• 项目内多个本体可先后发布，共享同一端点与工具集（工具按 ontology_id 参数区分本体）。</div>
-          <div>• 多个项目可同时发布，各自端点独立共存、互不影响。</div>
-          <div>• 发布状态保存在内存中，后端重启后需重新发布（本体数据不受影响）。</div>
+          <ul class="mt-2 space-y-1 text-xs text-slate-400 list-disc pl-4">
+            <li>每个项目一个 MCP Server：SSE 端点 <code class="text-slate-300">/mcp/{{project_id}}</code>，消息端点 <code class="text-slate-300">/mcp/{{project_id}}/messages/</code>——按项目区分，不同项目端点独立、可同时发布互不影响。</li>
+            <li>发布粒度是「单个本体」：在本体发布清单中逐项发布/取消发布；同一项目多个已发布本体共享同一端点（工具按 ontology_id 参数区分本体），项目内无任何已发布本体时端点自动下线。</li>
+            <li>发布后，支持 MCP 的外部 AI 助手/系统即可通过端点读取本项目的本体与实例。</li>
+            <li>发布状态保存在内存中：后端重启后需重新发布（本体与实例数据不受影响）。</li>
+          </ul>
         </div>
       </div>
-      <div class="col-span-12 lg:col-span-8 flex flex-col gap-4">
+      <div class="col-span-12">
+        <div class="card p-4">
+          <h3 class="font-medium mb-3">本体发布清单（当前项目）</h3>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs border-collapse">
+              <thead>
+                <tr class="text-slate-400">
+                  <th class="border-b border-slate-700 p-1 text-left w-12">序号</th>
+                  <th class="border-b border-slate-700 p-1 text-left w-28">本体 ID</th>
+                  <th class="border-b border-slate-700 p-1 text-left">本体名称</th>
+                  <th class="border-b border-slate-700 p-1 text-left">描述</th>
+                  <th class="border-b border-slate-700 p-1 text-center w-16">实体数</th>
+                  <th class="border-b border-slate-700 p-1 text-center w-16">实例数</th>
+                  <th class="border-b border-slate-700 p-1 text-left w-36">管理</th>
+                </tr>
+              </thead>
+              <tbody id="mcpOntoBody"></tbody>
+            </table>
+          </div>
+          <div class="flex items-center justify-between mt-3">
+            <div class="flex gap-2">
+              <button id="mcpPrevBtn" class="btn secondary" onclick="loadMcpOntologies(mcpList.page - 1)">上一页</button>
+              <button id="mcpNextBtn" class="btn secondary" onclick="loadMcpOntologies(mcpList.page + 1)">下一页</button>
+            </div>
+            <div id="mcpPageInfo" class="text-xs text-slate-500"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-span-12 lg:col-span-6">
         <div class="card p-4">
           <h3 class="font-medium mb-3">工具清单</h3>
           <div id="mcpToolsList" class="space-y-2 max-h-[360px] overflow-auto"></div>
         </div>
+      </div>
+      <div class="col-span-12 lg:col-span-6">
         <div class="card p-4">
           <h3 class="font-medium mb-3">调用示例</h3>
           <pre id="mcpExample" class="text-xs"></pre>

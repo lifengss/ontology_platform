@@ -91,6 +91,14 @@ class McpServer:
             "tools": list(TOOLS_CONTRACT.keys()),
         }
 
+    def published_ids(self, project_id: str) -> list[str]:
+        """已发布本体清单（公开只读，供 MCP 列表接口使用）。"""
+        return list(self._published_ontologies.get(project_id, []))
+
+    def server_active(self, project_id: str) -> bool:
+        """项目 MCP Server 是否在线（首个本体发布时上线，清单清空时下线）。"""
+        return project_id in self._projects
+
     def publish(self, project_id: str, ontology_id: str) -> dict:
         rec = self._ontologies(project_id).get(ontology_id)
         if not rec:
@@ -266,19 +274,11 @@ def _run_inference(ontology: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _load_instances(project_id: str, ontology_id: str) -> list[dict[str, Any]]:
-    path = os.path.join(get_settings().data_dir, "projects", project_id, "instances.jsonl")
-    if not os.path.exists(path):
-        return []
-    records: list[dict[str, Any]] = []
+    """读取该项目下指定本体的全部实例（数据源与审批入库一致：core.instance_store，按对象分文件）。"""
+    from core.instance_store import get_instance_store
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                rec = json.loads(line)
-                if rec.get("ontology_id") == ontology_id:
-                    records.append(rec)
+        records = get_instance_store(project_id).all()
     except Exception as e:  # noqa: BLE001
-        logger.warning("读取 instances.jsonl 失败: %s", e)
-    return records
+        logger.warning("读取实例存储失败: project=%s err=%s", project_id, e)
+        return []
+    return [r for r in records if (r or {}).get("ontology_id") == ontology_id]

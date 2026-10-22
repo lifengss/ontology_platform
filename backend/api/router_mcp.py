@@ -45,6 +45,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _instance_counts(project_id: str) -> dict[str, int]:
+    """统计每个本体的实例数（数据源与审批入库一致：core.instance_store，按对象分文件 JSONL）。"""
+    from core.instance_store import get_instance_store
+    counts: dict[str, int] = {}
+    for rec in get_instance_store(project_id).all():
+        oid = rec.get("ontology_id")
+        if oid:
+            counts[oid] = counts.get(oid, 0) + 1
+    return counts
+
+
 @router.post("/connections", status_code=201)
 def create_connection(payload: ConnectionCreate, project_id: str = Depends(project_id_param)):
     rec = payload.model_dump()
@@ -192,3 +203,38 @@ def server_status(project_id: str | None = Query(default=None)):
 @router.get("/server/tools")
 def server_tools():
     return success(_server.tools())
+
+
+@router.get("/ontologies")
+def list_mcp_ontologies(
+    project_id: str = Depends(project_id_param),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=50),
+):
+    """MCP 发布清单：当前项目全部本体 + 实体数/实例数/发布状态（分页，前端每页 10 个）。"""
+    page, page_size = parse_pagination(page, page_size)
+    store = _ontologies_for(project_id)
+    items = store.all()
+    counts = _instance_counts(project_id)
+    published = set(_server.published_ids(project_id))
+    enriched = []
+    for o in items:
+        oid = o.get("id")
+        enriched.append({
+            "ontology_id": oid,
+            "name": o.get("name") or oid,
+            "description": o.get("description") or "",
+            "entity_count": len(o.get("objects") or []),
+            "instance_count": counts.get(oid, 0),
+            "published": oid in published,
+        })
+    total = len(enriched)
+    start = (page - 1) * page_size
+    data = list_payload(enriched[start: start + page_size], total, page, page_size)
+    data.update({
+        "server_published": _server.server_active(project_id),
+        "published_count": sum(1 for e in enriched if e["published"]),
+        "endpoint": f"/mcp/{project_id}",
+        "messages_endpoint": f"/mcp/{project_id}/messages/",
+    })
+    return success(data)
