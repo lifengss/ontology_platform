@@ -1272,23 +1272,42 @@ function onIngestOntologyChange() {
 }
 
 // ---- 1.5 左侧实体层级树：按 many_to_one 关系构建父子层级（Protege 风格） ----
+// 注意：关系图可能含 many_to_one 环（A→B→A）或菱形共享父节点，直接按边递归渲染会无限爆栈，
+// 故这里先把图转成真树——每个节点只挂到第一个到达它的父节点下，环形/重复边丢弃，保证每节点仅渲染一次。
 function buildObjectTree(ont) {
   const objs = ont.objects || [];
   const byId = new Map(objs.map(o => [o.id, o]));
-  const childrenOf = new Map();
+  const rawChildren = new Map();
   const hasParent = new Set();
   objs.forEach(o => (o.relations || []).forEach(r => {
-    if (r.cardinality === 'many_to_one' && byId.has(r.target_object)) {
-      if (!childrenOf.has(r.target_object)) childrenOf.set(r.target_object, []);
-      childrenOf.get(r.target_object).push(o.id);
+    // 自环不入树（节点不能做自己的父级）
+    if (r.cardinality === 'many_to_one' && r.target_object !== o.id && byId.has(r.target_object)) {
+      if (!rawChildren.has(r.target_object)) rawChildren.set(r.target_object, []);
+      rawChildren.get(r.target_object).push(o.id);
       hasParent.add(o.id);
     }
   }));
   const placed = new Set();
-  const walk = id => { placed.add(id); (childrenOf.get(id) || []).forEach(walk); };
-  const roots = objs.filter(o => !hasParent.has(o.id)).map(o => o.id);
-  roots.forEach(walk);
-  objs.forEach(o => { if (!placed.has(o.id) && !roots.includes(o.id)) roots.push(o.id); });
+  const childrenOf = new Map();
+  const walk = id => {
+    (rawChildren.get(id) || []).forEach(cid => {
+      if (placed.has(cid)) return;
+      placed.add(cid);
+      if (!childrenOf.has(id)) childrenOf.set(id, []);
+      childrenOf.get(id).push(cid);
+      walk(cid);
+    });
+  };
+  const roots = [];
+  const enterRoot = id => {
+    if (placed.has(id)) return;
+    placed.add(id);
+    roots.push(id);
+    walk(id);
+  };
+  objs.filter(o => !hasParent.has(o.id)).forEach(o => enterRoot(o.id));
+  // 仅由环可达的节点（无树根可挂）提升为根节点，确保不丢失
+  objs.forEach(o => { if (!placed.has(o.id)) enterRoot(o.id); });
   return { roots, childrenOf };
 }
 

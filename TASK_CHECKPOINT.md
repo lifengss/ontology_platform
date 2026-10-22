@@ -319,3 +319,12 @@
 - 运行中服务 namespaces API 冒烟：建项目→列表(仅默认)→创建(ns_ 自动生成)→重命名→删除→清理，全通过
 - Playwright UI 全流程（独立 profile 绕开用户 Chrome 锁）：首页渲染、UI 新建空间、重命名、删除，**0 JS 报错**
 - 经验：agent-browser 默认 profile 与用户正在运行的 Chrome 冲突（Chrome 退出码 0）→ 用 `--profile`/`--session` 无效时，改 Playwright `launchPersistentContext(executablePath=系统Chrome, 临时profile)` 可行
+
+---
+
+## 15. 2026-10-22：实例导入页实体树空白修复（环安全）
+
+- **现象**：实例导入页左侧实体树整体空白（L6 采购计划流程本体，27 对象），选择本体后无任何节点
+- **根因**：`buildObjectTree` 按 many_to_one 关系建父子层级，但 L6 本体关系图含 **3 个环**（2 自环 + 1 三节点环）；`walk` 递归与 `renderNode` 展开渲染均无环保护 → `RangeError: Maximum call stack size exceeded` → 整栏渲染中断（异常吞在 `loadOntologies().then` 里，页面无任何提示，右栏实例列表连带不加载）
+- **修复**：`frontend/app.js` `buildObjectTree` 改为"关系图 → 真树"——自环边剔除、每节点只挂第一个到达它的父节点（环形/菱形重复边丢弃），`renderNode` 递归天然终止；仅由环可达的节点提升为根，不丢对象。app.js 版本号 `?v=20261022d`
+- **验证**：Playwright 实测 27/27 对象渲染、0 重复、全展开/点击选中正常、右栏元数据+实例列表(43 条)恢复显示，**0 JS 报错**
