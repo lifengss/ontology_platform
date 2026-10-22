@@ -110,6 +110,9 @@ def test_inference_trace_endpoint():
     assert r2.status_code == 200
     steps = r2.json()["data"]["steps"]
     assert any("传递闭包" in s["rule"] for s in steps)
+    # 每个步骤同时携带 OWL2-RL 原始形式与业务中文文案
+    for s in steps:
+        assert s["rule_zh"] and s["premises_zh"] and s["conclusion_zh"]
 
 
 def test_graph_not_found():

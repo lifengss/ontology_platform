@@ -261,13 +261,17 @@
 ```
   - 字段约定：**节点**的 `source` = 数据来源（着色）；**边**的 `source`/`target` = 图方向，`origin` = 数据来源。
   - `tabs.schema` 仅含本体 TBox；`tabs.knowledge` 合并 TBox + ABox（VS3 落库实例，来自 `instances.jsonl` 或 Neo4j）。
-- `GET /api/inference/trace/{id}` 响应（VS2：基于生成的 OWL 图应用 OWL2-RL 风格规则推导隐含公理，返回可解释步骤）：
+- `GET /api/inference/trace/{id}` 响应（VS2：基于生成的 OWL 图应用 OWL2-RL 风格规则推导隐含公理，返回可解释步骤）。每个步骤含两组文案：`rule/premises/conclusion` 为 OWL2-RL 原始形式（技术排查用），`rule_zh/premises_zh/conclusion_zh` 为面向业务人员的中文推断描述（对象/属性名取 TTL 中的 `RDFS.label` 中文名）；前端以 `*_zh` 为主展示，原始形式折叠展示：
 ```json
 { "success": true, "data": {
     "ontology_id": "uuid",
     "focus": null,
     "steps": [
-      { "order":1, "rule":"owl:inverseOf 对称性", "premises":["rel_belongs inverseOf rel_belongsInv"], "conclusion":"rel_belongsInv inverseOf rel_belongs" }
+      { "order":1, "rule":"owl:inverseOf 对称性", "rule_zh":"逆向关系补全",
+        "premises":["rel_belongs inverseOf rel_belongsInv"],
+        "premises_zh":["属性“归属部门”与属性“拥有客户”互为逆向（业务侧已声明）"],
+        "conclusion":"rel_belongsInv inverseOf rel_belongs",
+        "conclusion_zh":"推断：若某对象的“归属部门”指向另一对象，则对方的“拥有客户”会反向指回该对象" }
     ]
 }, "error": null }
 ```

@@ -2630,11 +2630,16 @@ async function loadInference() {
     const j = await api('/api/ontologies/' + id + '/inference');
     const steps = j.data.steps || [];
     const el = $('inferenceSteps');
+    // 业务人员可读为主（*_zh 中文推断），OWL2-RL 原始形式折叠在"查看原始规则"里供技术排查
     el.innerHTML = steps.length ? steps.map((s, i) =>
       '<div class="p-2 rounded-lg border border-slate-700/50 text-sm">' +
-      '<div><span class="text-slate-500">#' + (i + 1) + '</span> ' + esc(s.rule) + '</div>' +
-      '<div class="text-xs text-slate-400 mt-1">前提: ' + esc((s.premises || []).join('；')) + '</div>' +
-      '<div class="text-xs text-emerald-400">结论: ' + esc(s.conclusion || '') + '</div>' +
+      '<div><span class="text-slate-500">#' + (i + 1) + '</span> <span class="text-slate-200 font-medium">' + esc(s.rule_zh || s.rule) + '</span></div>' +
+      '<div class="text-xs text-slate-400 mt-1">依据: ' + esc((s.premises_zh || s.premises || []).join('；')) + '</div>' +
+      '<div class="text-xs text-emerald-400 mt-0.5">推断: ' + esc(s.conclusion_zh || s.conclusion || '') + '</div>' +
+      '<details class="mt-1"><summary class="text-[11px] text-slate-500 cursor-pointer select-none hover:text-slate-400">查看原始规则（OWL2-RL）</summary>' +
+      '<pre class="text-[11px] text-slate-500 mt-1 whitespace-pre-wrap font-mono">' + esc(
+        s.rule + '\n前提: ' + (s.premises || []).join('；') + '\n结论: ' + (s.conclusion || '')
+      ) + '</pre></details>' +
       '</div>'
     ).join('') : '<div class="text-sm text-slate-500">无推理结论（该本体未发现可推导的隐含公理）</div>';
   } catch (e) { toast('加载推理失败: ' + e.message, 'err'); }

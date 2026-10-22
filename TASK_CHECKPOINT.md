@@ -346,3 +346,13 @@
   - 文档：`docs/API-INTERFACE-DOC.md` O-05 响应补 `source` 字段说明
 - **验证**：pytest **66/66**（新增 `test_nl_to_sparql.py` 6 例：PREFIX 前导/markdown 围栏容忍、非法拒绝、空 content、LLM 不可达、关键词兜底）；真实链路冒烟"有哪些角色？"→source=llm 4 行、"列出所有流程活动及其主导角色"→source=llm 33 行（activityName+leadingRole 字面量，符合预期）
 - **已知限制**：确定性兜底是模板查询（按关键词命中对象后取前 50 实例），不理解条件语义，属设计降级；app.js 版本号 `?v=20261022e`
+
+---
+
+## 17. 2026-10-22：模式层推理结果业务化文案
+
+- **现象**：推理页"模式层推理"直接展示 OWL2-RL 原始三元组文本（`businessprocess_id domain Stage`、`Activity⊆BusinessProcess`、`inverseOf`），业务人员不可读
+- **方案**：TTL 中类/属性/逆向属性均带 `RDFS.label`（中文名），后端 `inference_trace` 从图中建"本地名→中文名"映射，每个步骤在保留原始 `rule/premises/conclusion` 的同时新增 `rule_zh/premises_zh/conclusion_zh` 业务中文文案（如"依据：属性'认证状态'定义在对象'供应商'上；'VMI供应商'归属于'供应商' → 推断：'VMI供应商'的实例同样可以具有属性'认证状态'"）
+- **前端**：`loadInference` 以 `*_zh` 为主展示（规则名/依据/推断三段），原始 OWL2-RL 形式收进 `<details>查看原始规则` 折叠块供技术排查；app.js 版本号 `?v=20261022f`
+- **验证**：pytest **67/67**（test_vs2 扩展 zh 文案断言 + 新增中文名不泄漏裸 ID 用例，test_vs4 端点用例断言每步骤含 zh 字段）；运行中服务 L6 本体 12 步推理全为中文（对象归属的传递 1 / 属性适用范围继承 7 / 属性取值对象继承 4）；Playwright 实测 12 卡片渲染 + 折叠展开正常、0 JS 报错
+- **文档**：`docs/API-INTERFACE-DOC.md` §4 推理响应示例补 `*_zh` 字段说明

@@ -49,7 +49,21 @@ def test_inference_trace_inverse_symmetry():
     onto = _ontology()
     steps = inference_trace(onto)
     # rel_belongs inverseOf rel_belongsInv ⇒ 推导出反向
-    assert any(s["rule"] == "owl:inverseOf 对称性" for s in steps)
+    s = next(x for x in steps if x["rule"] == "owl:inverseOf 对称性")
+    # 业务中文文案：从 RDFS.label 取中文名（归属部门 / 拥有客户），而非裸 ID
+    assert s["rule_zh"] == "逆向关系补全"
+    assert "归属部门" in s["premises_zh"][0] and "拥有客户" in s["premises_zh"][0]
+    assert "拥有客户" in s["conclusion_zh"] and "归属部门" in s["conclusion_zh"]
+    # 原始 OWL2-RL 形式保留
+    assert "inverseOf" in s["premises"][0] and "inverseOf" in s["conclusion"]
+
+def test_inference_trace_zh_uses_chinese_object_names():
+    onto = _ontology()
+    steps = inference_trace(onto)
+    for s in steps:
+        assert s["rule_zh"] and s["premises_zh"] and s["conclusion_zh"]
+        # 中文文案不应包含裸属性/对象 ID（labels 缺失时才回退 ID，该本体全部有中文名）
+        assert "attr_name" not in " ".join(s["premises_zh"] + [s["conclusion_zh"]])
 
 def test_inference_trace_subclass_transitivity():
     onto = {
@@ -67,4 +81,7 @@ def test_inference_trace_subclass_transitivity():
         "constraints": [],
     }
     steps = inference_trace(onto)
-    assert any(s["rule"] == "RDFS subClassOf 传递闭包" and "o_a⊆o_c" == s["conclusion"] for s in steps)
+    s = next(x for x in steps if x["rule"] == "RDFS subClassOf 传递闭包" and x["conclusion"] == "o_a⊆o_c")
+    # 传递推断的业务化表述：A 也归属于 C，且实例自动适用 C 的约束
+    assert s["rule_zh"] == "对象归属的传递"
+    assert "A" in s["conclusion_zh"] and "C" in s["conclusion_zh"] and "自动适用" in s["conclusion_zh"]
