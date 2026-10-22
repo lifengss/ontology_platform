@@ -61,3 +61,6 @@ scripts/js_ingest_lines.txt
 .coverage
 htmlcov/
 .pytest_cache/
+
+# 外部调研材料（本地参考，不随项目提交）
+_research_oswalpalash/
