@@ -20,6 +20,7 @@ from api.router_graph import router as graph_router
 from api.router_ingest import router as ingest_router
 from api.router_llm import router as llm_router
 from api.router_mcp import router as mcp_router
+from api.router_namespaces import router as namespaces_router
 from api.router_ontologies import router as ontologies_router
 from api.router_projects import router as projects_router
 from api.router_system import router as system_router
@@ -96,6 +97,7 @@ app.include_router(ontologies_router)
 app.include_router(ingest_router)
 app.include_router(graph_router)
 app.include_router(mcp_router)
+app.include_router(namespaces_router)
 app.include_router(actions_router)
 app.include_router(templates_router)
 app.include_router(llm_router)

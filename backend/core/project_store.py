@@ -49,6 +49,7 @@ class ProjectStore:
         JsonStore("ingest_candidates", project_id=rec["id"])
         JsonStore("actions", project_id=rec["id"])
         JsonStore("mcp_connections", project_id=rec["id"])
+        JsonStore("namespaces", project_id=rec["id"])
         return rec
 
     def list(self) -> list[dict[str, Any]]:

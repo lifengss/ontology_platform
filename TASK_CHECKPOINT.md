@@ -280,3 +280,42 @@
 - 全量 E2E：`python scripts/e2e_regression_test.py` **PASS=33 FAIL=0**（2.2 校验明细 / 1.4 候选生命周期 / 1.1 实例信封 / 1.2 单对象导入 / 1.3 多 sheet 批量 / 3.1 影响推理 R1+R2 / 4.1 display-only / 5.1+5.2 MCP 清单+多项目共存）
 - 单测回归：`tests/test_vs2.py` + `tests/test_vs2_business_gate.py` **11/11 通过**
 - 运行环境：Neo4j/Postgres 未启动时服务降级运行（/health status=degraded），文件存储链路不受影响
+
+---
+
+## 14. 2026-10-22：首页项目管理 + 部门空间管理 + MCP 连接 UI（已完成）
+
+> 提交：`0a17adc`（架构文档）、`38b8358`（首页/项目管理/MCP 连接 UI + schema 缺陷修复）、本轮 namespaces 提交。均已推送 origin/main。
+
+### 14.1 首页与项目级管理
+- 前端导航改**左侧竖排侧栏**；新增**首页**（默认落地页）：项目数/本体数/实例数/MCP 在线数统计 + 项目管理表（名称/ID/状态/本体数/实例数/MCP/数据量/创建时间/操作）
+- 项目操作：新建（行内表单）、进入、归档、恢复、删除（`default`/`_shared` 保护；均二次确认）
+- 后端项目归档/恢复：`POST /api/projects/{id}/archive|restore`——重数据压缩为 `data/archives/<id>.zip`（写包校验后删原目录），meta 保留本体索引；恢复防 zip-slip；列表支持 `with_stats=true`；删除/归档级联 MCP 发布态下线
+
+### 14.2 MCP 外部连接管理 UI
+- MCP 页新增「外部 MCP 数据源连接（入）」卡片：新建/编辑（本体→对象类型→属性字段映射 + 凭据环境变量引用 + 工具白名单）/测试/读取→候选/删除
+- **修复**：`backend/schemas/mcp.py` `MapsToOntology` 补 `ontology_id`/`read_tool`、`ConnectionCreate` 补可选 `connection_id`（此前 pydantic 默认丢弃 extra 字段 → 连接缺 ontology_id、read 端点恒 422）；`test_vs5_vs8.py` 补落盘回归断言
+
+### 14.3 部门空间（namespace）管理（本轮）
+- **背景**：namespace 原本只是本体上的字符串字段，无实体无 API；前端"新建空间"仅 prompt 本地切换不落库；且 `loadNamespaces` 用 `pageSize=1000`（超后端上限 100）被 422 静默吞掉 → 派生空间永远只剩默认空间
+- 后端新增：
+  - `backend/schemas/namespace.py`：`NamespaceCreate`（id 可选，格式 `^[A-Za-z][A-Za-z0-9_-]{0,63}$`，缺省 `ns_xxxxxxxx`）/ `NamespaceUpdate`
+  - `backend/api/router_namespaces.py`：`GET/POST /api/namespaces`、`PUT/DELETE /api/namespaces/{id}`
+    - 存储 `data/projects/<pid>/namespaces.json`（随项目归档/删除级联）
+    - 默认空间 id==project_id：不可删、不可改名
+    - 空间 ID 不可变（PUT 仅改显示名/描述）
+    - 非空空间（含本体）删除 409 `NAMESPACE_NOT_EMPTY`（details.ontology_count）
+    - 列表自动回填"有本体但注册表缺失"的空间（`derived=true`，兼容旧数据）
+  - `core/project_store.py`：建项目时初始化 namespaces 集合；`main.py` 注册路由
+- 前端：
+  - 首页新增「部门空间（当前项目）」卡片（名称/空间ID/说明/本体数/创建时间/操作：进入/重命名/删除）
+  - `loadNamespaces` 改为 `GET /api/namespaces` 驱动（修复 pageSize=1000 422 问题），头部空间选择器同源
+- 测试：`backend/tests/test_namespaces.py`（2 例：CRUD 生命周期 + 非空禁删/回填）
+- 文档：`docs/API-INTERFACE-DOC.md` §17（含 §5.1 连接字段、§16 项目管理同步更新）
+
+### 14.4 验证结果
+- pytest：**60/60**（原 58 + namespaces 2）
+- E2E：`scripts/e2e_regression_test.py` **34/34 PASS**
+- 运行中服务 namespaces API 冒烟：建项目→列表(仅默认)→创建(ns_ 自动生成)→重命名→删除→清理，全通过
+- Playwright UI 全流程（独立 profile 绕开用户 Chrome 锁）：首页渲染、UI 新建空间、重命名、删除，**0 JS 报错**
+- 经验：agent-browser 默认 profile 与用户正在运行的 Chrome 冲突（Chrome 退出码 0）→ 用 `--profile`/`--session` 无效时，改 Playwright `launchPersistentContext(executablePath=系统Chrome, 临时profile)` 可行

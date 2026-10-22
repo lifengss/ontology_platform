@@ -533,3 +533,37 @@
 归档项目的 `stats` 直接读 `archive_info`（`size_kind=archive`，`data_size` 为压缩包大小），不解压。
 
 > 归档语义（用户定义）：只保留索引——项目仍出现在项目列表/首页（名称、ID、本体清单与计数），但本体定义、实例等重数据以压缩方式存放；Jena/Neo4j 远端数据**不在**本次归档范围（避免恢复失败造成不可逆丢失，列入待增强）。
+
+## 17. 部门空间（namespaces）
+
+空间是**项目内**的本体分组：本体按 `namespace` 字段归属空间（缺省继承 `project_id` 即默认空间）。存储为 `data/projects/<project_id>/namespaces.json`，随项目归档/删除级联处理。
+
+约定：
+- 默认空间 `id == project_id`，不可删除、不可重命名；
+- 空间 ID 创建后**不可变**（PUT 仅更新显示名/描述）；ID 格式 `^[A-Za-z][A-Za-z0-9_-]{0,63}$`，缺省自动生成 `ns_xxxxxxxx`；
+- 非空空间（仍含本体）删除返回 409 `NAMESPACE_NOT_EMPTY`；
+- 列表自动回填"有本体但注册表缺失"的空间（兼容旧数据，`derived=true`）。
+
+### 17.1 端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/namespaces` | 空间列表（分页，默认 pageSize=100）；item 见下 |
+| POST | `/api/namespaces` | 新建空间，201；body `{id?, name, description?}`；冲突 409 `NAMESPACE_CONFLICT`，非法 ID 400 `NAMESPACE_INVALID_ID` |
+| PUT | `/api/namespaces/{ns_id}` | 更新 `name`/`description`；默认空间 409 `NAMESPACE_DEFAULT_PROTECTED`，不存在 404 |
+| DELETE | `/api/namespaces/{ns_id}` | 删除空间；默认空间 409，非空 409（`details.ontology_count`），不存在 404 |
+
+列表 item 结构：
+```json
+{
+  "id": "sales",
+  "name": "销售部",
+  "description": "CRM 域",
+  "ontology_count": 3,
+  "is_default": false,
+  "derived": false,
+  "created_at": "2026-10-22T08:50:00+00:00"
+}
+```
+
+前端入口：首页「部门空间（当前项目）」卡片（列表/新建/进入/重命名/删除）；顶部导航的空间选择器数据源为 `GET /api/namespaces`。

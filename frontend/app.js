@@ -214,19 +214,26 @@ function renderContextLabel() {
 
 async function loadNamespaces() {
   const projectId = _currentProjectId();
-  let nsSet = new Set([projectId]);
+  state.namespaceItems = [];
   try {
-    const j = await api('/api/ontologies?page=1&pageSize=1000', { namespace: null });
-    (j.data.items || []).forEach(o => { if (o.namespace) nsSet.add(o.namespace); });
-  } catch (e) { /* ignore */ }
-  state.namespaces = Array.from(nsSet).map(id => ({ id, name: id === projectId ? '默认空间 (' + id + ')' : id }));
+    const j = await api('/api/namespaces?pageSize=100', { namespace: null });
+    state.namespaceItems = j.data.items || [];
+    state.namespaces = state.namespaceItems.map(n => ({
+      id: n.id,
+      name: n.is_default ? '默认空间 (' + projectId + ')' : (n.name || n.id),
+    }));
+  } catch (e) {
+    // API 不可用时兜底：仅默认空间
+    state.namespaces = [{ id: projectId, name: '默认空间 (' + projectId + ')' }];
+  }
   const savedNs = localStorage.getItem('op_currentNamespace');
-  if (!state.currentNamespace || !nsSet.has(state.currentNamespace.id)) {
+  if (!state.currentNamespace || !state.namespaces.some(n => n.id === state.currentNamespace.id)) {
     state.currentNamespace = state.namespaces.find(n => n.id === savedNs) || state.namespaces[0];
     localStorage.setItem('op_currentNamespace', state.currentNamespace.id);
   }
   renderProjectSelector();
   renderNamespaceSelector();
+  renderNamespaces();
 }
 
 function renderNamespaceSelector() {
@@ -454,6 +461,78 @@ async function afterProjectStateChange() {
     return;
   }
   await loadProjects();
+}
+
+// ---- 部门空间（namespace）管理：项目内本体分组，进入/重命名/删除 ----
+function renderNamespaces() {
+  const tb = $('nsTableBody');
+  if (!tb) return;
+  const items = state.namespaceItems || [];
+  if (!items.length) { tb.innerHTML = '<tr><td colspan="6" class="p-3 text-center text-slate-500">暂无空间</td></tr>'; return; }
+  tb.innerHTML = items.map(n => {
+    const acts = ['<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="enterNamespace(\'' + escAttr(n.id) + '\')">进入</button>'];
+    if (!n.is_default) {
+      acts.push('<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="renameNamespace(\'' + escAttr(n.id) + '\', \'' + escAttr(n.name || '') + '\')">重命名</button>');
+      acts.push('<button class="btn danger" style="padding:2px 8px;font-size:12px" onclick="deleteNamespaceRow(\'' + escAttr(n.id) + '\', \'' + escAttr(n.name || n.id) + '\', ' + n.ontology_count + ')">删除</button>');
+    }
+    return '<tr class="border-b border-slate-700/40 hover:bg-slate-800/30">' +
+      '<td class="p-2">' + esc(n.name || n.id) + (n.is_default ? ' <span class="badge active">默认</span>' : '') + '</td>' +
+      '<td class="p-2 font-mono text-xs text-slate-500 whitespace-nowrap">' + esc(n.id) + '</td>' +
+      '<td class="p-2 text-xs text-slate-400">' + esc(n.description || '-') + '</td>' +
+      '<td class="p-2">' + n.ontology_count + '</td>' +
+      '<td class="p-2 text-xs text-slate-400 whitespace-nowrap">' + (n.created_at ? new Date(n.created_at).toLocaleDateString() : '-') + '</td>' +
+      '<td class="p-2 whitespace-nowrap">' + acts.join(' ') + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+function toggleNsForm(show) {
+  const box = $('nsForm');
+  const willShow = show != null ? show : box.classList.contains('hidden');
+  box.classList.toggle('hidden', !willShow);
+  if (willShow) $('newNsName').focus();
+}
+
+async function submitNewNamespace() {
+  const name = $('newNsName').value.trim();
+  if (!name) { toast('空间名称不能为空', 'err'); return; }
+  const id = $('newNsId').value.trim();
+  const desc = $('newNsDesc').value.trim();
+  try {
+    await api('/api/namespaces', { method: 'POST', body: JSON.stringify({ name, id: id || undefined, description: desc || undefined }) });
+    $('newNsName').value = ''; $('newNsId').value = ''; $('newNsDesc').value = '';
+    toggleNsForm(false);
+    toast('空间「' + name + '」已创建', 'ok');
+    await loadNamespaces();
+  } catch (e) { toast('创建失败: ' + e.message, 'err'); }
+}
+
+async function enterNamespace(id) {
+  await setNamespace(id);
+  toast('已切换到部门空间：' + id, 'ok');
+}
+
+async function renameNamespace(id, curName) {
+  const name = prompt('重命名空间「' + curName + '」的显示名（空间 ID 不变）：', curName);
+  if (!name || !name.trim() || name.trim() === curName) return;
+  try {
+    await api('/api/namespaces/' + encodeURIComponent(id), { method: 'PUT', body: JSON.stringify({ name: name.trim() }) });
+    toast('空间已重命名为「' + name.trim() + '」', 'ok');
+    await loadNamespaces();
+  } catch (e) { toast('重命名失败: ' + e.message, 'err'); }
+}
+
+async function deleteNamespaceRow(id, name, count) {
+  const warn = count > 0
+    ? '\n\n注意：该空间下仍有 ' + count + ' 个本体，删除会被拒绝，请先迁移或删除其本体。'
+    : '\n\n删除后该空间即不可用（本体若仍引用此 ID 将视为未归属空间）。此操作不可恢复。';
+  const ok = confirm('删除部门空间「' + name + '」？' + warn);
+  if (!ok) return;
+  try {
+    await api('/api/namespaces/' + encodeURIComponent(id), { method: 'DELETE' });
+    toast('空间「' + name + '」已删除', 'ok');
+    await loadNamespaces();
+  } catch (e) { toast('删除失败: ' + e.message, 'err'); }
 }
 
 // ---- 外部 MCP 数据源连接（入）：对接业务系统 MCP Server ----

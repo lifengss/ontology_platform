@@ -148,6 +148,41 @@
           </div>
         </div>
       </div>
+      <div class="col-span-12">
+        <div class="card p-4">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <h3 class="font-medium mb-0">部门空间（当前项目）</h3>
+              <div class="text-xs text-slate-500 mt-1">空间是项目内的本体分组；建模/导入按当前空间隔离。默认空间不可删除。</div>
+            </div>
+            <button class="btn" type="button" onclick="toggleNsForm()">＋ 新建空间</button>
+          </div>
+          <div id="nsForm" class="hidden mb-3 p-3 rounded-lg border border-slate-700/60 bg-slate-900/40 grid grid-cols-12 gap-2">
+            <input id="newNsName" class="col-span-3" placeholder="空间名称（必填）" />
+            <input id="newNsId" class="col-span-3" placeholder="空间ID（可选，字母开头；缺省自动生成）" />
+            <input id="newNsDesc" class="col-span-4" placeholder="空间说明（可选）" />
+            <div class="col-span-2 flex gap-2">
+              <button class="btn flex-1" type="button" onclick="submitNewNamespace()">创建</button>
+              <button class="btn secondary flex-1" type="button" onclick="toggleNsForm(false)">取消</button>
+            </div>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="text-slate-400 text-xs">
+                  <th class="p-1 text-left">名称</th>
+                  <th class="p-1 text-left">空间ID</th>
+                  <th class="p-1 text-left">说明</th>
+                  <th class="p-1 text-left">本体数</th>
+                  <th class="p-1 text-left">创建时间</th>
+                  <th class="p-1 text-left">操作</th>
+                </tr>
+              </thead>
+              <tbody id="nsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </section>
     <!-- 建模页 -->
     <section id="modeling" class="tab-content grid grid-cols-12 gap-4">
@@ -726,6 +761,6 @@
   </main>
   </div>
 
-  <script src="app.js?v=20261022a"></script>
+  <script src="app.js?v=20261022b"></script>
 </body>
 </html>
