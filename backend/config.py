@@ -31,6 +31,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        return default
+
+
 class Settings:
     """运行时配置（单例）。"""
 
@@ -56,6 +66,11 @@ class Settings:
         # 外部 MCP 调用健壮性（PRD §6.5）
         self.mcp_timeout_seconds: int = _env_int("MCP_TIMEOUT_SECONDS", 10)
         self.mcp_max_retries: int = _env_int("MCP_MAX_RETRIES", 3)
+
+        # Action 受控回写健壮性（PRD §6.6 护栏 4：失败指数退避 + 熔断）
+        self.action_max_retries: int = _env_int("ACTION_MAX_RETRIES", 2)
+        self.action_breaker_failure_threshold: int = _env_int("ACTION_BREAKER_FAILURE_THRESHOLD", 3)
+        self.action_breaker_cooldown_seconds: float = _env_float("ACTION_BREAKER_COOLDOWN_SECONDS", 30.0)
 
         # 凭据加密（生产建议；Demo 默认关闭）
         self.credential_encryption_enabled: bool = _env_bool("CREDENTIAL_ENCRYPTION_ENABLED", False)

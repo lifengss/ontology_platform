@@ -89,7 +89,7 @@ docker compose up -d
 | VS5 模板 | ✅ 完成（模板库 CRUD + 内置模板 + 从模板实例化本体） |
 | VS6 MCP Server | ✅ 完成（/mcp SSE 挂载，自动生成 ontology_query/inference_trace/instance_get/action_invoke 工具） |
 | VS7 外部接入 | ✅ 完成（HTTP transport 探测/重试/鉴权 + 读取映射生成候选；stdio 占位） |
-| VS8 Action | ✅ 完成（dry-run → 确认令牌 → HTTP/MCP 真实回写 + 幂等键 + 日志） |
+| VS8 Action | ✅ 完成（dry-run → 确认令牌 → HTTP/MCP 真实回写 + 幂等键 + 日志 + 失败指数退避重试 + 按端点熔断） |
 | VS9 凭据 | ✅ 本地引用管理 + 状态接口（不落库不打印） |
 | VS10 集成 | ✅ 完成（P0 全链路验收：建模→SHACL 校验→发布 MCP→外部 Agent 经 SSE 真实查询→连接外部 MCP 读取→人工审核归化入库→Action dry-run/确认回写/幂等防重；e2e 5/5 + 全量 72/72 全绿，报告见 `docs/VS10-集成验收报告.md`） |
 
@@ -128,6 +128,8 @@ cd backend && pytest -q
 | `SECRETS_DIR` | `backend/secrets` | 凭据本地引用目录（不落库） |
 | `LOG_DIR` / `LOG_LEVEL` | `backend/logs` / `INFO` | 日志目录与级别 |
 | `MCP_TIMEOUT_SECONDS` / `MCP_MAX_RETRIES` | `10` / `3` | 外部 MCP 调用超时/重试（PRD §6.5） |
+| `ACTION_MAX_RETRIES` | `2` | Action webhook 回写可重试失败（网络/超时/5xx）指数退避重试次数；4xx 不重试（PRD §6.6） |
+| `ACTION_BREAKER_FAILURE_THRESHOLD` / `ACTION_BREAKER_COOLDOWN_SECONDS` | `3` / `30` | Action 按外部端点熔断：连续失败阈值 / OPEN 冷却期（秒）（PRD §6.6） |
 | `CREDENTIAL_ENCRYPTION_ENABLED` | `false` | 凭据加密开关（生产建议开启） |
 | `LLM_ENDPOINT` / `LLM_MODEL` | `http://localhost:11434/v1` / `default` | 默认 LLM 端点/模型 |
 | `APP_NAME` / `APP_VERSION` | `EnterpriseOntologyPlatform` / `1.0.0` | 应用名/版本（`/health` 返回） |

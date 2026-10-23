@@ -353,7 +353,8 @@
 
 - `POST .../execute` 请求体：`{ "input": { "Customer": { "id":"c1","name":"张三" } }, "dry_run": false }`。
 - `POST .../execute` 响应：`data = { "confirmation_token": "uuid", "dry_run": false, "planned_payload": { "tool":"upsert_contact", "args": { "name":"张三" } }, "idempotency_key": "customer::c1" }`。**此时未回写**。
-- `POST .../confirm` 请求体：`{ "confirmation_token": "uuid" }`；响应：`data = { "executed": true, "external_response": { ... }, "log_id": "uuid" }`。
+- `POST .../confirm` 请求体：`{ "confirmation_token": "uuid" }`；响应：`data = { "executed": true, "idempotency_hit": false, "external_response": { ... }, "log_id": "uuid" }`。
+- 回写健壮性（PRD §6.6 护栏 4）：webhook/rest 回写对可重试失败（网络/超时/5xx）做**指数退避重试**（`ACTION_MAX_RETRIES`，默认 2；4xx 含 401/403 不重试），重试携带 `Idempotency-Key` 防重复写；**按外部端点**连续失败达 `ACTION_BREAKER_FAILURE_THRESHOLD`（默认 3）触发**熔断**（OPEN，冷却 `ACTION_BREAKER_COOLDOWN_SECONDS` 默认 30s），OPEN 期间 confirm 立即快速失败、不外呼、不落日志：响应 `data = { "executed": false, "circuit_open": true, "retry_after": <秒> }`（不计入幂等，重试不会被误判「已执行」）。冷却期后 HALF_OPEN 试探，成功恢复 CLOSED、失败重新 OPEN。
 - `GET .../logs` 响应：分页列表，每条日志含 `log_id/action_id/confirmation_token/idempotency_key/planned_payload/external_response/executed_at`。
 - 护栏：相同 `idempotency_key` 重复确认不产生重复回写（幂等）；`dry_run=true` 时 `execute` 直接返回 `planned_payload` 且 `confirmation_token=null`，不发起外部调用。
 
@@ -486,7 +487,8 @@
 ## 15. 状态与待补
 - **VS0–VS10 端点已全部实现**。VS10 为 P0 集成验收切片（建模→SHACL→发布 MCP→外部 Agent SSE 查询→外部 MCP 读取归化→人工审核入库→Action dry-run/确认回写/幂等防重），**已验收通过**：e2e `backend/tests/test_vs10_e2e.py` 5/5 + 全量 72/72 全绿，报告见 `docs/VS10-集成验收报告.md`。
 - 用户友好建模/逆向生成见 §14。
-- 待增强：Fuseki 远程推理开关、SHACL 在 Jena 侧执行、MCP stdio transport 完整 JSON-RPC、Action 熔断/重试策略细化。
+- 待增强：Fuseki 远程推理开关、SHACL 在 Jena 侧执行、MCP stdio transport 完整 JSON-RPC。
+- Action 回写健壮性（指数退避重试 + 按端点熔断）已完成（2026-10-23，见 §6.2 与 TASK_CHECKPOINT §19；`test_action_resilience.py` 7/7）。
 
 ## 16. 项目管理（projects）
 

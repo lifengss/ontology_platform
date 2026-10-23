@@ -372,4 +372,27 @@
 - **验证**：e2e **5/5**（test_01 建模+SHACL 门控 / test_02 发布 MCP+真实 SSE 查询 / test_03 外部 MCP 读取+审核卡点+落库 / test_04 Action dry-run+确认回写+幂等防重 / test_05 取消发布）；全量 **pytest 72/72**；运行中 8000 实例 live 冒烟全过（`amount=88→valid=True` 修复生效、`amount=-5→valid=False path=amount`、真实 SSE 查询 4 工具齐全）。
 - **PRD §9.1 结论**：四条 P0 验收项全部满足（4 种建模方式均有测试覆盖 + MCP 发布后外部 Agent SSE 查询成功；LLM/外部读取必经人工审核、未审核不落库；http 外部 MCP 连通读取归化入库 source_type=external_mcp；Action 人工确认 + 幂等防重 + 执行日志）。
 - **文档**：新增 `docs/VS10-集成验收报告.md`；`README.md`（VS10 状态 ✅ + 新增运维附录：端口/环境变量/健康降级语义/数据与备份/故障排查）、`docs/系统架构说明.md` §12、`docs/API-INTERFACE-DOC.md` §15 状态同步。
-- **遗留（不阻断 MVP）**：Fuseki 远程推理开关、SHACL 在 Jena 侧执行、MCP stdio 完整 JSON-RPC、Action 熔断/重试细化。
+- **遗留（不阻断 MVP）**：Fuseki 远程推理开关、SHACL 在 Jena 侧执行、MCP stdio 完整 JSON-RPC。
+
+---
+
+## 19. 2026-10-23：P0 缺口补漏——Action 回写指数退避重试 + 熔断（PRD §6.6 护栏 4）
+
+- **背景**：PRD §6.6 护栏 4「失败指数退避 + 熔断」此前**仅 docstring 声明、无实现**——Action HTTP/webhook 回写路径（`_http_call`）无重试循环，全项目无熔断（退避只在 `mcp_client` 路径）。这是 `docs/MVP-交付与PRD对照分析.md` 认定的**唯一真 P0 缺口**。
+- **实现**（`backend/action_engine/__init__.py`）：
+  - **指数退避重试** `_http_call_resilient`：可重试失败（网络/超时 status=0、5xx）按 1s/2s/4s（封顶 8s）指数退避重试，次数受 `ACTION_MAX_RETRIES`（默认 2）控制；4xx（含 401/403）为确定性失败不重试。重试携带 `Idempotency-Key` 头，外部系统支持幂等即可防重复写。
+  - **熔断器** `CircuitBreaker`（按外部端点：webhook 用 url、mcp_tool 用 connection）：CLOSED --(连续失败达 `ACTION_BREAKER_FAILURE_THRESHOLD` 默认 3)--> OPEN --(冷却 `ACTION_BREAKER_COOLDOWN_SECONDS` 默认 30s)--> HALF_OPEN；HALF_OPEN 试探成功→CLOSED、失败→重新 OPEN。计数口径为「一次 confirm 逻辑操作」（重试循环内多次请求合并）。
+  - **快速失败语义**：OPEN 期间 confirm 立即失败、**不外呼且不落 `action_logs`**（避免快速失败被幂等检查误判为「已执行」），返回 `{ "executed": false, "circuit_open": true, "retry_after": <秒> }`；路由与 MCP `action_invoke` 均直接序列化该 dict，契约不变。
+  - 配置项：`ACTION_MAX_RETRIES` / `ACTION_BREAKER_FAILURE_THRESHOLD` / `ACTION_BREAKER_COOLDOWN_SECONDS`（`config.py`）。
+- **验证**：新增 `backend/tests/test_action_resilience.py` **7/7**（5xx 重试后成功+每次带 Idempotency-Key / 4xx 不重试 / 幂等恰好一次 / 连续失败达阈值熔断且 OPEN 不外呼 / HALF_OPEN 成功恢复 / HALF_OPEN 失败重开 / 状态机单测；脚本化假外部服务 + 假时钟）；全量 pytest **79/79** 无回归。
+- **结论**：PRD §6.6 护栏 4 由「仅 docstring」补齐为「实现 + 测试」（满足「注释须有代码+测试支撑」原则），最后一个真 P0 缺口闭环；PRD P0 项现全部「已实现+有测试」或「有明确延期依据」（stdio 依验收「stdio 或 http」）。
+
+### P0 闭环清单（PRD P0 条款 → 交付状态）
+| PRD P0 条款 | 状态 | 证据 |
+|---|---|---|
+| §6.6-4 Action 失败指数退避 + 熔断 | ✅ 已实现（本次） | `action_engine._http_call_resilient` / `CircuitBreaker` + `test_action_resilience.py` |
+| §6.6-1/2/3 每次确认 + 幂等键 + 执行日志 | ✅ 已实现 | `execute`/`confirm` + test_vs10_e2e test_04 |
+| §6.4 MCP Server 发布（3 工具） | ✅ 已实现 | mcp_server + test_vs10_e2e test_02/05 |
+| §6.4 stdio transport | ⚠️ 部分（http 已满足验收「stdio 或 http」，stdio 占位 501） | `_stdio_invoke` |
+| §6.5 外部连接 超时/重试/401 阻断 | ✅ 已实现 | mcp_client `_with_retry`/`_invoke` |
+| §6.5 schema 漂移停自动入库 | ⚠️ 未实现（P1，可延后，docstring 仅声明） | — |
