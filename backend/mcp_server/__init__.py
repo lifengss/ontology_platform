@@ -543,10 +543,54 @@ class McpServer:
         logger.info("MCP Server 已挂载 /mcp/{project_id}（streamable-http + sse 兼容），工具: %s", list(TOOLS_CONTRACT.keys()))
 
 
+def _resolve_ontology_id(owner: "McpServer", project_id: str, identifier: str) -> str:
+    """P0-1：把调用方传入的 identifier（精确本体 ID / 本体名称）解析成真实 ontology_id。
+
+    规则：先精确 ID 匹配；失败再按本体 name 匹配（去首尾空格 + 小写归一）；
+    都失败抛 NOT_FOUND（语义：没有这个本体/名称，区别于 NOT_PUBLISHED=本体存在但未发布）。
+    """
+    identifier = (identifier or "").strip()
+    records = owner._ontologies(project_id).all()
+    by_id = {o.get("id"): o for o in records}
+    if identifier in by_id:
+        return identifier
+    norm = identifier.lower()
+    for o in records:
+        if (o.get("name") or "").strip().lower() == norm:
+            return o.get("id")
+    avail = "、".join(f"{o.get('id')}（{o.get('name') or ''}）" for o in records[:10])
+    more = f" 等 {len(records)} 个" if len(records) > 10 else ""
+    raise _err(ERR_NOT_FOUND,
+               f"本体 '{identifier}' 不存在。本项目本体：{avail or '（无）'}{more}。"
+               "可用本体名称或 32 位 ID 重试；ontology_query 不传 ontology_id 可列出已发布本体。")
+
+
+def _normalize_fields(fields) -> list[str]:
+    """P1：fields 容错双形态——逗号分隔字符串（与 stdio bridge 一致）或数组；空串/None → []。
+
+    背景：旧 `list[str] | None` 签名下，客户端把未提供/空的 fields 序列化成 ''（str），
+    pydantic 校验直接报 list_type，工具一调用就不可用；统一为字符串优先 + 数组兼容。
+    """
+    if fields is None:
+        return []
+    if isinstance(fields, (list, tuple, set)):
+        return [str(f).strip() for f in fields if str(f).strip()]
+    return [f.strip() for f in str(fields).split(",") if f.strip()]
+
+
 def _require_published(owner: "McpServer", project_id: str, ontology_id: str) -> None:
-    """P0-3：工具层发布态校验——未发布的 ontology_id 不再静默回退，而是 isError NOT_PUBLISHED。"""
+    """P0-3：工具层发布态校验——未发布的 ontology_id 拒绝为 isError NOT_PUBLISHED。
+
+    调用前置 _resolve_ontology_id，故此处 ontology_id 必为已存在的本体；
+    文案带出已发布清单（id+名称），避免"参数传错"被误读为"项目未发布"。
+    """
     if ontology_id not in owner._published_ontologies.get(project_id, ()):
-        raise _err(ERR_NOT_PUBLISHED, f"本体 {ontology_id} 未发布（本项目未发布任何本体时此端点整体不可用）。请先在 MCP 接入页发布。")
+        published = owner._published_ontologies.get(project_id, [])
+        names = {o.get("id"): (o.get("name") or "") for o in owner._ontologies(project_id).all()}
+        listing = "；".join(f"{oid}（{names.get(oid, '')}）" for oid in published) or "（无，本项目未发布任何本体）"
+        raise _err(ERR_NOT_PUBLISHED,
+                   f"本体 {ontology_id}（{names.get(ontology_id, '')}）未发布。"
+                   f"本项目已发布本体：{listing}。请先在 MCP 接入页发布，或改用上述已发布本体。")
 
 
 def _register_tools(owner: "McpServer", project_id: str, m) -> None:
@@ -555,17 +599,38 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
     actions = owner._actions(project_id)
 
     @m.tool()
-    def ontology_query(ontology_id: str, query: str = "") -> str:
-        """查询本体结构：返回对象、属性、关系摘要。query 可填对象 id 或名称做子串过滤（可选）。"""
-        _require_published(owner, project_id, ontology_id)
-        rec = ontologies.get(ontology_id)
-        if not rec:
-            raise _err(ERR_NOT_FOUND, f"本体 {ontology_id} 不存在")
+    def ontology_query(ontology_id: str = "", query: str = "") -> str:
+        """查询本体结构：返回对象、属性、关系摘要。ontology_id 接受本体名称或 32 位 ID（先名称解析再校验发布态）；
+        留空则返回本项目已发布本体清单（ontology_id/name/object_count），供先枚举再精确查询。
+        query 可填对象 id 或名称做子串过滤（可选）。
+        """
+        oid = (ontology_id or "").strip()
+        if not oid:
+            # P2-①：空 id 枚举已发布本体（防外部 Agent 猜 ID）
+            published = owner._published_ontologies.get(project_id, [])
+            by_id = {o.get("id"): o for o in owner._ontologies(project_id).all()}
+            items = [
+                {
+                    "ontology_id": poid,
+                    "name": (by_id.get(poid) or {}).get("name") or poid,
+                    "object_count": len((by_id.get(poid) or {}).get("objects") or []),
+                }
+                for poid in published
+            ]
+            return json.dumps({
+                "published": bool(published),
+                "count": len(items),
+                "ontologies": items,
+                "hint": "从清单取 ontology_id（或本体名称）后可精确查询结构/实例。",
+            }, ensure_ascii=False)
+        oid = _resolve_ontology_id(owner, project_id, oid)
+        _require_published(owner, project_id, oid)
+        rec = ontologies.get(oid) or {}
         objects = rec.get("objects", [])
         if query:
             objects = [o for o in objects if query in (o.get("id") or "") or query in (o.get("name") or "")]
         summary = {
-            "ontology_id": ontology_id,
+            "ontology_id": oid,
             "name": rec.get("name"),
             "objects": [
                 {
@@ -581,28 +646,31 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
 
     @m.tool()
     def inference_trace(ontology_id: str) -> str:
-        """返回 OWL2-RL 风格推理链路。"""
-        _require_published(owner, project_id, ontology_id)
-        rec = ontologies.get(ontology_id)
-        if not rec:
-            raise _err(ERR_NOT_FOUND, f"本体 {ontology_id} 不存在")
+        """返回 OWL2-RL 风格推理链路。ontology_id 接受本体名称或 32 位 ID。"""
+        oid = _resolve_ontology_id(owner, project_id, ontology_id)
+        _require_published(owner, project_id, oid)
+        rec = ontologies.get(oid) or {}
         try:
             steps = _run_inference(rec)
-            return json.dumps({"ontology_id": ontology_id, "steps": steps}, ensure_ascii=False)
+            return json.dumps({"ontology_id": oid, "steps": steps}, ensure_ascii=False)
         except Exception as e:  # noqa: BLE001
             raise _err(ERR_NOT_FOUND, f"推理链路生成失败: {e}")
 
     @m.tool()
     def instance_get(ontology_id: str, object_type: str = "", instance_id: str = "",
-                     limit: int = 50, offset: int = 0, fields: list[str] | None = None) -> str:
-        """查询已落库实例（ABox）。limit 默认 50/上限 200，offset 翻页，fields 指定属性名列表做投影。
+                     limit: int = 50, offset: int = 0, fields: str | list[str] = "") -> str:
+        """查询已落库实例（ABox）。ontology_id 接受本体名称或 32 位 ID。
+        limit 默认 50/上限 200，offset 翻页，fields 为逗号分隔字符串或数组的属性名，做投影
+        （如 "attr_name,attr_age"）。
 
         返回 total/has_more；结果被截断时会提示用 object_type 过滤或 offset 取余下数据。
         """
-        _require_published(owner, project_id, ontology_id)
+        oid = _resolve_ontology_id(owner, project_id, ontology_id)
+        _require_published(owner, project_id, oid)
         lim = max(1, min(int(limit or INSTANCE_DEFAULT_LIMIT), INSTANCE_MAX_LIMIT))
         off = max(0, int(offset or 0))
-        records = _load_instances(project_id, ontology_id)
+        field_list = _normalize_fields(fields)
+        records = _load_instances(project_id, oid)
         if object_type:
             records = [r for r in records if (r or {}).get("object_type") == object_type]
         if instance_id:
@@ -611,14 +679,14 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
                                            ((r or {}).get("instance") or {}).get("node_id"))]
         total = len(records)
         page = records[off: off + lim]
-        if fields:
+        if field_list:
             page = [dict(r) for r in page]
             for r in page:
                 inst = r.get("instance") or {}
-                r["instance"] = {k: inst[k] for k in fields if k in inst}
+                r["instance"] = {k: inst[k] for k in field_list if k in inst}
         has_more = off + len(page) < total
         payload: dict[str, Any] = {
-            "ontology_id": ontology_id,
+            "ontology_id": oid,
             "total": total,
             "offset": off,
             "limit": lim,

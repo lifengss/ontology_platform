@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""E2E：MCP 接入层修复全量验收（docs/平台修改建议-MCP接入层修复.md 各验收项）。
+"""E2E：MCP 接入层全量验收（docs/平台修改建议-MCP接入层修复.md + 名称解析/方案C 各验收项）。
 
-运行：python _e2e_mcp.py
-阶段1：无token/未发布 → token 生成 → 发布 → 双传输 → 工具验收（分页/投影/错误码/405）
-阶段2：重启后端 → 发布态与 token 持久化 → 吊销后 401 → 重新生成
+运行：python scripts/e2e_mcp_acceptance.py（幂等：开头重置前置态）
+阶段1：无token/未发布 → token 生成 → 发布 → 双传输 → 工具验收（分页/投影/错误码/405/名称解析/空id枚举/body传参）
+阶段2：重启后端 → 发布态与 token 持久化 → 吊销后 401 → 重新生成（JSON body 形态）
 """
 from __future__ import annotations
 
@@ -18,7 +18,13 @@ import time
 import urllib.error
 import urllib.request
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根（脚本位于 scripts/）
 HOST, PORT = "127.0.0.1", 8000
 BASE = f"http://{HOST}:{PORT}"
 PID = "5cd5ccc06b604ed7829f99983f52e963"
@@ -250,7 +256,8 @@ def phase1() -> str:
           f"objects={len((payload or {}).get('objects') or [])}")
     st, _, obj, _ = tool_call(token, session, "ontology_query", {"ontology_id": FAKE_OID}, 4)
     payload, text = tool_payload(obj)
-    check("ontology_query 未发布 isError NOT_PUBLISHED", payload is None and "NOT_PUBLISHED:" in text,
+    check("ontology_query 不存在本体 isError NOT_FOUND（P0-2 拆分）",
+          payload is None and "NOT_FOUND:" in text and "NOT_PUBLISHED" not in text,
           text[:80])
     st, _, obj, _ = tool_call(token, session, "action_invoke", {"action_id": "probe-nonexistent"}, 5)
     payload, text = tool_payload(obj)
@@ -282,7 +289,55 @@ def phase1() -> str:
     p4, _ = tool_payload(obj)
     ok_proj = p4 is not None and all(set((r.get("instance") or {}).keys()) <= set(fkeys)
                                      for r in p4.get("instances") or [])
-    check("instance_get fields 投影", ok_proj, f"fields={fkeys}")
+    check("instance_get fields 数组投影（兼容保留）", ok_proj, f"fields={fkeys}")
+
+    # --- P0-1 名称解析 / P2-① 空 id 枚举 / P1 fields 字符串（验收 1/3/4/6/7/8） ---
+    st, _, raw = http("GET", f"/api/mcp/ontologies?project_id={PID}&page=1&page_size=50")
+    onto_items = ((jbody(raw) or {}).get("data") or {}).get("items") or []
+    pub_onto = next((o for o in onto_items if o.get("ontology_id") == OID), None)
+    pub_name = (pub_onto or {}).get("name") or ""
+    st, _, obj, _ = tool_call(token, session, "ontology_query", {"ontology_id": pub_name}, 20)
+    payload, text = tool_payload(obj)
+    check("ontology_query 名称解析 200（验收1）",
+          st == 200 and payload is not None and payload.get("ontology_id") == OID
+          and len(payload.get("objects") or []) == (pub_onto or {}).get("entity_count", -1),
+          f"name={pub_name!r} objects={len((payload or {}).get('objects') or [])}")
+    st, _, obj, _ = tool_call(token, session, "ontology_query", {}, 22)
+    payload, text = tool_payload(obj)
+    pub_list = (payload or {}).get("ontologies") or []
+    check("ontology_query 空 id 枚举已发布（验收7）",
+          payload is not None and payload.get("published") is True
+          and any(o.get("ontology_id") == OID and o.get("object_count") for o in pub_list),
+          json.dumps(pub_list, ensure_ascii=False)[:120])
+    unp = next((o for o in onto_items if o.get("published") is False), None)
+    if unp:
+        st, _, obj, _ = tool_call(token, session, "ontology_query",
+                                  {"ontology_id": unp["ontology_id"]}, 23)
+        payload, text = tool_payload(obj)
+        check("未发布本体 NOT_PUBLISHED 附已发布清单（验收4）",
+              payload is None and "NOT_PUBLISHED:" in text and (pub_name in text or OID in text),
+              text[:100])
+    else:
+        print("SKIP | 项目无未发布本体，验收4（NOT_PUBLISHED 附清单）条件不满足")
+    if fkeys:
+        st, _, obj, _ = tool_call(token, session, "instance_get",
+                                  {"ontology_id": OID, "limit": 3, "fields": ",".join(fkeys)}, 24)
+        p5, _ = tool_payload(obj)
+        ok_str = p5 is not None and p5.get("count", 0) > 0 and all(
+            set((r.get("instance") or {}).keys()) <= set(fkeys) for r in p5.get("instances") or [])
+        check("instance_get fields 字符串投影（验收6）", ok_str, f"fields={','.join(fkeys)}")
+    st, _, obj, _ = tool_call(token, session, "instance_get",
+                              {"ontology_id": pub_name, "limit": 3}, 25)
+    p6, _ = tool_payload(obj)
+    check("instance_get 名称解析（验收8 平台侧）",
+          p6 is not None and p6.get("ontology_id") == OID and p6.get("count") == 3,
+          f"oid={p6 and p6.get('ontology_id')} count={p6 and p6.get('count')}")
+
+    # --- 方案 C：JSON body 形态传参（publish 幂等重复发布） ---
+    st, _, raw = http("POST", "/api/mcp/server/publish",
+                      body={"project_id": PID, "ontology_id": OID})
+    check("publish JSON body 形态（方案C）", st == 200
+          and (jbody(raw) or {}).get("data", {}).get("published") is True, f"status={st} body={raw[:80]!r}")
 
     # --- P0-1：SSE 兼容路径（旧客户端，?token=） ---
     sse = SSEClient(f"/mcp/{PID}?token={token}")
@@ -329,14 +384,19 @@ def phase1() -> str:
 def restart_backend() -> bool:
     print("== 重启后端（验证发布态持久化 P0-3） ==")
     try:
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
         p = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "restart_backend.py"), "8000"],
                            cwd=ROOT, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=400)
-        tail = (p.stdout or "")[-500:]
-        print(tail)
+                           encoding="utf-8", errors="replace", timeout=400, env=env)
+        # 子进程输出按 ASCII-safe 打印，避免 GBK 控制台编码失败抛异常掩盖真实结果
+        tail = (p.stdout or "").encode("ascii", "replace").decode("ascii")
+        print(tail[-500:])
         if p.returncode != 0:
-            print((p.stderr or "")[-500:])
-        return p.returncode == 0
+            print((p.stderr or "").encode("ascii", "replace").decode("ascii")[-500:])
+            return False
+        time.sleep(1)
+        st, _, _raw = http("GET", "/health")  # 后端真实端点为 /health（同步探测 Neo4j/PG，约 8-9s，timeout=30 足够）
+        return st == 200
     except Exception as e:  # noqa: BLE001
         print(f"restart failed: {e}")
         return False
@@ -368,7 +428,7 @@ def phase2(token: str) -> None:
     st, _, raw = http("GET", f"/api/mcp/server/token?project_id={PID}")
     check("吊销后 configured=false", (jbody(raw) or {}).get("data", {}).get("configured") is False)
 
-    st, _, raw = http("POST", f"/api/mcp/server/token?project_id={PID}")
+    st, _, raw = http("POST", "/api/mcp/server/token", body={"project_id": PID})
     token2 = ((jbody(raw) or {}).get("data") or {}).get("token") or ""
     st2, hs2, _, _ = rpc(f"/mcp/{PID}", token2, body=INIT)
     tries = 0
@@ -376,7 +436,8 @@ def phase2(token: str) -> None:
         time.sleep(1)
         st2, hs2, _, _ = rpc(f"/mcp/{PID}", token2, body=INIT)
         tries += 1
-    check("重新生成 token 可连 200", st == 201 and st2 == 200 and bool(hs2.get("mcp-session-id")),
+    check("重新生成 token（JSON body 形态，方案C）可连 200",
+          st == 201 and st2 == 200 and bool(hs2.get("mcp-session-id")),
           f"gen={st} connect={st2}")
     print(f"\n当前有效 token（已存 mcp_tokens.json，MCP 页可查）：{token2[:12]}…（共 {len(token2)} 字符）")
 

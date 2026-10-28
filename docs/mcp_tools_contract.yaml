@@ -1,11 +1,14 @@
 # MCP 对外工具契约（P-02 借鉴补丁）
 # 由 mcp_server 注册时参考生成；外部 Agent 调用前可静态判断读写与副作用。
 # 字段：reads / writes / preconditions / postconditions / side_effect
+# 2026-10-28 修订：ontology_id 统一接受本体名称或 32 位 ID（名称解析，P0-1）；
+# ontology_query 留空 ontology_id → 返回已发布本体清单（P2-①）；
+# instance_get.fields 为逗号分隔字符串（数组兼容，与 mcp_stdio_bridge.py 对齐，P1）。
 
 ontology_query:
   reads: [本体TBox, 实例ABox]
   writes: []
-  preconditions: ["本体已加载且非空"]
+  preconditions: ["本体已加载且非空（ontology_id 留空时返回已发布本体清单，无需已发布本体）"]
   postconditions: ["仅返回被授权命名图内的结果"]
   side_effect: false
 
@@ -19,8 +22,8 @@ inference_trace:
 instance_get:
   reads: [实例ABox]
   writes: []
-  preconditions: ["实例存在"]
-  postconditions: ["返回实例及其溯源标记（含外部MCP来源着色）"]
+  preconditions: ["实例存在", "本体已发布"]
+  postconditions: ["返回实例及其溯源标记（含外部MCP来源着色）", "分页元信息 total/offset/limit/has_more/count（fields 逗号分隔投影）"]
   side_effect: false
 
 # 以下为 VS8 Action 回写类（有副作用，需 human_required）

@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 
 from api.dependencies import project_id_param
 from core.responses import ApiError, list_payload, parse_pagination, success
@@ -177,21 +178,45 @@ def read_connection(
     })
 
 
+class _McpServerOpBody(BaseModel):
+    """方案 C 兼容：/api/mcp/server/* 的 project_id/ontology_id 支持 query 参数或 JSON body 双形态传参。"""
+    project_id: str | None = None
+    ontology_id: str | None = None
+
+
+def _merge_op_params(
+    project_id: str | None, ontology_id: str | None, body: _McpServerOpBody | None
+) -> tuple[str, str | None]:
+    """query 优先，缺省回退 JSON body；project_id 缺省保持旧行为（default 项目）。"""
+    body = body or _McpServerOpBody()
+    return (project_id or body.project_id or "default", ontology_id or body.ontology_id)
+
+
 @router.post("/server/publish")
 def publish_server(
-    ontology_id: str,
-    project_id: str = Depends(project_id_param),
+    ontology_id: str | None = None,
+    project_id: str | None = None,
+    body: _McpServerOpBody | None = None,
 ):
-    result = _server.publish(project_id=project_id, ontology_id=ontology_id)
+    """由本体一键发布 MCP Server（project_id/ontology_id 可走 query 或 JSON body）。"""
+    pid, ontology_id = _merge_op_params(project_id, ontology_id, body)
+    if not ontology_id:
+        raise ApiError("VALIDATION_ERROR", "缺少 ontology_id（query 参数或 JSON body）", http_status=422)
+    result = _server.publish(project_id=pid, ontology_id=ontology_id)
     if not result.get("published"):
         raise ApiError("BAD_REQUEST", result.get("error", "发布失败"), http_status=400)
     return success(result)
 
 
 @router.post("/server/unpublish")
-def unpublish_server(ontology_id: str | None = None, project_id: str = Depends(project_id_param)):
+def unpublish_server(
+    ontology_id: str | None = None,
+    project_id: str | None = None,
+    body: _McpServerOpBody | None = None,
+):
     """取消发布：不带 ontology_id=整个项目下线；带 ontology_id=仅下线该本体（清单空则项目下线）。"""
-    result = _server.unpublish(project_id=project_id, ontology_id=ontology_id)
+    pid, ontology_id = _merge_op_params(project_id, ontology_id, body)
+    result = _server.unpublish(project_id=pid, ontology_id=ontology_id)
     return success(result)
 
 
@@ -206,9 +231,13 @@ def server_tools():
 
 
 @router.post("/server/token", status_code=201)
-def generate_server_token(project_id: str = Depends(project_id_param)):
-    """生成/轮换项目 MCP 接入 token（P0-2）。旧 token 立即失效，需重新分发。"""
-    rec = _server.generate_token(project_id)
+def generate_server_token(
+    project_id: str | None = None,
+    body: _McpServerOpBody | None = None,
+):
+    """生成/轮换项目 MCP 接入 token（P0-2）。旧 token 立即失效，需重新分发。project_id 可走 query 或 JSON body。"""
+    pid, _ = _merge_op_params(project_id, None, body)
+    rec = _server.generate_token(pid)
     return success({
         "token": rec["token"],
         "created_at": rec["created_at"],
@@ -217,9 +246,13 @@ def generate_server_token(project_id: str = Depends(project_id_param)):
 
 
 @router.post("/server/token/revoke")
-def revoke_server_token(project_id: str = Depends(project_id_param)):
-    """吊销项目 MCP 接入 token（吊销后该项目 /mcp/{pid} 所有连接 401）。"""
-    return success(_server.revoke_token(project_id))
+def revoke_server_token(
+    project_id: str | None = None,
+    body: _McpServerOpBody | None = None,
+):
+    """吊销项目 MCP 接入 token（吊销后该项目 /mcp/{pid} 所有连接 401）。project_id 可走 query 或 JSON body。"""
+    pid, _ = _merge_op_params(project_id, None, body)
+    return success(_server.revoke_token(pid))
 
 
 @router.get("/server/token")

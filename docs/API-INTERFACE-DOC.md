@@ -353,6 +353,7 @@
 - `POST /api/mcp/server/token` 响应：`data = { "token": "urlsafe-43chars", "created_at": "2026-10-28T08:00:00Z", "usage": "Authorization: Bearer <token>（推荐）或 URL ?token=<token>" }`。
 - **接入层鉴权（P0-2，2026-10-28 修复）**：`/mcp/{project_id}` 系列（含 SSE 兼容路径）**必须**携带 token（`Authorization: Bearer <token>` 或 `?token=`），缺失/无效 → HTTP 401 `{ "error": "UNAUTHORIZED" }`；未发布项目 → HTTP 404 `{ "error": "NOT_PUBLISHED" }`（不再"连接即注册"）。
 - **发布态持久化（P0-3）**：`publish/unpublish` 同步写盘，`McpServer` 启动时自动恢复；`status().published_ontologies` 即工具可访问全集。
+- **双形态传参（方案 C 兼容，2026-10-28）**：`publish/unpublish/token/token-revoke` 四端点的 `project_id`/`ontology_id` 支持 **query 参数或 JSON body** 二选一（query 优先），如 `curl -X POST .../api/mcp/server/publish -H "Content-Type: application/json" -d '{"project_id":"...","ontology_id":"..."}'`；`publish` 缺 `ontology_id` 时 422。
 
 - `POST .../test` 响应：`data = { "reachable": true, "auth_ok": true, "latency_ms": 120, "error": null }`（不可达时 `reachable=false` + `error` 说明，HTTP 200 业务级）。
 - `POST .../read` 响应：`data = { "candidate_id": "uuid", "record_count": 12 }`。
@@ -475,9 +476,9 @@
 
 | 工具名 | 输入 | 输出语义 |
 |---|---|---|
-| `ontology_query` | `{ "ontology_id": "uuid", "query": "对象 id/名称子串（可选）" }` | 本体结构摘要（对象列表 + 属性/关系计数） |
-| `inference_trace` | `{ "ontology_id": "uuid" }` | OWL2-RL 风格推理链路 steps（同 §4 inference） |
-| `instance_get` | `{ "ontology_id": "uuid", "object_type": "obj_x（可选）", "instance_id": "（可选）", "limit": 50, "offset": 0, "fields": ["attr1", ...]（可选） }` | 实例读取（P1-4）：**limit 默认 50/上限 200**、offset 翻页、fields 属性白名单投影；返回 `{ ontology_id, total, offset, limit, has_more, count, instances }`，截断且未过滤时附 `hint` |
+| `ontology_query` | `{ "ontology_id": "本体名称或 uuid（可选）", "query": "对象 id/名称子串（可选）" }` | **`ontology_id` 留空 → 返回已发布本体清单** `{ published, count, ontologies: [{ontology_id, name, object_count}], hint }`（P2-①）；否则按名称/ID 解析后返回本体结构摘要（对象列表 + 属性/关系计数） |
+| `inference_trace` | `{ "ontology_id": "本体名称或 uuid" }` | OWL2-RL 风格推理链路 steps（同 §4 inference） |
+| `instance_get` | `{ "ontology_id": "本体名称或 uuid", "object_type": "obj_x（可选）", "instance_id": "（可选）", "limit": 50, "offset": 0, "fields": "attr1,attr2"（可选，逗号分隔字符串或数组） }` | 实例读取（P1-4）：**limit 默认 50/上限 200**、offset 翻页、fields 属性白名单投影（**字符串优先**，与 stdio bridge 一致；数组仍兼容）；返回 `{ ontology_id, total, offset, limit, has_more, count, instances }`，截断且未过滤时附 `hint` |
 | `action_invoke`(VS8) | `{ "action_id": "uuid", "confirmation_token": "uuid" }` | 确认执行 Action（**side_effect=true**；令牌须先经 `POST /api/actions/{id}/execute` 获取） |
 
 > MCP 工具的输入/输出 schema 由本体自动生成，不在此 REST 文档约束范围内，但须与 `mcp_server` 模块实现一致。
@@ -488,15 +489,17 @@
 
 ```json
 { "jsonrpc": "2.0", "id": 3, "result": { "isError": true,
-    "content": [ { "type": "text", "text": "NOT_PUBLISHED: 本体 1f2e... 未发布。请先在 MCP 接入页发布。" } ] } }
+    "content": [ { "type": "text", "text": "NOT_PUBLISHED: 本体 1f2e...（维保服务产品成本模型B）未发布。本项目已发布本体：1f2e...（维保服务产品成本模型）。请先在 MCP 接入页发布，或改用上述已发布本体。" } ] } }
 ```
+
+**ontology_id 名称解析（P0-1，2026-10-28）**：三个本体工具（`ontology_query`/`inference_trace`/`instance_get`）的 `ontology_id` 同时接受**本体名称**与**32 位 ID**（名称做去首尾空格+小写归一匹配）；解析顺序=先 ID 精确、再名称，都失败 → `NOT_FOUND`（附本项目本体清单），解析成功但未发布 → `NOT_PUBLISHED`（附已发布本体清单）。两码语义严格区分：**NOT_FOUND=没有这个本体/名称，NOT_PUBLISHED=本体存在但未发布**。
 
 错误码表（HTTP 层的 401/404 见 §11.1；工具层错误码如下）：
 
 | 码 | 含义 |
 |---|---|
-| `NOT_FOUND` | 本体 / Action 不存在 |
-| `NOT_PUBLISHED` | 本体未发布（工具层统一拒绝 draft/未发布 `ontology_id`，P0-3） |
+| `NOT_FOUND` | 本体 / Action 不存在（名称与 ID 均解析失败；文案附本项目本体清单，P0-1） |
+| `NOT_PUBLISHED` | 本体存在但未发布（工具层统一拒绝，P0-3；文案附已发布本体清单，P0-2） |
 | `AMBIGUOUS` | 歧义输入（预留） |
 | `UNAUTHORIZED` | 无 token 或无效（HTTP 层 401） |
 | `INVALID_ARGUMENT` | 参数非法（预留） |
