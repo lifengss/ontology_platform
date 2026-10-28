@@ -2878,8 +2878,9 @@ function renderMcpProjectLine() {
 }
 
 // 完整 MCP Server 配置（当前项目），一键复制到 AI 平台
-// 2026-10-28 起默认 Streamable HTTP（type: http，推荐），headers 带接入 token；
-// 旧版 SSE 客户端把 type 改为 "sse"，URL 不变。
+// 默认 Streamable HTTP，type 值按客户端取：默认 "streamableHttp"（WorkBuddy/Cherry Studio/Cline，
+// 与 docs/MCP接入配置-方案C静态Token.md §2.1 一致）；Claude Desktop/Cursor 把 type 改成 "http"；
+// 只支持旧版 SSE 的客户端改成 "sse"，URL 不变。headers 带接入 token（静态 Bearer，无 OAuth）。
 function renderMcpServerConfig() {
   const pre = $('mcpServerConfig');
   if (!pre) return;
@@ -2888,7 +2889,7 @@ function renderMcpServerConfig() {
   const url = mcpBaseUrl() + '/mcp/' + projectId;
   const serverName = (project.name || 'ontology').replace(/[^A-Za-z0-9_\u4e00-\u9fa5-]/g, '').slice(0, 24) || 'ontology';
   const token = (mcpToken && mcpToken.token) || '<在上方生成接入 token 后自动填入>';
-  const cfg = { type: 'http', url, headers: { Authorization: 'Bearer ' + token } };
+  const cfg = { type: 'streamableHttp', url, headers: { Authorization: 'Bearer ' + token } };
   const text = JSON.stringify({ mcpServers: { [serverName]: cfg } }, null, 2);
   pre.textContent = text;
   const btn = $('mcpCopyConfigBtn');
@@ -3051,8 +3052,11 @@ function showMcpExample(tool) {
   const example = tool.example || {};
   const base = mcpBaseUrl();
   const projectId = state.currentProject?.id || '<project_id>';
-  const text = 'SSE 端点（GET，连接入口，AI 平台配置只填这个）: ' + base + '/mcp/' + projectId +
-    '\n消息端点（POST，SSE 握手后客户端自动使用，无需手填）: ' + base + '/mcp/' + projectId + '/messages/' +
+  const tok = (mcpToken && mcpToken.token) || '<token>';
+  const text = 'Streamable HTTP 端点（推荐，AI 平台配置的 url 填这个，需带 Authorization: Bearer <token>）: ' + base + '/mcp/' + projectId +
+    '\nSSE 兼容端点（仅旧版客户端：GET 此 URL 建立长连接，消息走下方 POST，AI 平台配置 type 用 "sse"）: ' + base + '/mcp/' + projectId +
+    '\nSSE 消息端点（握手后客户端自动使用，无需手填）: ' + base + '/mcp/' + projectId + '/messages/' +
+    '\n当前项目 token（轮换后失效，以 MCP 接入 token 行为准）: ' + tok +
     '\n\n' + JSON.stringify(example, null, 2);
   $('mcpExample').textContent = text;
 }

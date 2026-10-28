@@ -525,8 +525,9 @@
               <ul class="list-disc pl-4 space-y-1 m-0">
                 <li>端口：后端固定监听 <code class="text-slate-300">0.0.0.0:8000</code>，配置中的 <code class="text-slate-300">http://127.0.0.1:8000</code> 即本机直连地址；若 AI 平台不在本机运行，把 <code class="text-slate-300">127.0.0.1</code> 换成运行本平台的机器局域网 IP 即可（后端已监听所有网卡）。</li>
                 <li>粘贴位置：AI 平台的 MCP / MCP Servers 设置（Claude Desktop 的 <code class="text-slate-300">claude_desktop_config.json</code>、Cherry Studio、CodeBuddy、Cursor 等），结构即 <code class="text-slate-300">mcpServers</code>。</li>
-                <li>默认生成 <code class="text-slate-300">"type": "http"</code>（Streamable HTTP，推荐）；只支持旧版 SSE 的客户端把 type 改成 <code class="text-slate-300">"sse"</code>，URL 不变（<code class="text-slate-300">/messages/</code> 由客户端握手时自动协商）。</li>
-                <li>配置中的 <code class="text-slate-300">Authorization</code> 头即上方接入 token；token 轮换后需同步更新 AI 平台侧配置。</li>
+                <li>默认生成 <code class="text-slate-300">"type": "streamableHttp"</code>（Streamable HTTP，推荐，WorkBuddy / Cherry Studio / Cline 等）；Claude Desktop / Cursor 把 type 改成 <code class="text-slate-300">"http"</code>；只支持旧版 SSE 的客户端改成 <code class="text-slate-300">"sse"</code>（URL 不变，<code class="text-slate-300">/messages/</code> 由客户端握手时自动协商）。</li>
+                <li>配置中的 <code class="text-slate-300">Authorization</code> 头即上方接入 token（静态 Bearer，粘贴即连、无 OAuth 授权页）；token 轮换/吊销后旧值立即失效，需刷新本页面重新复制并同步 AI 平台侧配置。</li>
+                <li><b class="text-slate-300">本地 WorkBuddy 特例</b>：其连接器 UI 把自定义 HTTP MCP 一律当作 OAuth 型（会卡在「授权中…」，平台无 OAuth 端点，属 WorkBuddy 客户端限制）——本地接入请改用 <b>stdio 桥</b>：WorkBuddy <code class="text-slate-300">mcp.json</code> 配 <code class="text-slate-300">"type": "stdio"</code> 指向 <code class="text-slate-300">backend/mcp_stdio_bridge.py</code> + <code class="text-slate-300">--project &lt;项目id&gt;</code>（token 由桥内部读取，WorkBuddy 侧无鉴权环节；stdio 配置勿写 <code class="text-slate-300">env</code> 字段），详见 <code class="text-slate-300">docs/MCP接入配置-方案C静态Token.md</code> §三。</li>
                 <li>发布态已持久化：后端重启后发布关系自动恢复，本配置内容不变。</li>
               </ul>
             </div>

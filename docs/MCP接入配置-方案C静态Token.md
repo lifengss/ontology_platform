@@ -42,9 +42,9 @@ curl -s "http://localhost:8000/mcp/status?project_id=5cd5ccc06b604ed7829f99983f5
 
 ## 二、客户端接入配置（按客户端类型）
 
-### 2.1 支持自定义请求头的 CLI/桌面客户端（Claude Desktop / Cursor / 自研 Agent）——推荐
+### 2.1 支持自定义请求头的 CLI/桌面客户端（WorkBuddy / Cherry Studio / Cline / 自研 Agent）——推荐
 
-用 `streamableHttp`，token 放 `Authorization` 头：
+用 `streamableHttp`，token 放 `Authorization` 头（`type` 值按客户端取：**WorkBuddy / Cherry Studio / Cline 用 `"streamableHttp"`，Claude Desktop / Cursor 用 `"http"`**，端点与 headers 相同）：
 
 ```json
 {"mcpServers": {"成本核算模型": {
