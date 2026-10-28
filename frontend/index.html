@@ -471,13 +471,14 @@
             <div id="mcpStatusLine" class="text-sm"></div>
           </div>
           <div id="mcpProjectLine" class="mt-2 text-xs text-slate-400"></div>
+          <div id="mcpTokenLine" class="mt-2 text-xs text-slate-400"></div>
           <ul class="mt-2 space-y-1 text-xs text-slate-400 list-disc pl-4">
-            <li><b class="text-slate-300">SSE 端点</b>（GET <code class="text-slate-300">/mcp/{项目id}</code>）：AI 客户端的「连接入口」——建立一条 Server-Sent Events 长连接，客户端在此接收服务端事件，并从中获知消息端点地址。</li>
-            <li><b class="text-slate-300">消息端点</b>（POST <code class="text-slate-300">/mcp/{项目id}/messages/</code>）：握手完成后，客户端把 JSON-RPC 请求（initialize / tools/list / tools/call 等）发到该地址，响应经 SSE 通道返回。配置 AI 平台时一般只填 SSE 端点，消息端点由客户端自动协商，无需手填。</li>
+            <li><b class="text-slate-300">接入 token（必配）</b>：外部客户端连接本端点需携带 <code class="text-slate-300">Authorization: Bearer &lt;token&gt;</code>（或 URL <code class="text-slate-300">?token=</code>）；未配置/失效时端点一律 401。token 在本页生成/轮换/吊销，旧 token 立即失效。</li>
+            <li><b class="text-slate-300">Streamable HTTP 端点</b>（推荐，2025-03-26 / 2025-06-18 协议）：POST <code class="text-slate-300">/mcp/{项目id}</code> 直接发 JSON-RPC（initialize / tools/list / tools/call…），响应头带 <code class="text-slate-300">Mcp-Session-Id</code>；带 session 头 GET 同路径打开事件流，DELETE 结束会话。会话空闲 30 分钟自动失效（重新 initialize 即可）。</li>
+            <li><b class="text-slate-300">SSE 端点</b>（2024-11-05 兼容）：GET <code class="text-slate-300">/mcp/{项目id}</code>（Accept: text/event-stream）建立 SSE 长连接获知消息端点；POST <code class="text-slate-300">/mcp/{项目id}/messages/</code> 发 JSON-RPC。旧版客户端无需改造，同样需要 token。</li>
             <li>每个项目一个 MCP Server：按项目区分，不同项目端点独立、可同时发布互不影响。</li>
-            <li>发布粒度是「单个本体」：在本体发布清单中逐项发布/取消发布；同一项目多个已发布本体共享同一端点（工具按 ontology_id 参数区分本体），项目内无任何已发布本体时端点自动下线。</li>
-            <li>发布后，支持 MCP 的外部 AI 助手/系统即可通过端点读取本项目的本体与实例。</li>
-            <li>发布状态保存在内存中：后端重启后需重新发布（本体与实例数据不受影响）。</li>
+            <li>发布粒度是「单个本体」：在本体发布清单中逐项发布/取消发布；同一项目多个已发布本体共享同一端点（工具按 ontology_id 参数区分本体），项目内无任何已发布本体时端点自动下线（连接返回 404 NOT_PUBLISHED）。</li>
+            <li>发布态保存在磁盘：后端重启后发布关系自动恢复，无需重新发布（本体与实例数据不受影响）。</li>
           </ul>
         </div>
       </div>
@@ -524,8 +525,9 @@
               <ul class="list-disc pl-4 space-y-1 m-0">
                 <li>端口：后端固定监听 <code class="text-slate-300">0.0.0.0:8000</code>，配置中的 <code class="text-slate-300">http://127.0.0.1:8000</code> 即本机直连地址；若 AI 平台不在本机运行，把 <code class="text-slate-300">127.0.0.1</code> 换成运行本平台的机器局域网 IP 即可（后端已监听所有网卡）。</li>
                 <li>粘贴位置：AI 平台的 MCP / MCP Servers 设置（Claude Desktop 的 <code class="text-slate-300">claude_desktop_config.json</code>、Cherry Studio、CodeBuddy、Cursor 等），结构即 <code class="text-slate-300">mcpServers</code>。</li>
-                <li>只需填 SSE 端点；消息端点 <code class="text-slate-300">/messages/</code> 由客户端在 SSE 握手时自动协商，无需手填。</li>
-                <li>发布状态在内存中：后端重启后需在上方清单重新发布，本配置内容不变。</li>
+                <li>默认生成 <code class="text-slate-300">"type": "http"</code>（Streamable HTTP，推荐）；只支持旧版 SSE 的客户端把 type 改成 <code class="text-slate-300">"sse"</code>，URL 不变（<code class="text-slate-300">/messages/</code> 由客户端握手时自动协商）。</li>
+                <li>配置中的 <code class="text-slate-300">Authorization</code> 头即上方接入 token；token 轮换后需同步更新 AI 平台侧配置。</li>
+                <li>发布态已持久化：后端重启后发布关系自动恢复，本配置内容不变。</li>
               </ul>
             </div>
           </div>
@@ -769,6 +771,6 @@
   </main>
   </div>
 
-  <script src="app.js?v=20261028d"></script>
+  <script src="app.js?v=20261028e"></script>
 </body>
 </html>

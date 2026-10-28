@@ -29,7 +29,7 @@ from config import get_settings
 from core.responses import ApiError, fail, success
 from jena_adapter.client import health as jena_health
 from logging_setup import get_logger, log_event
-from mcp_server import get_mcp_server
+from mcp_server import McpStreamableMiddleware, get_mcp_server
 from neo4j_sync import Neo4jSync
 
 settings = get_settings()
@@ -104,11 +104,22 @@ app.include_router(llm_router)
 app.include_router(system_router)
 
 
-# VS6: 由 mcp_server 模块通过 FastMCP 按项目挂载 /mcp/{project_id}（SSE）
-# 必须使用 get_mcp_server() 单例：发布状态（publish/unpublish）存在该实例内存中，
-# 直接 McpServer() 会造出第二个实例，导致 SSE 端点/状态端点看不到发布数据。
+# VS6: 由 mcp_server 模块按项目挂载 /mcp/{project_id}，双传输（2026-10-28 MCP 接入层修复）：
+# - Streamable HTTP（2025-03-26/2025-06-18，推荐）：POST/DELETE /mcp/{pid} 与
+#   GET /mcp/{pid}（带 Mcp-Session-Id）走原始 ASGI 中间件 McpStreamableMiddleware；
+# - SSE（2024-11-05 兼容）：GET /mcp/{pid}（Accept: text/event-stream 且无 session 头）
+#   + POST /mcp/{pid}/messages/。
+# 必须使用 get_mcp_server() 单例：发布态（内存缓存 + 磁盘 JsonStore）与端点缓存
+# 都在该实例上，直接 McpServer() 会造出第二个实例，导致端点/状态端点互相不可见。
 _mcp_server = get_mcp_server()
 _mcp_server.mount(app)
+# 最后 add_middleware → 最外层：Streamable 流量不经过 BaseHTTPMiddleware（避免响应体被管道缓冲）
+app.add_middleware(McpStreamableMiddleware, mcp_server=_mcp_server)
+
+
+@app.on_event("startup")
+async def _start_mcp_sweeper():
+    _mcp_server.start_sweeper()
 
 
 @app.get("/mcp/status")
@@ -118,6 +129,15 @@ def mcp_status(project_id: str | None = Query(default=None)):
 
 @app.get("/mcp/{project_id}")
 async def mcp_sse_endpoint(request: Request):
+    # 带 Mcp-Session-Id 的 GET 已被 McpStreamableMiddleware 拦截（Streamable 会话流）。
+    # 此处只处理无 session 头的请求：SSE 兼容路径（Accept: text/event-stream）或 405。
+    accept = request.headers.get("accept", "")
+    if "text/event-stream" not in accept.lower():
+        return JSONResponse(
+            {"error": "METHOD_NOT_ALLOWED",
+             "detail": "Streamable HTTP GET 需携带 Mcp-Session-Id；旧版 SSE 客户端请带 Accept: text/event-stream"},
+            status_code=405,
+        )
     return await _mcp_server.handle_sse(request)
 
 

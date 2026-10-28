@@ -205,6 +205,29 @@ def server_tools():
     return success(_server.tools())
 
 
+@router.post("/server/token", status_code=201)
+def generate_server_token(project_id: str = Depends(project_id_param)):
+    """生成/轮换项目 MCP 接入 token（P0-2）。旧 token 立即失效，需重新分发。"""
+    rec = _server.generate_token(project_id)
+    return success({
+        "token": rec["token"],
+        "created_at": rec["created_at"],
+        "usage": "Authorization: Bearer <token>（推荐）或 URL ?token=<token>",
+    }, http_status=201)
+
+
+@router.post("/server/token/revoke")
+def revoke_server_token(project_id: str = Depends(project_id_param)):
+    """吊销项目 MCP 接入 token（吊销后该项目 /mcp/{pid} 所有连接 401）。"""
+    return success(_server.revoke_token(project_id))
+
+
+@router.get("/server/token")
+def get_server_token(project_id: str = Depends(project_id_param)):
+    """查询项目 MCP 接入 token（含当前值，供前端展示/复制）。"""
+    return success(_server.token_status(project_id))
+
+
 @router.get("/ontologies")
 def list_mcp_ontologies(
     project_id: str = Depends(project_id_param),

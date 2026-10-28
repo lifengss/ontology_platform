@@ -775,7 +775,7 @@ function switchTab(name) {
   if (name === 'graph') { loadOntologies().then(() => { renderOntologySelects(); loadGraph(); }); }
   if (name === 'inference') { loadOntologies().then(() => { renderOntologySelects(); loadInference(); }); }
   if (name === 'action') { loadActions(); }
-  if (name === 'mcp') { loadMcpOntologies(1); loadMcpTools(); }
+  if (name === 'mcp') { loadMcpOntologies(1); loadMcpTools(); loadMcpToken(); }
   if (name === 'logs') { loadServerLogs(); }
   if (name === 'settings') { loadLLMSettings(); }
   _lastTab = name;
@@ -1536,7 +1536,7 @@ async function _doDeleteOntology(oid) {
     closeEditor();
   }
   const activeTab = document.querySelector('.tab-content:not(.hidden)');
-  if (activeTab && activeTab.id === 'mcp') loadMcpOntologies(mcpList.page);
+  if (activeTab && activeTab.id === 'mcp') { loadMcpOntologies(mcpList.page); loadMcpToken(); }
   await loadOntologies();
 }
 
@@ -2878,6 +2878,8 @@ function renderMcpProjectLine() {
 }
 
 // 完整 MCP Server 配置（当前项目），一键复制到 AI 平台
+// 2026-10-28 起默认 Streamable HTTP（type: http，推荐），headers 带接入 token；
+// 旧版 SSE 客户端把 type 改为 "sse"，URL 不变。
 function renderMcpServerConfig() {
   const pre = $('mcpServerConfig');
   if (!pre) return;
@@ -2885,17 +2887,69 @@ function renderMcpServerConfig() {
   const projectId = project.id || '<project_id>';
   const url = mcpBaseUrl() + '/mcp/' + projectId;
   const serverName = (project.name || 'ontology').replace(/[^A-Za-z0-9_\u4e00-\u9fa5-]/g, '').slice(0, 24) || 'ontology';
-  const text = JSON.stringify({ mcpServers: { [serverName]: { type: 'sse', url } } }, null, 2);
+  const token = (mcpToken && mcpToken.token) || '<在上方生成接入 token 后自动填入>';
+  const cfg = { type: 'http', url, headers: { Authorization: 'Bearer ' + token } };
+  const text = JSON.stringify({ mcpServers: { [serverName]: cfg } }, null, 2);
   pre.textContent = text;
   const btn = $('mcpCopyConfigBtn');
   if (btn) btn.onclick = () => copyText(text, 'MCP Server 配置');
   const hint = $('mcpConfigHint');
   if (hint) {
     const meta = (mcpList && mcpList.meta) || {};
-    hint.textContent = meta.server_published
-      ? '端点已在线：' + url + '（已发布 ' + (meta.published_count || 0) + ' 个本体）'
-      : '当前项目尚未发布本体，端点 ' + url + ' 暂不可用——先在上方清单发布任一本体即可生效，本配置无需改动。';
+    if (!meta.server_published) {
+      hint.textContent = '当前项目尚未发布本体，端点 ' + url + ' 暂不可用（连接返回 404 NOT_PUBLISHED）——先在上方清单发布任一本体即可生效，本配置无需改动。';
+    } else if (!(mcpToken && mcpToken.configured)) {
+      hint.textContent = '端点已在线（已发布 ' + (meta.published_count || 0) + ' 个本体），但接入 token 未生成——先在上方生成 token，本配置会自动带上。';
+    } else {
+      hint.textContent = '端点在线：' + url + '（已发布 ' + (meta.published_count || 0) + ' 个本体，token 已内置）';
+    }
   }
+}
+
+// ---- MCP 接入 token（P0-2：外部客户端连接鉴权） ----
+let mcpToken = { configured: false, token: null, created_at: null };
+
+async function loadMcpToken() {
+  try {
+    const j = await api('/api/mcp/server/token');
+    mcpToken = j.data || { configured: false, token: null, created_at: null };
+    renderMcpTokenLine();
+    renderMcpServerConfig();
+  } catch (e) { /* 静默：token 区保持原样 */ }
+}
+
+function renderMcpTokenLine() {
+  const el = $('mcpTokenLine');
+  if (!el) return;
+  const p = state.currentProject || {};
+  if (!p.id) { el.innerHTML = ''; return; }
+  if (!mcpToken.configured) {
+    el.innerHTML = '接入 token：<span class="text-amber-400">未生成</span>（未配置 token 时外部客户端连接端点一律 401）' +
+      '<button type="button" class="btn secondary text-xs ml-2" onclick="mcpGenToken()">生成 / 轮换 Token</button>';
+  } else {
+    el.innerHTML = '接入 token（生成于 ' + esc(mcpToken.created_at || '-') + '）' +
+      '<code class="mx-1 text-slate-300 break-all">' + esc(mcpToken.token || '') + '</code>' + copyIcon(mcpToken.token || '', 'MCP token') +
+      '<button type="button" class="btn secondary text-xs ml-2" onclick="mcpGenToken()">轮换</button>' +
+      '<button type="button" class="btn secondary text-xs" onclick="mcpRevokeToken()">吊销</button>' +
+      '<span class="ml-1 text-slate-500">轮换/吊销后旧 token 立即失效，已接入的 AI 平台需同步更新</span>';
+  }
+}
+
+async function mcpGenToken() {
+  try {
+    await api('/api/mcp/server/token', { method: 'POST', body: '{}' });
+    toast('已生成新 token（旧 token 失效）', 'ok');
+    loadMcpToken();
+  } catch (e) { toast('生成 token 失败: ' + e.message, 'err'); }
+}
+
+async function mcpRevokeToken() {
+  if (!confirm('吊销接入 token？吊销后外部客户端连接本项目 MCP 端点将全部 401。')) return;
+  try {
+    await api('/api/mcp/server/token/revoke', { method: 'POST', body: '{}' });
+    toast('已吊销 token', 'ok');
+    loadMcpToken();
+  } catch (e) { toast('吊销失败: ' + e.message, 'err'); }
 }
 
 async function loadMcpOntologies(page) {

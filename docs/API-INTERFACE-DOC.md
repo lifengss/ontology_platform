@@ -341,8 +341,18 @@
 | DELETE | `/api/mcp/connections/{id}` | 删除连接 |
 | POST | `/api/mcp/connections/{id}/test` | 连通性测试（含鉴权握手） |
 | POST | `/api/mcp/connections/{id}/read` | 触发读取 → 生成候选实例（转 §3 候选，status=pending） |
-| POST | `/api/mcp/server/publish` | 由本体一键发布 MCP Server |
-| GET | `/api/mcp/server/status` | MCP Server 运行状态 |
+| POST | `/api/mcp/server/publish` | 由本体一键发布 MCP Server（发布态落盘 `data/projects/{pid}/mcp_published.json`，重启不丢） |
+| POST | `/api/mcp/server/unpublish` | 取消发布（不带 `ontology_id`=项目整体下线；带=仅下线该本体，清单空则整体下线） |
+| GET | `/api/mcp/server/status` | MCP Server 运行状态（含 `transports`/`protocol_versions`/token 状态；`?project_id=` 查单项目） |
+| GET | `/api/mcp/server/tools` | 对外工具清单（含读写/副作用契约与调用示例） |
+| GET | `/api/mcp/ontologies` | MCP 发布清单（全部本体 + 实体数/实例数/发布状态，分页） |
+| POST | `/api/mcp/server/token` | 生成/轮换项目 MCP 接入 token（HTTP 201，**旧 token 立即失效**，需重新分发） |
+| POST | `/api/mcp/server/token/revoke` | 吊销项目 MCP 接入 token（吊销后 `/mcp/{pid}` 所有连接 401） |
+| GET | `/api/mcp/server/token` | 查询 token 状态：`{ "configured": bool, "token": 当前值或 null, "created_at": "..." }` |
+
+- `POST /api/mcp/server/token` 响应：`data = { "token": "urlsafe-43chars", "created_at": "2026-10-28T08:00:00Z", "usage": "Authorization: Bearer <token>（推荐）或 URL ?token=<token>" }`。
+- **接入层鉴权（P0-2，2026-10-28 修复）**：`/mcp/{project_id}` 系列（含 SSE 兼容路径）**必须**携带 token（`Authorization: Bearer <token>` 或 `?token=`），缺失/无效 → HTTP 401 `{ "error": "UNAUTHORIZED" }`；未发布项目 → HTTP 404 `{ "error": "NOT_PUBLISHED" }`（不再"连接即注册"）。
+- **发布态持久化（P0-3）**：`publish/unpublish` 同步写盘，`McpServer` 启动时自动恢复；`status().published_ontologies` 即工具可访问全集。
 
 - `POST .../test` 响应：`data = { "reachable": true, "auth_ok": true, "latency_ms": 120, "error": null }`（不可达时 `reachable=false` + `error` 说明，HTTP 200 业务级）。
 - `POST .../read` 响应：`data = { "candidate_id": "uuid", "record_count": 12 }`。
@@ -445,17 +455,54 @@
 
 ## 11. 对外 MCP 工具（挂载 `/mcp`，非 REST）
 
-由本体 Schema **自动生成**，供外部智能体平台注册调用（streamable_http）：
+由本体 Schema **自动生成**，供外部智能体平台注册调用。
+
+### 11.1 端点与传输（双传输并存，2026-10-28 修复）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/mcp/{project_id}` | **Streamable HTTP（推荐）**：单端点 JSON-RPC；`initialize` 响应头带 `Mcp-Session-Id`，协议版本按客户端声明协商（`2025-06-18` → 回 `2025-06-18`）；普通请求可直回 `application/json`，流式时回 `text/event-stream` |
+| GET | `/mcp/{project_id}` | 带 `Mcp-Session-Id` 头 → 打开会话 SSE 流（服务端→客户端事件）；**无 session 头**且 `Accept` 不含 `text/event-stream` → **405** `{ "error": "METHOD_NOT_ALLOWED" }` |
+| DELETE | `/mcp/{project_id}` | 显式终止会话 |
+| GET | `/mcp/{project_id}` | **SSE 兼容路径（2024-11-05，旧客户端）**：`Accept: text/event-stream` 且无 session 头，返回 `event: endpoint` + `data: /mcp/{pid}/messages/?session_id=…` |
+| POST | `/mcp/{project_id}/messages/` | SSE 兼容路径消息端点（JSON-RPC 客户端→服务端；**响应在 SSE 流上返回**，本端点仅 202） |
+| GET | `/mcp/status` | 全局/单项目状态：`transports: ["streamable-http","sse"]`、`protocol_versions: ["2025-06-18","2025-03-26","2024-11-05"]`、`published_ontologies`、token 状态（`?project_id=` 查单项目） |
+
+- **接入鉴权（P0-2）**：`/mcp/{project_id}` 所有请求须带 `Authorization: Bearer <token>`（或 `?token=`）；缺失/无效 → HTTP 401 `{ "error": "UNAUTHORIZED" }`；未发布项目 → HTTP 404 `{ "error": "NOT_PUBLISHED" }`，且不出现在 `/mcp/status`（不再"连接即注册"）。token 经 §5.2 `POST /api/mcp/server/token` 生成。
+- **会话治理（P0-2）**：Streamable 会话空闲超时 30 分钟（过期后旧 `Mcp-Session-Id` 得 404，客户端重走 `initialize`）；内存驻留项目端点上限 100、空闲 30 分钟回收——**发布态以磁盘为准**（`mcp_published.json`，重启自动恢复），回收无副作用。
+
+### 11.2 工具（4 个标准工具）
 
 | 工具名 | 输入 | 输出语义 |
 |---|---|---|
-| `ontology_query` | `{ "ontology_id": "uuid", "sparql": "..." 或 "natural_lang": "..." }` | 本体语义查询结果（转 Jena SPARQL） |
-| `inference_trace` | `{ "ontology_id": "uuid", "focus": "obj_x" }` | 推理链路 steps（同 §4 inference） |
-| `instance_get` | `{ "ontology_id": "uuid", "object_type": "obj_customer", "filters": {} }` | 实例读取（受本体约束，走 Neo4j） |
+| `ontology_query` | `{ "ontology_id": "uuid", "query": "对象 id/名称子串（可选）" }` | 本体结构摘要（对象列表 + 属性/关系计数） |
+| `inference_trace` | `{ "ontology_id": "uuid" }` | OWL2-RL 风格推理链路 steps（同 §4 inference） |
+| `instance_get` | `{ "ontology_id": "uuid", "object_type": "obj_x（可选）", "instance_id": "（可选）", "limit": 50, "offset": 0, "fields": ["attr1", ...]（可选） }` | 实例读取（P1-4）：**limit 默认 50/上限 200**、offset 翻页、fields 属性白名单投影；返回 `{ ontology_id, total, offset, limit, has_more, count, instances }`，截断且未过滤时附 `hint` |
+| `action_invoke`(VS8) | `{ "action_id": "uuid", "confirmation_token": "uuid" }` | 确认执行 Action（**side_effect=true**；令牌须先经 `POST /api/actions/{id}/execute` 获取） |
 
 > MCP 工具的输入/输出 schema 由本体自动生成，不在此 REST 文档约束范围内，但须与 `mcp_server` 模块实现一致。
 
-### 9.1 工具契约（P-02 借鉴补丁）
+### 11.3 错误语义（P1-5）
+
+业务错误一律走 MCP `isError=true`（JSON-RPC 层面调用仍为 200，但结果标记失败），文本格式 `"CODE: message"`：
+
+```json
+{ "jsonrpc": "2.0", "id": 3, "result": { "isError": true,
+    "content": [ { "type": "text", "text": "NOT_PUBLISHED: 本体 1f2e... 未发布。请先在 MCP 接入页发布。" } ] } }
+```
+
+错误码表（HTTP 层的 401/404 见 §11.1；工具层错误码如下）：
+
+| 码 | 含义 |
+|---|---|
+| `NOT_FOUND` | 本体 / Action 不存在 |
+| `NOT_PUBLISHED` | 本体未发布（工具层统一拒绝 draft/未发布 `ontology_id`，P0-3） |
+| `AMBIGUOUS` | 歧义输入（预留） |
+| `UNAUTHORIZED` | 无 token 或无效（HTTP 层 401） |
+| `INVALID_ARGUMENT` | 参数非法（预留） |
+| `TOO_LARGE` | 响应过大（预留） |
+
+### 11.4 工具契约（P-02 借鉴补丁）
 每个自动生成工具附带读写/前置后置/副作用契约，供外部 Agent 静态判断是否会改动数据，降低误调风险（完整版见 `docs/mcp_tools_contract.yaml` 与 `mcp_server.TOOLS_CONTRACT`）：
 
 | 工具名 | reads | writes | side_effect | 关键 precondition |
@@ -476,7 +523,7 @@
 | VS3 归化 | §3 全部 |
 | VS4 可视化 | §4 graph/inference |
 | VS5 模板 | §11 /api/templates |
-| VS6 MCP Server | §9 + `/api/mcp/server/*` |
+| VS6 MCP Server | §11 + `/api/mcp/server/*` |
 | VS7 外部接入 | §5 连接配置 + `/read` |
 | VS8 Action | §6 全部 |
 | VS9 凭据 | §8 |
