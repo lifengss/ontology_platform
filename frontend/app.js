@@ -4290,9 +4290,13 @@ async function loadTutorial() {
 
 function renderTutToc(m) {
   let html = '';
+  let lastPart = null;
   m.chapters.forEach((ch, i) => {
-    html += '<div class="tut-toc-h">第 ' + (i + 1) + ' 章</div>'
-      + '<a data-ch="' + ch.id + '" title="' + esc(ch.title) + '"><span class="n">' + (i + 1) + '</span><span>' + esc(ch.title) + '</span></a>';
+    if (ch.part && ch.part !== lastPart) {
+      html += '<div class="tut-part-h">' + esc(ch.part) + '</div>';
+      lastPart = ch.part;
+    }
+    html += '<a data-ch="' + ch.id + '" title="' + esc(ch.title) + '"><span class="n">' + (i + 1) + '</span><span>' + esc(ch.title) + '</span></a>';
   });
   $('tutToc').innerHTML = html;
   document.querySelectorAll('#tutToc a').forEach(a => { a.onclick = () => openTutChapter(a.dataset.ch); });
