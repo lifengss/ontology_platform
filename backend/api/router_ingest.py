@@ -73,9 +73,11 @@ def _load_ontology(ontology_id: str, project_id: str) -> dict:
 
 
 def _match_object_type(token: str, ontology: dict[str, Any]) -> str | None:
-    """按 sheet/文件名 token 启发式匹配对象 id（支持 obj_ 前缀与中文名）。"""
+    """按 sheet/文件名 token 启发式匹配对象 id（支持 obj_ 前缀与中文名）。
+    精确匹配优先，其次包含匹配且候选串更长者胜（避免 sheet=Supplier 被 VmiSupplier 抢占）。"""
     token_lower = token.lower().replace(" ", "").replace("_", "").replace("-", "")
     objects = ontology.get("objects", [])
+    exact: str | None = None
     best: tuple[str, int] = ("", -1)
     for obj in objects:
         oid = obj.get("id", "").lower()
@@ -85,14 +87,17 @@ def _match_object_type(token: str, ontology: dict[str, Any]) -> str | None:
             oid.replace("obj", ""),
             obj.get("name", "").lower().replace(" ", ""),
         ]
-        for c in candidates:
+        for c in list(candidates) + [c.replace("_", "") for c in candidates]:
             if not c:
                 continue
-            # 精确包含
-            if token_lower in c or c in token_lower:
+            if c == token_lower:
+                exact = obj["id"]
+            elif token_lower in c or c in token_lower:
                 score = len(c)
                 if score > best[1]:
                     best = (obj["id"], score)
+    if exact:
+        return exact
     return best[0] if best[0] else None
 
 
@@ -323,6 +328,11 @@ async def upload_instances(
             )
             if not records:
                 continue
+            if not parsed_field_map:
+                headers = [str(cell.value or "").strip() for cell in next(wb[sheet_name].iter_rows(min_row=1, max_row=1))]
+                raise ApiError("VALIDATION_ERROR",
+                               f"sheet「{sheet_name}」的表头 {headers} 无法匹配对象「{obj.get('name') or matched_object_type}」的任何属性，"
+                               f"请检查表头（应使用属性 id 或名称）或显式传 field_map", http_status=422)
             candidate = _build_candidate_records(ontology_id, ontology, matched_object_type, filename, records, parsed_field_map, project_id)
             rec = _save_candidate(candidate, project_id, filename)
             candidates.append(rec)
@@ -343,6 +353,12 @@ async def upload_instances(
         if explicit_field_map:
             csv_field_map = {k: v for k, v in explicit_field_map.items() if v in valid_attrs}
         records, parsed_field_map = _parse_csv(content, object_type, filename, valid_attrs, csv_field_map, obj)
+        if not records:
+            raise ApiError("VALIDATION_ERROR", "CSV 无数据行", http_status=422)
+        if not parsed_field_map:
+            raise ApiError("VALIDATION_ERROR",
+                           f"CSV 表头无法匹配对象「{obj.get('name') or object_type}」的任何属性，"
+                           f"请检查表头（应使用属性 id 或名称）或显式传 field_map", http_status=422)
         candidate = _build_candidate_records(ontology_id, ontology, object_type, filename, records, parsed_field_map, project_id)
         rec = _save_candidate(candidate, project_id, filename)
         candidates.append(rec)
@@ -736,13 +752,15 @@ def list_instances(
     page_size: int = Query(default=50, ge=1, le=200, alias="pageSize"),
 ):
     page, page_size = parse_pagination(page, page_size)
-    items = _instance_store_for(project_id).all()
+    # 过滤下推到存储层并在【全量】结果上统计 total：
+    # 不再先 all()（历史 bug：截断到前 1000 条）再本地过滤——那样 object_type 命中的记录若不在
+    # 截断快照里就恒为 0。object_type 走专用参数只读对应 jsonl 文件；ontology_id 走 filters 精确匹配。
+    store = _instance_store_for(project_id)
+    filters = {"ontology_id": ontology_id} if ontology_id else None
+    items = store.find(object_type=object_type, filters=filters, limit=None)
     if namespace:
-        items = [it for it in items if it.get("ontology_id") in _namespace_ontology_ids(project_id, namespace)]
-    if ontology_id:
-        items = [it for it in items if it.get("ontology_id") == ontology_id]
-    if object_type:
-        items = [it for it in items if it.get("object_type") == object_type]
+        allowed = set(_namespace_ontology_ids(project_id, namespace))
+        items = [it for it in items if it.get("ontology_id") in allowed]
     items.sort(key=lambda x: x.get("imported_at") or "", reverse=True)
     total = len(items)
     start = (page - 1) * page_size
@@ -751,10 +769,9 @@ def list_instances(
 
 @router.get("/instances/{instance_id}")
 def get_instance(instance_id: str, project_id: str = Depends(project_id_param)):
-    store = _instance_store_for(project_id)
-    for rec in store.all():
-        if rec.get("id") == instance_id:
-            return success(rec)
+    rec = _instance_store_for(project_id).get(instance_id)
+    if rec:
+        return success(rec)
     raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
 
 
@@ -765,11 +782,7 @@ def update_instance(
     project_id: str = Depends(project_id_param),
 ):
     store = _instance_store_for(project_id)
-    rec = None
-    for it in store.all():
-        if it.get("id") == instance_id:
-            rec = it
-            break
+    rec = store.get(instance_id)
     if not rec:
         raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
 
@@ -788,7 +801,7 @@ def update_instance(
 @router.delete("/instances/{instance_id}")
 def delete_instance(instance_id: str, project_id: str = Depends(project_id_param)):
     store = _instance_store_for(project_id)
-    rec = next((it for it in store.all() if it.get("id") == instance_id), None)
+    rec = store.get(instance_id)
     if rec is None or not store.delete(instance_id):
         raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
     _sync_rdf(project_id, rec.get("ontology_id"))

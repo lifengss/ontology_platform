@@ -11,6 +11,7 @@ let state = {
   ingestTab: 'object', allInstanceQ: '', allInstanceObjectFilter: '', instanceEditMode: false,
   expandedTreeNodes: new Set(['__root__']),
   llmSettings: {}, healthDetails: null,
+  graphRefit: null, // 当前图谱视图的"适应画布"回调（drawGraph/drawTree 绘制时挂载，(animate)=>…）
 };
 
 const CLIENT_LOG_KEY = 'op_client_logs';
@@ -1588,6 +1589,10 @@ function onIngestOntologyChange() {
   refreshSingleImportContext();
   renderInstanceList();
   renderAllInstanceList();
+  // 切本体必须重拉实例/候选：否则树计数与列表仍用旧本体的全局缓存
+  // （新本体各实体显示 0，仅 object_type id 与旧数据相同的实体残留旧值）
+  loadInstances();
+  loadCandidates();
 }
 
 // ---- 实例导入页子标签：对象视图 / 导入与审核 / 全部实例 ----
@@ -2297,11 +2302,31 @@ function _uncheckCandidates() {
   if (all) all.checked = false;
 }
 
+const _BATCH_BTN_IDS = ['btnBatchApprove', 'btnBatchReject', 'btnBatchRestore', 'btnBatchDelete'];
+const _BATCH_BTN_BY_ACTION = { approve: 'btnBatchApprove', reject: 'btnBatchReject', restore: 'btnBatchRestore', delete: 'btnBatchDelete' };
+
+// 批量操作 busy 态：禁用全部批量按钮（防重复提交），当前按钮显示进度文案；.btn:disabled 自带半透明样式
+function _setBatchBusy(action, text) {
+  _BATCH_BTN_IDS.forEach(id => { const b = $(id); if (b) b.disabled = true; });
+  const b = $(_BATCH_BTN_BY_ACTION[action]);
+  if (b) { if (!b.dataset.origText) b.dataset.origText = b.textContent; b.textContent = text + '…'; }
+}
+function _clearBatchBusy() {
+  _BATCH_BTN_IDS.forEach(id => {
+    const b = $(id);
+    if (!b) return;
+    b.disabled = false;
+    if (b.dataset.origText) { b.textContent = b.dataset.origText; delete b.dataset.origText; }
+  });
+}
+
 async function batchCandidates(action) {
   const ids = _checkedCandidateIds();
   if (!ids.length) return toast('请先勾选要操作的候选行', 'info');
   const labels = { approve: '批量批准', reject: '批量驳回', restore: '批量恢复待审核', delete: '批量删除' };
   if (action === 'delete' && !confirm('确认删除选中的 ' + ids.length + ' 组候选？此操作不可恢复。')) return;
+  _setBatchBusy(action, labels[action] + '中（共 ' + ids.length + ' 组）');
+  toast(labels[action] + '处理中（共 ' + ids.length + ' 组）…', 'info', 2500);
   try {
     if (action === 'approve' || action === 'reject') {
       const j = await api('/api/ingest/candidates/batch-' + action, { method: 'POST', body: JSON.stringify({ candidate_ids: ids }) });
@@ -2310,6 +2335,7 @@ async function batchCandidates(action) {
     } else {
       let done = 0, failed = 0;
       for (const id of ids) {
+        _setBatchBusy(action, labels[action] + '（' + (done + failed + 1) + '/' + ids.length + '）');
         try {
           if (action === 'restore') await api('/api/ingest/candidates/' + id + '/revert', { method: 'POST', body: '{}' });
           else await api('/api/ingest/candidates/' + id, { method: 'DELETE' });
@@ -2322,6 +2348,7 @@ async function batchCandidates(action) {
     loadCandidates();
     if (action === 'approve') loadInstances();
   } catch (e) { toast('批量操作失败: ' + e.message, 'err'); }
+  finally { _clearBatchBusy(); }
 }
 
 async function revertCandidate(id) {
@@ -2484,6 +2511,31 @@ async function deleteReviewInstance(idx) {
 // 实例统一取「本体全局缓存」：左侧树各对象实例数、关系血缘、对象视图列表、全部实例列表
 // 都从同一份全量数据本地过滤。旧实现按选中对象请求会丢全量数据，导致树计数失真、
 // 跨对象血缘查不到实例；现在一次拉全，切换对象/搜索/过滤零请求
+// 按 total 循环翻页，把某本体的实例全量拉到本地（修复「单页截断」：单页最多 pageSize 条，
+// 实例数超过单页上限时只取第 1 页会让其余对象计数恒为 0、total 失真）。
+// 达到 max（默认 5000）条时截断并提示改用筛选，避免超大集一次性拉满阻塞前端。
+async function fetchAllInstances(ontologyId, max) {
+  if (max == null) max = 5000;
+  const PAGE_SIZE = 200;
+  const items = [];
+  let page = 1;
+  let total = Infinity;
+  while (items.length < total) {
+    const j = await api('/api/ingest/instances?ontology_id=' + encodeURIComponent(ontologyId) +
+      '&page=' + page + '&pageSize=' + PAGE_SIZE);
+    total = (j.data && j.data.total) || 0;
+    const batch = (j.data && j.data.items) || [];
+    items.push(...batch);
+    page++;
+    if (!batch.length) break;                 // 空页兜底，防止异常 total 导致死循环
+    if (items.length >= max) {
+      if (total > max) toast('实例共 ' + total + ' 条，超出 ' + max + ' 条加载上限，仅加载前 ' + max + ' 条；请用搜索 / 对象过滤缩小范围', 'warn');
+      break;
+    }
+  }
+  return items;
+}
+
 async function loadInstances() {
   const ontologyId = $('ingestOntology').value;
   if (!ontologyId) {
@@ -2492,9 +2544,7 @@ async function loadInstances() {
     return;
   }
   try {
-    // 后端 pageSize 上限 200（le=200）
-    const j = await api('/api/ingest/instances?ontology_id=' + encodeURIComponent(ontologyId) + '&pageSize=200');
-    state.instances = j.data.items || [];
+    state.instances = await fetchAllInstances(ontologyId);
     // 若详情弹层正开着，刷新其指向为最新记录
     if (state.selectedInstance) {
       const cur = state.instances.find(x => x.id === state.selectedInstance.id);
@@ -2971,12 +3021,24 @@ async function loadGraph() {
   try {
     // 类树视图取 schema 数据（节点含 parent 字段），在前端按继承关系构树
     const mode = state.graphTab === 'tree' ? 'schema' : state.graphTab;
-    const j = await api('/api/graph/' + id + '?mode=' + mode);
+    // knowledge 视图按「实例上限」抽样（0=全部）；schema/tree 与实例上限无关
+    let qs = '/api/graph/' + id + '?mode=' + mode;
+    if (mode === 'knowledge') {
+      const lim = $('graphInstLimit') ? $('graphInstLimit').value : '300';
+      qs += '&max_instances=' + lim;
+      if (lim === '0') toast('已选「全部」实例：节点较多时首屏可能卡顿数秒', 'info', 3000);
+    }
+    const j = await api(qs);
     const o = state.ontologies.find(x => x.id === id);
     if (o) state.currentOntology = o;
     if (state.graphTab === 'tree') drawTree(j.data);
     else drawGraph(j.data);
   } catch (e) { toast('加载图谱失败: ' + e.message, 'err'); }
+}
+
+// 「适应画布」：按当前节点位置重新 fit（drawGraph/drawTree 绘制时挂载 state.graphRefit）
+function graphFitAll() {
+  if (typeof state.graphRefit === 'function') state.graphRefit(true);
 }
 
 function _graphEmptyHint(data) {
@@ -3028,14 +3090,85 @@ function drawGraph(data) {
   // 过滤掉引用缺失节点的边，避免 D3 报 "node not found"
   const links = (data.edges || [])
     .filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
-    .map(e => ({ source: e.source, target: e.target, label: e.relation || e.label, origin: e.origin }));
+    .map(e => ({ source: e.source, target: e.target, label: e.relation || e.label, origin: e.origin, kind: e.kind }));
+  // 优先用 kind 字段，兼容旧 type 字段
+  const nodeKind = d => d.kind || d.type || 'object';
+  // 节点大小由关系数（度数）与实例数（指向它的 instance_of 边）决定，越多越大
+  const relDeg = {}, instCnt = {};
+  for (const e of links) {
+    relDeg[e.source] = (relDeg[e.source] || 0) + 1;
+    relDeg[e.target] = (relDeg[e.target] || 0) + 1;
+    if (e.kind === 'instance_of') instCnt[e.target] = (instCnt[e.target] || 0) + 1;
+  }
+  const nodeRadius = d => {
+    const rel = relDeg[d.id] || 0, inst = instCnt[d.id] || 0;
+    if (nodeKind(d) === 'object') return Math.max(14, Math.min(38, 14 + 4 * Math.sqrt(rel) + 3 * Math.sqrt(inst)));
+    return Math.max(6, Math.min(16, 6 + 2.5 * Math.sqrt(rel)));
+  };
+  // 力参数按图规模分档：孤立节点只有斥力没有吸引力，distanceMax 不限作用半径会被无限推远
+  // （17 节点图被撑到 ~2000×1500，fit 后 scale≈0.3、标签全隐藏）；
+  // forceX/forceY 提供真实向心弹簧（forceCenter 只整体平移、不收缩）
+  const N = nodes.length;
+  const chargeStrength = N > 800 ? -35 : N > 300 ? -60 : N > 80 ? -90 : -130;
+  const chargeMaxDist = N > 300 ? 220 : 420;
   const simulation = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(links).id(d => d.id).distance(110))
-    .force('charge', d3.forceManyBody().strength(-280))
-    .force('center', d3.forceCenter(width / 2, height / 2));
+    .force('link', d3.forceLink(links).id(d => d.id)
+      .distance(d => d.kind === 'instance_of' ? (N > 300 ? 30 : 55) : 90)
+      .strength(d => d.kind === 'instance_of' ? 0.9 : 0.5))
+    .force('charge', d3.forceManyBody().strength(chargeStrength).distanceMax(chargeMaxDist))
+    .force('x', d3.forceX(width / 2).strength(0.06))
+    .force('y', d3.forceY(height / 2).strength(0.06))
+    .force('collide', d3.forceCollide(d => nodeRadius(d) + (N > 300 ? 3 : 6)));
+  if (N > 800) simulation.alphaDecay(0.05); // 大图提前收敛，减少首屏等待
 
   const g = svg.append('g');
-  svg.call(d3.zoom().on('zoom', e => g.attr('transform', e.transform)));
+  // 节点名显示策略：
+  // 1) 对象节点（kind=object）始终显示（数量少，可读性优先——旧阈值下 fit 缩放后全部隐藏）；
+  // 2) 大节点（基础半径 > R_BASE）默认显示名称；
+  // 3) 视图放大后，屏幕半径（基础半径×缩放比）超过 R_ZOOM 的节点逐个显示名称；
+  // 4) 其余小节点仅在鼠标悬停时显示名称。
+  const R_BASE = 16, R_ZOOM = 9;
+  let viewScale = 1;
+  let hasFitted = false;
+  let nodeLabelSel = null;
+  const updateLabelVisibility = () => {
+    if (nodeLabelSel) nodeLabelSel.style('opacity', d => nodeKind(d) === 'object' || nodeRadius(d) > R_BASE || nodeRadius(d) * viewScale > R_ZOOM ? 1 : 0);
+  };
+  const zoomBehavior = d3.zoom().scaleExtent([0.05, 8]).on('zoom', e => {
+    g.attr('transform', e.transform);
+    viewScale = e.transform.k;
+    updateLabelVisibility();
+  });
+  svg.call(zoomBehavior);
+  // 适配全图：放大上限 1.6（收拢后小图适度放大，字号可读）；
+  // 首次 fit 直接应用（不走 transition，避免"先炸开再缩回"的观感）；
+  // 「适应画布」按钮经 state.graphRefit 复用本函数（animate=true 时 300ms 过渡）
+  const applyFit = animate => {
+    if (!nodes.length) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of nodes) {
+      const r = nodeRadius(n);
+      minX = Math.min(minX, n.x - r); maxX = Math.max(maxX, n.x + r);
+      minY = Math.min(minY, n.y - r); maxY = Math.max(maxY, n.y + r + 16);
+    }
+    const pad = 30;
+    const scale = Math.max(0.05, Math.min(1.6, width / (maxX - minX + pad * 2), height / (maxY - minY + pad * 2)));
+    const tx = width / 2 - scale * (minX + maxX) / 2;
+    const ty = height / 2 - scale * (minY + maxY) / 2;
+    const t = d3.zoomIdentity.translate(tx, ty).scale(scale);
+    if (animate) svg.transition().duration(300).call(zoomBehavior.transform, t);
+    else svg.call(zoomBehavior.transform, t);
+  };
+  // 布局稳定后首次自动适配：默认视图可见全部节点（之后用户缩放/平移不再重置）
+  simulation.on('end', () => { if (!hasFitted) { hasFitted = true; applyFit(false); } });
+  state.graphRefit = applyFit;
+  // 抽样提示（knowledge 视图后端按 max_instances 截断时）
+  if (data.mode === 'knowledge' && data.truncated) {
+    const hint = document.createElement('div');
+    hint.className = 'absolute top-2 left-1/2 -translate-x-1/2 z-10 px-3 py-1 rounded-full text-xs bg-slate-800/90 text-amber-300 border border-amber-500/40 pointer-events-none';
+    hint.textContent = '已抽样显示 ' + data.shown + ' / ' + data.total_instances + ' 条实例（右上角「实例上限」可调）';
+    container.appendChild(hint);
+  }
 
   const link = g.append('g').selectAll('line').data(links).enter().append('line')
     .attr('stroke', '#64748b').attr('stroke-width', 1.5).attr('stroke-opacity', 0.6);
@@ -3045,14 +3178,17 @@ function drawGraph(data) {
     .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
     .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
     .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }));
-  // 优先用 kind 字段，兼容旧 type 字段
-  const nodeKind = d => d.kind || d.type || 'object';
-  node.append('circle').attr('r', d => nodeKind(d) === 'object' ? 22 : 14)
+  node.append('circle').attr('r', d => nodeRadius(d))
     .attr('fill', d => {
       const k = nodeKind(d);
       return k === 'object' ? '#4f8cff' : k === 'attribute' ? '#34d399' : '#f59e0b';
     });
-  node.append('text').attr('dy', 4).attr('text-anchor', 'middle').text(d => d.label || d.name || d.id).attr('font-size', 11).attr('fill', '#fff');
+  // 节点名：位于节点下方（描边光晕保证杂色背景上可读），显隐由 updateLabelVisibility 按阈值控制
+  nodeLabelSel = node.append('text').attr('y', d => nodeRadius(d) + 12).attr('text-anchor', 'middle')
+    .text(d => d.label || d.name || d.id).attr('font-size', 11).attr('fill', '#e2e8f0')
+    .style('pointer-events', 'none')
+    .style('paint-order', 'stroke').style('stroke', '#0f172a').style('stroke-width', 3).style('stroke-linejoin', 'round');
+  updateLabelVisibility();
 
   const tip = $('graphTooltip');
   // tooltip 是容器（position:relative）内的 absolute 定位，必须用相对容器坐标；
@@ -3063,12 +3199,14 @@ function drawGraph(data) {
     tip.style.top = (e.clientY - rect.top + 12) + 'px';
   };
   node.on('mouseover', (e, d) => {
+    // 悬停时临时显示该节点名称（小节点平时隐藏）
+    if (nodeLabelSel) nodeLabelSel.filter(l => l === d).style('opacity', 1);
     tip.style.opacity = 1;
     const k = nodeKind(d);
     tip.innerHTML = '<strong>' + esc(d.label || d.name || d.id) + '</strong><br/>type: ' + k + (d.source ? '<br/>source: ' + esc(d.source.id || d.source) : '') + (d.object_type ? '<br/>object_type: ' + esc(d.object_type) : '');
     moveTip(e);
   }).on('mousemove', moveTip)
-    .on('mouseout', () => tip.style.opacity = 0);
+    .on('mouseout', () => { tip.style.opacity = 0; updateLabelVisibility(); });
 
   simulation.on('tick', () => {
     link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
@@ -3081,8 +3219,8 @@ function drawGraph(data) {
 // 数据来自 schema 图（节点含 parent 字段）；父不在本图谱节点集内（缺失占位/外部引用）的按根处理。
 function drawTree(data) {
   const container = $('graphContainer');
-  const width = container.clientWidth;
-  const height = container.clientHeight || 500;
+  let width = container.clientWidth; // let：rAF 兜底重排时按真实尺寸重赋值
+  let height = container.clientHeight || 500;
   container.innerHTML = '<div class="graph-tooltip" id="graphTooltip"></div>';
   const nodes = (data.nodes || []).filter(n => (n.kind || n.type) === 'object');
   if (!nodes.length) {
@@ -3114,15 +3252,45 @@ function drawTree(data) {
     if (d.depth > 2 && d.children) { d._children = d.children; d.children = null; }
   });
 
-  const layout = d3.tree().nodeSize([28, 230]); // [垂直间距, 深度间距]（横向树）
+  // 节点间距按内容自适应：纵向 28→32（矩形高 24，避免折叠徽章贴边）；
+  // 深度间距按最长标签估算（中文 12px 字号 ≈ 12px/字），避免长对象名重叠
+  const maxLabelChars = Math.max(...nodes.map(n => (n.label || n.id || '').length));
+  const depthGap = Math.max(180, maxLabelChars * 12 + 80);
+  const layout = d3.tree().nodeSize([32, depthGap]); // [垂直间距, 深度间距]（横向树）
   const svg = d3.select('#graphContainer').append('svg').attr('width', width).attr('height', height);
-  const g = svg.append('g').attr('transform', 'translate(90,16)');
+  const g = svg.append('g');
+  // 初始 transform 交给 zoomIdentity 托管：d3.tree() 把根节点 x 归零，子节点 x 有正有负，
+  // 手写 translate(90,16) 会让负坐标部分（~208px）跑出画布外；且 zoom 事件会整体覆盖
+  // 手写值导致首次缩放"跳位"。必须经 zoom.transform 设置，居中量才会记入 d3 内部状态。
+  const zoom = d3.zoom().scaleExtent([0.1, 4]).on('zoom', e => g.attr('transform', e.transform));
+  svg.call(zoom);
   const tip = $('graphTooltip');
 
-  function update() {
+  // 按树包围盒居中（排除虚拟根）；横向树：屏幕 x=d.y，屏幕 y=d.x
+  const refit = animate => {
+    const desc = root.descendants().filter(d => d.data.kind !== 'virtual');
+    if (!desc.length) return;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const d of desc) {
+      minX = Math.min(minX, d.y); maxX = Math.max(maxX, d.y);
+      minY = Math.min(minY, d.x); maxY = Math.max(maxY, d.x);
+    }
+    const pad = 40;
+    const s = Math.max(0.1, Math.min(1,
+      Math.min((width - pad * 2) / (maxX - minX + 200), // 200 ≈ 标签宽度预留
+               (height - pad * 2) / (maxY - minY + 40))));
+    const tx = width / 2 - s * (minX + maxX) / 2;
+    const ty = height / 2 - s * (minY + maxY) / 2;
+    const t = d3.zoomIdentity.translate(tx, ty).scale(s);
+    if (animate) svg.transition().duration(300).call(zoom.transform, t);
+    else svg.call(zoom.transform, t);
+  };
+
+  function update(animateRefit) {
     layout(root);
     const desc = root.descendants();
-    const links = root.links();
+    // 过滤虚拟根的连线（否则 __root__ 会画出一条多余引线）
+    const links = root.links().filter(l => l.source.data.kind !== 'virtual');
     g.selectAll('*').remove();
     g.selectAll('path').data(links).enter().append('path')
       .attr('fill', 'none')
@@ -3137,7 +3305,7 @@ function drawTree(data) {
         if (d.data.kind === 'virtual') return;
         if (d.children) { d._children = d.children; d.children = null; }
         else if (d._children) { d.children = d._children; d._children = null; }
-        update();
+        update(true); // 展开/折叠后自动 refit 回可视区
       })
       .on('mousemove', (event, d) => {
         if (d.data.kind === 'virtual') return;
@@ -3171,9 +3339,18 @@ function drawTree(data) {
         .attr('font-size', 12)
         .text((d.data.label || d.data.id) + (d._children ? ' +' + d._children.length : ''));
     });
+    if (animateRefit) refit(true); else refit(false); // 每次布局后按包围盒居中
   }
-  update();
-  svg.call(d3.zoom().scaleExtent([0.25, 3]).on('zoom', e => g.attr('transform', e.transform)));
+  update(false);
+  state.graphRefit = () => refit(true);
+  // 容器尺寸兜底：刚切页时 clientWidth/Height 可能为 0（上面回退 500），rAF 后按真实尺寸重排一次
+  if (container.clientWidth === 0 || container.clientHeight === 0) {
+    requestAnimationFrame(() => {
+      const w = container.clientWidth || 500, h = container.clientHeight || 500;
+      if (w !== width || h !== height) { width = w; height = h; svg.attr('width', w).attr('height', h); }
+      refit(false);
+    });
+  }
 }
 
 // ---- 两行式下拉（业务友好）：主行=语义 label，次行小字=id ----
@@ -3276,8 +3453,7 @@ async function loadImpactInstances(ontologyId) {
   const id = ontologyId || $('inferOntology').value;
   if (!id) return;
   try {
-    const ji = await api('/api/ingest/instances?ontology_id=' + encodeURIComponent(id) + '&pageSize=200');
-    impactInstances = (ji.data && ji.data.items) || [];
+    impactInstances = await fetchAllInstances(id);
     if (!impactInstanceLS) return;
     const maps = getInferLabelMaps();
     // 两行选项：主行=对象中文名·实例展示名；次行小字=对象id·实例id

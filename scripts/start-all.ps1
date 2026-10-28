@@ -17,6 +17,11 @@ $BACKEND = Join-Path $ROOT "backend"
 $FRONTEND = Join-Path $ROOT "frontend"
 $DEPS = Join-Path $ROOT "deps"
 
+# 注意：PowerShell 中函数须先定义后调用，定义须位于首次使用之前
+function Info($msg) { Write-Host "[INFO] $msg" -ForegroundColor Cyan }
+function OK($msg) { Write-Host "[OK]   $msg" -ForegroundColor Green }
+function Warn($msg) { Write-Host "[WARN] $msg" -ForegroundColor Yellow }
+
 # 优先使用项目内 JDK 21（Neo4j 2026.x 需要），否则回退系统 JAVA_HOME
 $localJdk = Get-ChildItem -Path $DEPS -Filter "jdk-*" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'jdk-2[1-9]' } | Select-Object -First 1
 if ($localJdk) {
@@ -24,10 +29,6 @@ if ($localJdk) {
     $env:PATH = "$($localJdk.FullName)\bin;$env:PATH"
     Info "使用项目内 JDK: $($localJdk.FullName)"
 }
-
-function Info($msg) { Write-Host "[INFO] $msg" -ForegroundColor Cyan }
-function OK($msg) { Write-Host "[OK]   $msg" -ForegroundColor Green }
-function Warn($msg) { Write-Host "[WARN] $msg" -ForegroundColor Yellow }
 
 function Wait-Http($url, $timeoutSec = 120) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -114,7 +115,7 @@ if (-not $SkipDeps) {
         if (Wait-Http "http://localhost:3030/" 120) { OK "Jena 就绪" } else { Warn "Jena 未在 120 秒内就绪" }
 
         Info "等待 Neo4j (7474)..."
-        if (Wait-Http "http://localhost:7474/" 120) { OK "Neo4j 就绪" } else { Warn "Neo4j 未在 120 秒内就绪" }
+        if (Wait-Http "http://localhost:7474/" 300) { OK "Neo4j 就绪" } else { Warn "Neo4j 未在 300 秒内就绪（首次启动需初始化，可稍后手动重试）" }
 
         Info "等待 Postgres (5432)..."
         $pgReady = $false
@@ -172,7 +173,7 @@ if (-not $SkipDeps) {
 
             if ($neo4j) {
                 Info "等待 Neo4j (7474)..."
-                if (Wait-Http "http://localhost:7474/" 120) { OK "Neo4j 就绪" } else { Warn "Neo4j 未在 120 秒内就绪" }
+                if (Wait-Http "http://localhost:7474/" 300) { OK "Neo4j 就绪" } else { Warn "Neo4j 未在 300 秒内就绪（首次启动需初始化，可稍后手动重试）" }
             }
 
             Info "等待 Postgres (5432)..."
@@ -194,16 +195,16 @@ if (-not $SkipDeps) {
 
 # 3. 启动后端
 Info "启动后端 FastAPI (端口 $BackendPort)..."
-$backendEnv = [System.Environment]::GetEnvironmentVariables("Process")
-$backendEnv["JENA_BASE_URL"] = "http://localhost:3030"
-$backendEnv["JENA_DATASET"] = "ontology"
-$backendEnv["NEO4J_URI"] = "bolt://localhost:7687"
-$backendEnv["NEO4J_USER"] = "neo4j"
-$backendEnv["NEO4J_PASSWORD"] = "neo4jsecret"
-$backendEnv["POSTGRES_DSN"] = "postgresql://ont:ontsecret@localhost:5432/ont"
+# Start-Process 无 -Environment 参数：子进程继承当前会话环境变量，直接设 $env:
+$env:JENA_BASE_URL = "http://localhost:3030"
+$env:JENA_DATASET = "ontology"
+$env:NEO4J_URI = "bolt://localhost:7687"
+$env:NEO4J_USER = "neo4j"
+$env:NEO4J_PASSWORD = "neo4jsecret"
+$env:POSTGRES_DSN = "postgresql://ont:ontsecret@localhost:5432/ont"
 
 $backendProc = Start-Process -FilePath python -ArgumentList (Join-Path $BACKEND "main.py") `
-    -WorkingDirectory $BACKEND -WindowStyle Hidden -PassThru -Environment $backendEnv
+    -WorkingDirectory $BACKEND -WindowStyle Hidden -PassThru
 
 # 4. 启动前端
 Info "启动前端静态服务 (端口 $FrontendPort)..."

@@ -352,10 +352,10 @@
                 <option value="rejected">已驳回</option>
               </select>
               <button class="btn secondary" onclick="loadCandidates()">刷新</button>
-              <button class="btn secondary" onclick="batchCandidates('approve')">批量批准</button>
-              <button class="btn secondary" onclick="batchCandidates('reject')">批量驳回</button>
-              <button class="btn secondary" onclick="batchCandidates('restore')">批量恢复待审核</button>
-              <button class="btn secondary" style="background:#991b1b" onclick="batchCandidates('delete')">批量删除</button>
+              <button id="btnBatchApprove" class="btn secondary" onclick="batchCandidates('approve')">批量批准</button>
+              <button id="btnBatchReject" class="btn secondary" onclick="batchCandidates('reject')">批量驳回</button>
+              <button id="btnBatchRestore" class="btn secondary" onclick="batchCandidates('restore')">批量恢复待审核</button>
+              <button id="btnBatchDelete" class="btn secondary" style="background:#991b1b" onclick="batchCandidates('delete')">批量删除</button>
             </div>
           </div>
           <div class="text-xs text-slate-500 mb-2">批量范围：批准/驳回 → 待审核；恢复 → 已驳回；删除 → 已驳回/已入库。勾选左侧复选框选择行。</div>
@@ -392,6 +392,13 @@
           <button id="tabTree" class="px-3 py-1 rounded-md" onclick="setGraphTab('tree')">类树</button>
           <button id="tabKnowledge" class="px-3 py-1 rounded-md" onclick="setGraphTab('knowledge')">知识图谱</button>
         </div>
+        <select id="graphInstLimit" class="text-xs" onchange="loadGraph()" title="知识图谱视图实例抽样上限（0 = 全部，大图可能卡顿）">
+          <option value="100">实例上限 100</option>
+          <option value="300" selected>实例上限 300</option>
+          <option value="1000">实例上限 1000</option>
+          <option value="0">全部实例（可能卡顿）</option>
+        </select>
+        <button class="btn text-xs" onclick="graphFitAll()">适应画布</button>
       </div>
       <div class="card p-4">
         <h3 class="font-medium mb-2">自然语言查询</h3>
@@ -762,6 +769,6 @@
   </main>
   </div>
 
-  <script src="app.js?v=20261028a"></script>
+  <script src="app.js?v=20261028d"></script>
 </body>
 </html>

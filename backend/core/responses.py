@@ -92,7 +92,9 @@ def fail(err: ApiError) -> JSONResponse:
 # --------------------------------------------------------------------------- #
 DEFAULT_PAGE = 1
 DEFAULT_PAGE_SIZE = 20
-MAX_PAGE_SIZE = 100
+# 与路由声明的 le=200、前端「pageSize=200」对齐。历史值 100 会静默把请求的 200 截断成 100，
+# 导致前端「按 200/页翻页拉全量」时少拉一半、total 与实际页内容对不上。
+MAX_PAGE_SIZE = 200
 
 
 def parse_pagination(query_page: int | None, query_page_size: int | None) -> tuple[int, int]:

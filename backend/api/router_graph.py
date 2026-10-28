@@ -25,12 +25,13 @@ def _store_for(project_id: str) -> JsonStore:
 def graph_data(
     ontology_id: str,
     mode: str = Query(default="schema", pattern="^(schema|knowledge)$"),
+    max_instances: int = Query(default=300, ge=0, description="knowledge 视图实例抽样上限，0=不限制（大图性能差）"),
     project_id: str = Depends(project_id_param),
 ):
     rec = _store_for(project_id).get(ontology_id)
     if not rec:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
-    return success(_viz.graph_data(ontology_id, rec, mode=mode, project_id=project_id))
+    return success(_viz.graph_data(ontology_id, rec, mode=mode, project_id=project_id, max_instances=max_instances))
 
 
 def _inference_trace_response(ontology_id: str, rec: dict[str, Any], focus: str | None = None) -> dict[str, Any]:

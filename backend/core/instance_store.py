@@ -45,10 +45,10 @@ class InstanceStore(ABC):
         self,
         object_type: str | None = None,
         filters: dict[str, Any] | None = None,
-        limit: int = 1000,
+        limit: int | None = 1000,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """按对象类型和/或字段过滤查询实例。"""
+        """按对象类型和/或字段过滤查询实例。limit=None 表示不截断（返回全部匹配记录）。"""
         raise NotImplementedError
 
     @abstractmethod
@@ -241,7 +241,7 @@ class JsonlInstanceStore(InstanceStore):
         self,
         object_type: str | None = None,
         filters: dict[str, Any] | None = None,
-        limit: int = 1000,
+        limit: int | None = 1000,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         filters = filters or {}
@@ -259,6 +259,8 @@ class JsonlInstanceStore(InstanceStore):
             return True
 
         matched = [r for r in candidates if _match(r)]
+        if limit is None:
+            return matched[offset:]
         return matched[offset : offset + limit]
 
     def update(self, record_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
@@ -293,7 +295,10 @@ class JsonlInstanceStore(InstanceStore):
         return total
 
     def all(self) -> list[dict[str, Any]]:
-        return self.find()
+        # 「全量」语义：不受 find() 默认 limit=1000 截断。
+        # 历史 bug：all() 退化为「前 1000 条」，实例数超限后按字母序命中的同一对象占满前 1000，
+        # 其余对象在截断快照上过滤恒为 0，导致树计数/图谱节点/血缘全面失真。
+        return self.find(limit=None)
 
 
 class JenaInstanceStore(InstanceStore):
@@ -312,7 +317,7 @@ class JenaInstanceStore(InstanceStore):
         self,
         object_type: str | None = None,
         filters: dict[str, Any] | None = None,
-        limit: int = 1000,
+        limit: int | None = 1000,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         raise NotImplementedError("Jena 实例查询尚未实现")

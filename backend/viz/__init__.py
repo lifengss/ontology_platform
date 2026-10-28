@@ -33,18 +33,27 @@ class Viz:
         ontology: dict[str, Any],
         mode: str = "schema",
         project_id: str | None = None,
+        max_instances: int = 300,
     ) -> dict[str, Any]:
-        """返回 schema 或 knowledge 视图数据。"""
+        """返回 schema 或 knowledge 视图数据。
+
+        max_instances：knowledge 视图实例抽样上限（0 = 不限制）。
+        全量实例入图（如 2297 节点 × 300 tick 力导向）首屏必然卡顿且炸开，
+        默认按对象类型均匀抽样，元信息见 truncated/total_instances/shown。
+        """
         schema_nodes, schema_edges = self._schema_graph(ontology)
-        kg_nodes, kg_edges = self._knowledge_graph(ontology_id, ontology, schema_nodes, schema_edges, project_id)
+        kg_nodes, kg_edges, kg_meta = self._knowledge_graph(
+            ontology_id, ontology, schema_nodes, schema_edges, project_id, max_instances=max_instances
+        )
         nodes, edges = (kg_nodes, kg_edges) if mode == "knowledge" else (schema_nodes, schema_edges)
         return {
             "mode": mode,
             "nodes": nodes,
             "edges": edges,
+            **kg_meta,
             "tabs": {
                 "schema": {"nodes": schema_nodes, "edges": schema_edges},
-                "knowledge": {"nodes": kg_nodes, "edges": kg_edges},
+                "knowledge": {"nodes": kg_nodes, "edges": kg_edges, **kg_meta},
             },
             "source_legend": [
                 {"source": _INTERNAL, "label": "内部建模", "color": "#4f8cff"},
@@ -95,13 +104,26 @@ class Viz:
         schema_nodes: list[dict[str, Any]],
         schema_edges: list[dict[str, Any]],
         project_id: str | None = None,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        # knowledge 视图以 schema 为骨架，叠加实例节点与 instance_of 关系
+        max_instances: int = 300,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+        """knowledge 视图 = schema 骨架 + 实例节点 + instance_of 边。
+
+        max_instances > 0 时按对象类型均匀抽样（轮询，每对象最多 per_object 条），
+        返回值第三项为抽样元信息 {truncated, total_instances, shown}。
+        """
         nodes = [dict(n) for n in schema_nodes]
         edges = [dict(e) for e in schema_edges]
         node_ids = {n["id"] for n in nodes}
 
         instances = self._load_instances(ontology_id, project_id)
+        total_instances = len(instances)
+        if max_instances and 0 < max_instances < total_instances:
+            instances = self._sample_instances(instances, max_instances)
+        meta = {
+            "truncated": len(instances) < total_instances,
+            "total_instances": total_instances,
+            "shown": len(instances),
+        }
         for tx_idx, rec in enumerate(instances):
             object_type = rec.get("object_type")
             inst = rec.get("instance", {})
@@ -140,7 +162,52 @@ class Viz:
                     "kind": "instance_of",
                     "origin": origin,
                 })
-        return nodes, edges
+        return nodes, edges, meta
+
+    # knowledge 视图抽样：每对象最多 _PER_OBJECT_LIMIT 条，全局 max_total 条
+    _PER_OBJECT_LIMIT = 50
+
+    def _sample_instances(
+        self,
+        instances: list[dict[str, Any]],
+        max_total: int,
+        per_object: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """按对象类型均匀抽样（round-robin 轮询，确定性可复现）。
+
+        大 hub 对象（如一个对象下挂 1372 实例）无法在力导向里紧凑，
+        均匀抽样保证各对象都有代表节点入图，而不是被字母序靠前的对象占满。
+        """
+        if per_object is None:
+            per_object = self._PER_OBJECT_LIMIT
+        buckets: dict[str, list[dict[str, Any]]] = {}
+        order: list[str] = []
+        for rec in instances:
+            ot = rec.get("object_type") or "__unknown__"
+            if ot not in buckets:
+                buckets[ot] = []
+                order.append(ot)
+            buckets[ot].append(rec)
+        # 桶内按稳定键排序，保证多次请求抽样结果一致
+        for ot in order:
+            buckets[ot].sort(key=lambda r: str((r.get("instance") or {}).get("id") or r.get("tx_id") or ""))
+        chosen: list[dict[str, Any]] = []
+        idx = {ot: 0 for ot in order}
+        while len(chosen) < max_total:
+            progressed = False
+            for ot in order:
+                if len(chosen) >= max_total:
+                    break
+                i = idx[ot]
+                lst = buckets[ot]
+                if i >= len(lst) or i >= per_object:
+                    continue
+                chosen.append(lst[i])
+                idx[ot] = i + 1
+                progressed = True
+            if not progressed:
+                break
+        return chosen
 
     def _load_instances(self, ontology_id: str, project_id: str | None = None) -> list[dict[str, Any]]:
         """读取实例：以新 InstanceStore 为权威（前端 list/get/edit/delete 皆用它），

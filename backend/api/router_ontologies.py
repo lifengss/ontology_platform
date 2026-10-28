@@ -282,7 +282,8 @@ def delete_ontology(
     # 2) 实例数据：存在时需 force 二次确认
     from core.instance_store import JsonlInstanceStore
     inst_store = JsonlInstanceStore(project_id=project_id)
-    instances = inst_store.find(filters={"ontology_id": ontology_id}, limit=100000)
+    # limit=None：全量语义。此前硬编码 limit=100000，超限时 force 删除会静默漏删
+    instances = inst_store.find(filters={"ontology_id": ontology_id}, limit=None)
     if instances and not force:
         raise ApiError(
             "CONFLICT",

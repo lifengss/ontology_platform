@@ -68,3 +68,4 @@ _research_oswalpalash/
 # 智能体本地数据 / 一次性验证目录（不随项目提交）
 .workbuddy/
 tmp_verify_ingest/
+tmp_calc/
