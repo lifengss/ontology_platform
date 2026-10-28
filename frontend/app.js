@@ -4,11 +4,11 @@ let state = {
   ontologies: [], candidates: [], graphTab: 'schema',
   currentOntology: null, editingId: null, filter: 'all', editorMode: 'form', formObjects: [],
   projects: [], currentProject: null,
-  namespaces: [], currentNamespace: null,
   actions: [], currentAction: null, actionToken: null,
   logs: [], logSource: 'server',
   selectedIngestObject: null,
   instances: [], selectedInstance: null,
+  ingestTab: 'object', allInstanceQ: '', allInstanceObjectFilter: '', instanceEditMode: false,
   expandedTreeNodes: new Set(['__root__']),
   llmSettings: {}, healthDetails: null,
 };
@@ -101,17 +101,14 @@ function _currentProjectId() {
   return state.currentProject?.id || localStorage.getItem('op_currentProject') || 'default';
 }
 
-function _currentNamespace() {
-  return state.currentNamespace?.id || localStorage.getItem('op_currentNamespace') || _currentProjectId();
-}
-
 async function api(path, opts = {}) {
   const start = performance.now();
   const isForm = opts.body instanceof FormData;
   const headers = isForm ? {} : { 'Content-Type': 'application/json' };
   const sep = path.includes('?') ? '&' : '?';
   const projectId = opts.projectId ?? _currentProjectId();
-  const namespace = opts.namespace ?? _currentNamespace();
+  // 默认作用域 = 项目级（不注入 namespace）；如需项目内空间过滤由调用方显式传 namespace
+  const namespace = opts.namespace ?? null;
   let url = API_BASE + path + sep + 'project_id=' + encodeURIComponent(projectId);
   if (namespace) url += '&namespace=' + encodeURIComponent(namespace);
   clientLog('info', `API ${opts.method || 'GET'} ${path}`, { project_id: projectId, namespace });
@@ -176,6 +173,64 @@ function toggleHealthDetails() {
   if (!box.classList.contains('hidden')) renderHealthDetails();
 }
 
+// ---- 所属部门（顶层隔离维度：项目归属部门，顶栏按部门筛选项目空间） ----
+const DEPARTMENT_DEFAULT = '默认部门';
+
+function departmentOf(p) {
+  return (p && p.department && String(p.department).trim()) || DEPARTMENT_DEFAULT;
+}
+
+function _currentDepartment() {
+  return localStorage.getItem('op_currentDepartment') || '';  // 空 = 全部部门
+}
+
+function filteredProjects() {
+  const dept = _currentDepartment();
+  const list = state.projects || [];
+  return dept ? list.filter(p => departmentOf(p) === dept) : list;
+}
+
+function allDepartments() {
+  const set = new Set([DEPARTMENT_DEFAULT]);
+  (state.projects || []).forEach(p => set.add(departmentOf(p)));
+  (homeProjects || []).forEach(p => set.add(departmentOf(p)));  // 含归档项目
+  const arr = [...set];
+  arr.sort((a, b) => (a === DEPARTMENT_DEFAULT ? -1 : b === DEPARTMENT_DEFAULT ? 1 : a.localeCompare(b, 'zh')));
+  return arr;
+}
+
+function renderDepartmentSelector() {
+  const sel = $('departmentSelect');
+  if (!sel) return;
+  const current = _currentDepartment();
+  sel.innerHTML = '<option value="">全部部门</option>' +
+    allDepartments().map(d => '<option value="' + esc(d) + '" ' + (d === current ? 'selected' : '') + '>' + esc(d) + '</option>').join('');
+}
+
+// 部门筛选生效：当前项目不属于所选部门时自动切到该部门第一个项目
+async function applyDepartmentFilter() {
+  const dept = _currentDepartment();
+  const list = filteredProjects();
+  if (dept && list.length) {
+    const currentId = state.currentProject ? state.currentProject.id : null;
+    if (!currentId || !list.some(p => p.id === currentId)) {
+      await setProject(list[0].id);
+      return;
+    }
+  }
+  renderProjectSelector();
+}
+
+async function setDepartment(dept) {
+  localStorage.setItem('op_currentDepartment', dept || '');
+  renderDepartmentSelector();
+  await applyDepartmentFilter();
+  renderContextLabel();
+  // 首页可见时同步刷新总览（项目表/统计按部门过滤）
+  const homeEl = $('home');
+  if (homeEl && !homeEl.classList.contains('hidden')) await loadHome();
+}
+
 async function loadProjects() {
   try {
     const j = await api('/api/projects?page=1&pageSize=100', { namespace: null });
@@ -186,8 +241,8 @@ async function loadProjects() {
       state.currentProject = state.projects.find(p => p.id === savedId) || state.projects[0];
       localStorage.setItem('op_currentProject', state.currentProject.id);
     }
-    renderProjectSelector();
-    await loadNamespaces();
+    renderDepartmentSelector();
+    await applyDepartmentFilter();
   } catch (e) { toast('加载项目失败: ' + e.message, 'err'); }
 }
 
@@ -195,8 +250,9 @@ function renderProjectSelector() {
   const sel = $('projectSelect');
   if (!sel) return;
   const current = _currentProjectId();
+  const items = filteredProjects();
   sel.innerHTML = '<option value="">选择项目</option>' +
-    state.projects.map(p => '<option value="' + p.id + '" ' + (p.id === current ? 'selected' : '') + '>' + esc(p.name) + '</option>').join('');
+    items.map(p => '<option value="' + p.id + '" ' + (p.id === current ? 'selected' : '') + '>' + esc(p.name) + '</option>').join('');
   renderContextLabel();
 }
 
@@ -206,42 +262,9 @@ function renderContextLabel() {
   const current = _currentProjectId();
   const p = state.projects.find(x => x.id === current);
   const projectName = p ? p.name : (current === 'default' ? '默认项目' : current);
-  const ns = _currentNamespace();
-  const nsName = ns === current ? '默认空间' : ns;
-  label.textContent = projectName + ' / ' + nsName;
-  label.title = '项目: ' + projectName + '\n部门空间: ' + nsName;
-}
-
-async function loadNamespaces() {
-  const projectId = _currentProjectId();
-  state.namespaceItems = [];
-  try {
-    const j = await api('/api/namespaces?pageSize=100', { namespace: null });
-    state.namespaceItems = j.data.items || [];
-    state.namespaces = state.namespaceItems.map(n => ({
-      id: n.id,
-      name: n.is_default ? '默认空间 (' + projectId + ')' : (n.name || n.id),
-    }));
-  } catch (e) {
-    // API 不可用时兜底：仅默认空间
-    state.namespaces = [{ id: projectId, name: '默认空间 (' + projectId + ')' }];
-  }
-  const savedNs = localStorage.getItem('op_currentNamespace');
-  if (!state.currentNamespace || !state.namespaces.some(n => n.id === state.currentNamespace.id)) {
-    state.currentNamespace = state.namespaces.find(n => n.id === savedNs) || state.namespaces[0];
-    localStorage.setItem('op_currentNamespace', state.currentNamespace.id);
-  }
-  renderProjectSelector();
-  renderNamespaceSelector();
-  renderNamespaces();
-}
-
-function renderNamespaceSelector() {
-  const sel = $('namespaceSelect');
-  if (!sel) return;
-  const current = _currentNamespace();
-  sel.innerHTML = state.namespaces.map(n => '<option value="' + n.id + '" ' + (n.id === current ? 'selected' : '') + '>' + esc(n.name) + '</option>').join('');
-  renderContextLabel();
+  const dept = _currentDepartment();
+  label.textContent = (dept ? dept + ' / ' : '') + projectName;
+  label.title = (dept ? '部门: ' + dept + '\n' : '') + '项目: ' + projectName;
 }
 
 async function setProject(id) {
@@ -250,10 +273,7 @@ async function setProject(id) {
   if (!p) return;
   state.currentProject = p;
   localStorage.setItem('op_currentProject', id);
-  state.currentNamespace = { id: id, name: '默认空间 (' + id + ')' };
-  localStorage.setItem('op_currentNamespace', id);
   renderProjectSelector();
-  renderNamespaceSelector();
   state.currentOntology = null;
   // 清空 ontology 选择器，避免旧项目选中的本体 ID 残留到新项目
   ['ingestOntology', 'graphOntology', 'inferOntology'].forEach(selId => {
@@ -264,35 +284,31 @@ async function setProject(id) {
   if (impactInstanceLS) impactInstanceLS.setValue('');
   if (impactAttributeLS) impactAttributeLS.setValue('');
   impactInstances = [];
-  await loadNamespaces();
   await loadOntologies();
   await loadActions();
+  await refreshActiveTabAfterScopeChange();
   toast('已切换到项目：' + p.name, 'ok');
 }
 
-async function setNamespace(id) {
-  if (!id) return;
-  state.currentNamespace = state.namespaces.find(n => n.id === id) || { id, name: id };
-  localStorage.setItem('op_currentNamespace', id);
-  renderProjectSelector();
-  renderNamespaceSelector();
-  if (state.currentOntology) state.currentOntology = null;
-  await loadOntologies();
-  await loadActions();
-}
-
-async function createNamespace(name) {
-  const n = name || prompt('请输入部门空间名（namespace），例如 sales/rd');
-  if (!n?.trim()) return;
-  const id = n.trim();
-  if (!state.namespaces.find(ns => ns.id === id)) {
-    state.namespaces.push({ id, name: id });
+// 切换项目/部门后，按当前活动页签同步刷新数据，
+// 避免顶栏作用域已变、页面内容仍是旧项目数据（如实例列表/图谱/统计）
+async function refreshActiveTabAfterScopeChange() {
+  const tab = _lastTab || 'home';
+  try {
+    if (tab === 'ingest') {
+      renderIngestTarget();
+      await Promise.all([loadInstances(), loadCandidates()]);
+    } else if (tab === 'graph') {
+      await loadGraph();
+    } else if (tab === 'inference') {
+      await loadInference();
+    } else if (tab === 'home') {
+      await loadHome();
+    }
+    // modeling 已由 setProject 内的 loadOntologies() 刷新
+  } catch (e) {
+    // 各 loader 自身已有 toast 报错；这里兜底防止切换流程中断
   }
-  state.currentNamespace = { id, name: id };
-  localStorage.setItem('op_currentNamespace', id);
-  renderNamespaceSelector();
-  await loadOntologies();
-  toast('已切换到部门空间：' + id, 'ok');
 }
 
 async function createProject(name) {
@@ -321,11 +337,26 @@ function fmtSize(n) {
 
 async function loadHome() {
   try {
-    const j = await api('/api/projects?with_stats=true&pageSize=100', { projectId: null, namespace: null });
+    const dept = _currentDepartment();
+    const qs = dept ? '&department=' + encodeURIComponent(dept) : '';
+    const j = await api('/api/projects?with_stats=true&pageSize=100' + qs, { projectId: null, namespace: null });
     homeProjects = j.data.items || [];
     renderHomeStats();
     renderProjects();
   } catch (e) { toast('加载项目列表失败: ' + e.message, 'err'); }
+}
+
+async function saveProjectDepartment(id, value) {
+  const dept = (value || '').trim() || DEPARTMENT_DEFAULT;
+  try {
+    await api('/api/projects/' + id, { method: 'PUT', body: JSON.stringify({ department: dept }), projectId: null, namespace: null });
+    toast('项目部门已更新为「' + dept + '」', 'ok');
+    await loadProjects();   // 内部按当前部门筛选，必要时自动切换项目
+    await loadHome();
+  } catch (e) {
+    toast('更新部门失败: ' + e.message, 'err');
+    await loadHome();
+  }
 }
 
 function renderHomeStats() {
@@ -333,9 +364,14 @@ function renderHomeStats() {
   const archived = homeProjects.length - active.length;
   $('homeStatProjects').textContent = homeProjects.length;
   $('homeStatProjectsSub').textContent = active.length + ' 进行中 · ' + archived + ' 已归档';
+  // 项目级统计（已按部门筛选）：汇总所选部门范围内各项目
   $('homeStatOntologies').textContent = homeProjects.reduce((s, p) => s + ((p.stats && p.stats.ontology_count) || 0), 0);
   $('homeStatInstances').textContent = homeProjects.reduce((s, p) => s + ((p.stats && p.stats.instance_count) || 0), 0);
   $('homeStatMcp').textContent = homeProjects.filter(p => p.mcp_published).length;
+  const ontoSub = $('homeStatOntologiesSub');
+  const instSub = $('homeStatInstancesSub');
+  if (ontoSub) ontoSub.textContent = '项目内本体模型数量';
+  if (instSub) instSub.textContent = '归化入库后的实例';
 }
 
 function renderProjects() {
@@ -348,7 +384,7 @@ function renderProjects() {
   });
   const tb = $('projectTableBody');
   if (!tb) return;
-  if (!items.length) { tb.innerHTML = '<tr><td colspan="9" class="p-3 text-center text-slate-500">暂无项目</td></tr>'; return; }
+  if (!items.length) { tb.innerHTML = '<tr><td colspan="10" class="p-3 text-center text-slate-500">暂无项目</td></tr>'; return; }
   tb.innerHTML = items.map(p => {
     const st = p.status || 'active';
     const archived = st === 'archived';
@@ -364,6 +400,7 @@ function renderProjects() {
     return '<tr class="border-b border-slate-700/40 hover:bg-slate-800/30">' +
       '<td class="p-2">' + esc(p.name) + (p.description ? '<div class="text-xs text-slate-500">' + esc(p.description) + '</div>' : '') + '</td>' +
       '<td class="p-2 font-mono text-xs text-slate-500 whitespace-nowrap">' + esc(p.id.slice(0, 8)) + '…' + copyIcon(p.id, '项目ID') + '</td>' +
+      '<td class="p-2"><input class="bg-transparent border border-slate-700/60 rounded px-1 py-0.5 text-xs text-slate-300 w-24 focus:border-blue-500/60 focus:outline-none" value="' + esc(departmentOf(p)) + '" title="所属部门（点击修改）" onchange="saveProjectDepartment(\'' + p.id + '\', this.value)" /></td>' +
       '<td class="p-2">' + badge + '</td>' +
       '<td class="p-2">' + (stats.ontology_count != null ? stats.ontology_count : '-') + '</td>' +
       '<td class="p-2">' + (stats.instance_count != null ? stats.instance_count : '-') + '</td>' +
@@ -386,12 +423,19 @@ async function submitNewProject() {
   const name = $('newProjectName').value.trim();
   if (!name) { toast('项目名称不能为空', 'err'); return; }
   const desc = $('newProjectDesc').value.trim();
+  const dept = ($('newProjectDepartment') ? $('newProjectDepartment').value : '').trim();
   try {
-    const j = await api('/api/projects', { method: 'POST', body: JSON.stringify({ name, description: desc }), projectId: null, namespace: null });
+    const j = await api('/api/projects', { method: 'POST', body: JSON.stringify({ name, description: desc, department: dept || undefined }), projectId: null, namespace: null });
     $('newProjectName').value = '';
     $('newProjectDesc').value = '';
+    if ($('newProjectDepartment')) $('newProjectDepartment').value = '';
     toggleProjectForm(false);
     toast('项目「' + name + '」已创建', 'ok');
+    // 若新项目部门与当前筛选不一致，同步筛选器，避免新项目在下拉中“消失”
+    if (departmentOf(j.data) !== DEPARTMENT_DEFAULT && _currentDepartment() !== departmentOf(j.data)) {
+      localStorage.setItem('op_currentDepartment', departmentOf(j.data));
+      renderDepartmentSelector();
+    }
     await loadProjects();
     await setProject(j.data.id);
     await loadHome();
@@ -461,78 +505,6 @@ async function afterProjectStateChange() {
     return;
   }
   await loadProjects();
-}
-
-// ---- 部门空间（namespace）管理：项目内本体分组，进入/重命名/删除 ----
-function renderNamespaces() {
-  const tb = $('nsTableBody');
-  if (!tb) return;
-  const items = state.namespaceItems || [];
-  if (!items.length) { tb.innerHTML = '<tr><td colspan="6" class="p-3 text-center text-slate-500">暂无空间</td></tr>'; return; }
-  tb.innerHTML = items.map(n => {
-    const acts = ['<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="enterNamespace(\'' + escAttr(n.id) + '\')">进入</button>'];
-    if (!n.is_default) {
-      acts.push('<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="renameNamespace(\'' + escAttr(n.id) + '\', \'' + escAttr(n.name || '') + '\')">重命名</button>');
-      acts.push('<button class="btn danger" style="padding:2px 8px;font-size:12px" onclick="deleteNamespaceRow(\'' + escAttr(n.id) + '\', \'' + escAttr(n.name || n.id) + '\', ' + n.ontology_count + ')">删除</button>');
-    }
-    return '<tr class="border-b border-slate-700/40 hover:bg-slate-800/30">' +
-      '<td class="p-2">' + esc(n.name || n.id) + (n.is_default ? ' <span class="badge active">默认</span>' : '') + '</td>' +
-      '<td class="p-2 font-mono text-xs text-slate-500 whitespace-nowrap">' + esc(n.id) + '</td>' +
-      '<td class="p-2 text-xs text-slate-400">' + esc(n.description || '-') + '</td>' +
-      '<td class="p-2">' + n.ontology_count + '</td>' +
-      '<td class="p-2 text-xs text-slate-400 whitespace-nowrap">' + (n.created_at ? new Date(n.created_at).toLocaleDateString() : '-') + '</td>' +
-      '<td class="p-2 whitespace-nowrap">' + acts.join(' ') + '</td>' +
-      '</tr>';
-  }).join('');
-}
-
-function toggleNsForm(show) {
-  const box = $('nsForm');
-  const willShow = show != null ? show : box.classList.contains('hidden');
-  box.classList.toggle('hidden', !willShow);
-  if (willShow) $('newNsName').focus();
-}
-
-async function submitNewNamespace() {
-  const name = $('newNsName').value.trim();
-  if (!name) { toast('空间名称不能为空', 'err'); return; }
-  const id = $('newNsId').value.trim();
-  const desc = $('newNsDesc').value.trim();
-  try {
-    await api('/api/namespaces', { method: 'POST', body: JSON.stringify({ name, id: id || undefined, description: desc || undefined }) });
-    $('newNsName').value = ''; $('newNsId').value = ''; $('newNsDesc').value = '';
-    toggleNsForm(false);
-    toast('空间「' + name + '」已创建', 'ok');
-    await loadNamespaces();
-  } catch (e) { toast('创建失败: ' + e.message, 'err'); }
-}
-
-async function enterNamespace(id) {
-  await setNamespace(id);
-  toast('已切换到部门空间：' + id, 'ok');
-}
-
-async function renameNamespace(id, curName) {
-  const name = prompt('重命名空间「' + curName + '」的显示名（空间 ID 不变）：', curName);
-  if (!name || !name.trim() || name.trim() === curName) return;
-  try {
-    await api('/api/namespaces/' + encodeURIComponent(id), { method: 'PUT', body: JSON.stringify({ name: name.trim() }) });
-    toast('空间已重命名为「' + name.trim() + '」', 'ok');
-    await loadNamespaces();
-  } catch (e) { toast('重命名失败: ' + e.message, 'err'); }
-}
-
-async function deleteNamespaceRow(id, name, count) {
-  const warn = count > 0
-    ? '\n\n注意：该空间下仍有 ' + count + ' 个本体，删除会被拒绝，请先迁移或删除其本体。'
-    : '\n\n删除后该空间即不可用（本体若仍引用此 ID 将视为未归属空间）。此操作不可恢复。';
-  const ok = confirm('删除部门空间「' + name + '」？' + warn);
-  if (!ok) return;
-  try {
-    await api('/api/namespaces/' + encodeURIComponent(id), { method: 'DELETE' });
-    toast('空间「' + name + '」已删除', 'ok');
-    await loadNamespaces();
-  } catch (e) { toast('删除失败: ' + e.message, 'err'); }
 }
 
 // ---- 外部 MCP 数据源连接（入）：对接业务系统 MCP Server ----
@@ -895,10 +867,11 @@ function startCreate() {
   $('formModelingType').value = 'manual';
   $('formDesc').value = '';
   state.formObjects = [{
-    id: 'obj_customer', name: '客户', description: '',
+    id: 'obj_customer', name: '客户', description: '', parent: null,
     attributes: [{ id: 'attr_name', name: '名称', data_type: 'string', required: true, constraints: {} }],
     relations: []
   }];
+  globalConstraintRows = [];
   setEditorMode('form');
   renderObjectForms();
 }
@@ -916,38 +889,253 @@ function setEditorMode(mode) {
 function renderObjectForms() {
   const container = $('objectForms');
   if (!state.formObjects.length) { container.innerHTML = '<div class="text-sm text-slate-500">点击上方按钮添加对象</div>'; return; }
+  const total = state.formObjects.length;
   container.innerHTML = state.formObjects.map((obj, idx) => {
-    const attrHtml = (obj.attributes || []).map((a, aidx) =>
-      '<div class="grid grid-cols-12 gap-2 items-end">' +
-        '<div class="col-span-3"><input class="w-full attr-id" data-oidx="' + idx + '" data-aidx="' + aidx + '" value="' + esc(a.id) + '" placeholder="attr_name" /></div>' +
-        '<div class="col-span-3"><input class="w-full attr-name" data-oidx="' + idx + '" data-aidx="' + aidx + '" value="' + esc(a.name) + '" placeholder="名称" /></div>' +
-        '<div class="col-span-2">' + typeSelect('attr-type', idx, aidx, a.data_type) + '</div>' +
-        '<div class="col-span-2"><label class="inline-flex items-center gap-1"><input type="checkbox" class="attr-required" data-oidx="' + idx + '" data-aidx="' + aidx + '" ' + (a.required ? 'checked' : '') + '/> 必填</label></div>' +
-        '<div class="col-span-2"><span class="remove-btn" onclick="removeAttr(' + idx + ', ' + aidx + ')">删除</span></div>' +
-      '</div>'
-    ).join('');
+    const attrs = obj.attributes || [];
+    const attrHtml = attrs.map((a, aidx) => {
+      const hasC = a.constraints && Object.keys(a.constraints).length > 0;
+      const op = '<div class="col-span-2 flex gap-1 items-center justify-end">' +
+        '<button class="pk-move" title="上移" onclick="moveAttr(' + idx + ',' + aidx + ',-1)"' + (aidx === 0 ? ' disabled' : '') + '>↑</button>' +
+        '<button class="pk-move" title="下移" onclick="moveAttr(' + idx + ',' + aidx + ',1)"' + (aidx === attrs.length - 1 ? ' disabled' : '') + '>↓</button>' +
+        '<span class="remove-btn" onclick="removeAttr(' + idx + ',' + aidx + ')">删除</span>' +
+      '</div>';
+      return '<div class="attr-row">' +
+        '<div class="grid grid-cols-12 gap-2 items-end">' +
+          '<div class="col-span-3 flex items-center gap-1"><span class="pk-badge shrink-0" data-pkbadge="' + idx + ':' + aidx + '" style="display:none" title="该属性将自动设为业务主键 stable_key">🔑 主键</span><input class="w-full attr-id" data-oidx="' + idx + '" data-aidx="' + aidx + '" value="' + esc(a.id) + '" placeholder="attr_name" list="attrIdList" /></div>' +
+          '<div class="col-span-3"><input class="w-full attr-name" data-oidx="' + idx + '" data-aidx="' + aidx + '" value="' + esc(a.name) + '" placeholder="名称" list="attrNameList" /></div>' +
+          '<div class="col-span-2">' + typeSelect('attr-type', idx, aidx, a.data_type) + '</div>' +
+          '<div class="col-span-1"><label class="inline-flex items-center gap-1"><input type="checkbox" class="attr-required" data-oidx="' + idx + '" data-aidx="' + aidx + '" ' + (a.required ? 'checked' : '') + '/> 必填</label></div>' +
+          '<div class="col-span-1"><span class="cursor-pointer text-sky-400 text-xs hover:underline" onclick="toggleAttrConstraints(' + idx + ', ' + aidx + ')">约束' + (hasC ? ' <span class="text-amber-400">●</span>' : '') + '</span></div>' +
+          op +
+        '</div>' +
+        attrConstraintRowHtml(a, idx, aidx) +
+      '</div>';
+    }).join('');
     const relHtml = (obj.relations || []).map((r, ridx) =>
       '<div class="grid grid-cols-12 gap-2 items-end">' +
-        '<div class="col-span-3"><label class="text-[10px] text-slate-500">关系 ID（英文/下划线）</label><input class="w-full rel-id" data-oidx="' + idx + '" data-ridx="' + ridx + '" value="' + esc(r.id) + '" placeholder="belongs_to" /></div>' +
-        '<div class="col-span-3"><label class="text-[10px] text-slate-500">显示名称（中文）</label><input class="w-full rel-name" data-oidx="' + idx + '" data-ridx="' + ridx + '" value="' + esc(r.name) + '" placeholder="所属" /></div>' +
-        '<div class="col-span-3"><label class="text-[10px] text-slate-500">目标对象 ID（自动补全）</label><input class="w-full rel-target" data-oidx="' + idx + '" data-ridx="' + ridx + '" value="' + esc(r.target_object) + '" placeholder="obj_department" list="relTargetList" /></div>' +
+        '<div class="col-span-3"><label class="text-[10px] text-slate-500">关系 ID（英文/下划线）</label><input class="w-full rel-id" data-oidx="' + idx + '" data-ridx="' + ridx + '" value="' + esc(r.id) + '" placeholder="belongs_to" list="relIdList" /></div>' +
+        '<div class="col-span-3"><label class="text-[10px] text-slate-500">显示名称（中文）</label><input class="w-full rel-name" data-oidx="' + idx + '" data-ridx="' + ridx + '" value="' + esc(r.name) + '" placeholder="所属" list="relNameList" /></div>' +
+        '<div class="col-span-2"><label class="text-[10px] text-slate-500">目标对象 ID（自动补全）</label><input class="w-full rel-target" data-oidx="' + idx + '" data-ridx="' + ridx + '" value="' + esc(r.target_object) + '" placeholder="obj_department" list="relTargetList" /></div>' +
         '<div class="col-span-2">' + cardSelect('rel-card', idx, ridx, r.cardinality) + '</div>' +
-        '<div class="col-span-1"><span class="remove-btn" onclick="removeRel(' + idx + ', ' + ridx + ')">删除</span></div>' +
+        '<div class="col-span-2 flex gap-1 items-center justify-end">' +
+          '<button class="pk-move" title="上移" onclick="moveRel(' + idx + ',' + ridx + ',-1)"' + (ridx === 0 ? ' disabled' : '') + '>↑</button>' +
+          '<button class="pk-move" title="下移" onclick="moveRel(' + idx + ',' + ridx + ',1)"' + (ridx === (obj.relations || []).length - 1 ? ' disabled' : '') + '>↓</button>' +
+          '<span class="remove-btn" onclick="removeRel(' + idx + ',' + ridx + ')">删除</span>' +
+        '</div>' +
       '</div>'
     ).join('');
     return '<div class="object-card" data-oidx="' + idx + '">' +
-      '<div class="flex justify-between items-center mb-2"><span class="font-medium text-sm">对象 #' + (idx + 1) + '</span><span class="remove-btn" onclick="removeObject(' + idx + ')">删除对象</span></div>' +
-      '<div class="grid grid-cols-2 gap-3 mb-3">' +
+      '<div class="flex justify-between items-center mb-2"><span class="font-medium text-sm">对象 #' + (idx + 1) + '</span><span class="flex items-center gap-2">' +
+        '<button class="pk-move" title="上移对象" onclick="moveObject(' + idx + ',-1)"' + (idx === 0 ? ' disabled' : '') + '>↑</button>' +
+        '<button class="pk-move" title="下移对象" onclick="moveObject(' + idx + ',1)"' + (idx === total - 1 ? ' disabled' : '') + '>↓</button>' +
+        '<button class="btn secondary" style="padding:2px 8px;font-size:12px" title="新建一个父级为本对象的子对象（parent 预填）" onclick="addChildObject(' + idx + ')">+ 子对象</button><span class="remove-btn" onclick="removeObject(' + idx + ')">删除对象</span></span></div>' +
+      '<div class="grid grid-cols-3 gap-3 mb-3">' +
         '<div><label>对象 ID</label><input class="w-full obj-id" data-idx="' + idx + '" value="' + esc(obj.id) + '" placeholder="obj_customer" /></div>' +
         '<div><label>对象名称</label><input class="w-full obj-name" data-idx="' + idx + '" value="' + esc(obj.name) + '" placeholder="客户" /></div>' +
+        '<div><label title="上级对象（父类）：编译为 RDFS.subClassOf；父对象必须在本表单内定义">上级对象（父类）</label>' + parentSelectHtml(idx, obj) + '</div>' +
       '</div>' +
       '<div class="mb-2"><label>描述</label><input class="w-full obj-desc" data-idx="' + idx + '" value="' + esc(obj.description || '') + '" /></div>' +
+      '<div class="mb-2 text-xs text-slate-400">业务主键（只读）：<span class="pk-value font-mono text-sky-300" data-pkval="' + idx + '">—</span></div>' +
       '<div class="form-section-title"><span>属性</span><button class="btn" onclick="addAttr(' + idx + ')">+ 属性</button></div>' +
-      '<div class="space-y-2 mb-3">' + attrHtml + '</div>' +
+      '<div class="pk-rule text-[10px] text-slate-500 mb-1">主键规则：第一个「必填 + string」属性将自动设为业务主键（stable_key），属性顺序有意义，可用行内 ↑↓ 调整。<span class="pk-hint" data-pkhint="' + idx + '"></span></div>' +
+      // 属性较多时列表底部也有新增入口（与对象列表底部「+ 添加对象」风格一致），无需回滚到区标题
+      '<div class="space-y-2 mb-3">' + attrHtml + (attrs.length ? '<button class="btn secondary w-full" onclick="addAttr(' + idx + ')">+ 添加属性</button>' : '') + '</div>' +
       '<div class="form-section-title"><span>关系</span><button class="btn" onclick="addRel(' + idx + ')">+ 关系</button></div>' +
-      '<div class="space-y-2">' + relHtml + '</div>' +
+      '<div class="space-y-2">' + relHtml + ((obj.relations || []).length ? '<button class="btn secondary w-full" onclick="addRel(' + idx + ')">+ 添加关系</button>' : '') + '</div>' +
     '</div>';
   }).join('') + relTargetDatalist();
+  bindObjectFormsDelegation();
+  refreshFieldDatalists();
+  updatePkBadgesAll();
+  renderGlobalConstraints();
+}
+
+// ===== 业务主键（stable_key）实时提示 =====
+// 规则与后端 _backfill_object_fields 三级回退一致：required+string → 第一个 string → 第一个属性
+function pkHitIndex(attrs) {
+  if (!attrs.length) return -1;
+  let i = attrs.findIndex(a => a.required && (a.data_type || 'string') === 'string');
+  if (i >= 0) return i;
+  i = attrs.findIndex(a => (a.data_type || 'string') === 'string');
+  if (i >= 0) return i;
+  return 0;
+}
+
+// 从对象卡片 DOM 读当前属性定义（未 blur 的输入也算数）
+function pkAttrsFromDom(card) {
+  return Array.from(card.querySelectorAll('.attr-row')).map(row => ({
+    id: (row.querySelector('.attr-id') || {}).value || '',
+    data_type: (row.querySelector('.attr-type') || {}).value || 'string',
+    required: (row.querySelector('.attr-required') || {}).checked || false,
+  }));
+}
+
+// 增量更新单卡片的 🔑 徽标 / 提示行 / 只读回显（不整卡重渲染，避免输入焦点丢失）
+function updatePkBadges(idx) {
+  const card = document.querySelector('#objectForms .object-card[data-oidx="' + idx + '"]');
+  if (!card) return;
+  const attrs = pkAttrsFromDom(card);
+  const hit = pkHitIndex(attrs);
+  card.querySelectorAll('.pk-badge').forEach(b => {
+    const aidx = parseInt(String(b.dataset.pkbadge).split(':')[1], 10);
+    const on = aidx === hit;
+    b.style.display = on ? 'inline-block' : 'none';
+  });
+  const hint = card.querySelector('.pk-hint');
+  if (hint) {
+    const name = hit >= 0 ? (attrs[hit].id || '（未填 ID）') : '';
+    if (!attrs.length) hint.textContent = '｜当前无属性，保存时无法生成业务主键';
+    else if (attrs[hit].required && attrs[hit].data_type === 'string') hint.textContent = '｜当前主键 → ' + name;
+    else if (attrs[hit].data_type === 'string') hint.textContent = '｜无「必填 + string」属性，退化为第一个 string 属性 → ' + name;
+    else hint.textContent = '｜无 string 属性，退化为第一个属性 → ' + name + '，建议补一个字符串主键属性';
+  }
+  const val = card.querySelector('.pk-value');
+  if (val) val.textContent = !attrs.length ? '—（无属性）' : (attrs[hit].id || '（未填 ID，保存前请补）');
+}
+
+function updatePkBadgesAll() {
+  document.querySelectorAll('#objectForms .object-card').forEach(c => updatePkBadges(parseInt(c.dataset.oidx, 10)));
+}
+
+// 表单内任意输入（勾选必填/切换类型/改 ID/上下移动后）实时刷新主键标记；容器静态，只绑一次
+function bindObjectFormsDelegation() {
+  const of = $('objectForms');
+  if (!of || of.dataset.pkBound) return;
+  of.dataset.pkBound = '1';
+  const handler = e => {
+    const card = e.target && e.target.closest ? e.target.closest('.object-card') : null;
+    if (card && card.dataset.oidx != null) updatePkBadges(parseInt(card.dataset.oidx, 10));
+    refreshFieldDatalists();
+  };
+  of.addEventListener('input', handler);
+  of.addEventListener('change', handler);
+  of.addEventListener('keydown', handleTabComplete);
+}
+
+// ===== 字段联想（datalist）+ Tab 补全 =====
+// 同类字段（属性 ID/名称、关系 ID/名称）联想本表单内所有对象已填的值；
+// 目标对象 ID 另有 relTargetList。输入时浏览器原生下拉展示候选，
+// 按 Tab 自动补全联想第一位（前缀匹配、区分大小写不敏感），随后正常移动焦点。
+const FIELD_LISTS = {
+  'attr-id': 'attrIdList',
+  'attr-name': 'attrNameList',
+  'rel-id': 'relIdList',
+  'rel-name': 'relNameList',
+};
+
+// 从表单 DOM 收集各字段已填值重建 datalist（按出现顺序去重；跳过正在输入的框，避免自身占第一位）
+function refreshFieldDatalists() {
+  const container = $('objectForms');
+  if (!container) return;
+  for (const [cls, listId] of Object.entries(FIELD_LISTS)) {
+    const seen = new Set();
+    container.querySelectorAll('input.' + cls).forEach(inp => {
+      if (inp === document.activeElement) return;
+      const v = (inp.value || '').trim();
+      if (v) seen.add(v);
+    });
+    let el = document.getElementById(listId);
+    if (!el) {
+      el = document.createElement('datalist');
+      el.id = listId;
+      container.appendChild(el);
+    }
+    el.innerHTML = Array.from(seen).map(v => '<option value="' + esc(v) + '"></option>').join('');
+  }
+}
+
+// Tab 补全：取 datalist 中前缀匹配且不同于当前值的第一个候选回填；不阻止默认行为（焦点照常后移）
+function handleTabComplete(e) {
+  const t = e.target;
+  if (e.key !== 'Tab' || e.shiftKey || !t.matches || !t.matches('input[list]')) return;
+  const list = document.getElementById(t.getAttribute('list'));
+  if (!list) return;
+  const cur = (t.value || '').trim();
+  if (!cur) return;
+  const cands = Array.from(list.querySelectorAll('option'))
+    .map(o => o.value)
+    .filter(v => v && v !== t.value && v.toLowerCase().startsWith(cur.toLowerCase()));
+  if (cands.length) t.value = cands[0];
+}
+
+// 属性/关系/对象上移下移：先 sync 再把 state 里交换，立即重渲染（约束值经 sync 已回写，不丢）
+function moveAttr(idx, aidx, dir) {
+  syncFormObjectsFromDOM();
+  const list = state.formObjects[idx].attributes || [];
+  const to = aidx + dir;
+  if (to < 0 || to >= list.length) return;
+  [list[aidx], list[to]] = [list[to], list[aidx]];
+  renderObjectForms();
+}
+function moveRel(idx, ridx, dir) {
+  syncFormObjectsFromDOM();
+  const list = state.formObjects[idx].relations || [];
+  const to = ridx + dir;
+  if (to < 0 || to >= list.length) return;
+  [list[ridx], list[to]] = [list[to], list[ridx]];
+  renderObjectForms();
+}
+function moveObject(idx, dir) {
+  syncFormObjectsFromDOM();
+  const list = state.formObjects;
+  const to = idx + dir;
+  if (to < 0 || to >= list.length) return;
+  [list[idx], list[to]] = [list[to], list[idx]];
+  renderObjectForms();
+}
+
+// 上级对象（父类）下拉：列出本表单内其它已填 ID 的对象
+function parentSelectHtml(oidx, obj) {
+  const val = obj.parent || '';
+  const opts = state.formObjects
+    .filter((o, i) => i !== oidx && o.id)
+    .map(o => '<option value="' + esc(o.id) + '"' + (val === o.id ? ' selected' : '') + '>' + esc(o.id) + (o.name ? '（' + esc(o.name) + '）' : '') + '</option>')
+    .join('');
+  return '<select class="w-full obj-parent" data-idx="' + oidx + '"><option value=""' + (!val ? ' selected' : '') + '>(无 — 根对象)</option>' + opts + '</select>';
+}
+
+// 属性约束录入行（默认折叠，输入始终在 DOM 中，切换不丢失已填值）
+function attrConstraintRowHtml(a, oidx, aidx) {
+  const c = a.constraints || {};
+  const v = k => esc(c[k] != null ? String(c[k]) : '');
+  return '<div class="attr-constraints mt-1 p-2 rounded bg-slate-900/50 border border-slate-700/40" data-oidx="' + oidx + '" data-aidx="' + aidx + '" style="display:none">' +
+    '<div class="text-[10px] text-slate-500 mb-1">属性约束（可选）：长度/正则用于 string；最小/最大值用于 integer/float；枚举值须与数据类型匹配，逗号分隔</div>' +
+    '<div class="grid grid-cols-12 gap-2">' +
+      '<div class="col-span-2"><label class="text-[10px] text-slate-500">最小长度</label><input class="w-full c-minlen" data-oidx="' + oidx + '" data-aidx="' + aidx + '" value="' + v('min_length') + '" placeholder="如 3" /></div>' +
+      '<div class="col-span-2"><label class="text-[10px] text-slate-500">最大长度</label><input class="w-full c-maxlen" data-oidx="' + oidx + '" data-aidx="' + aidx + '" value="' + v('max_length') + '" placeholder="如 20" /></div>' +
+      '<div class="col-span-4"><label class="text-[10px] text-slate-500">正则 pattern</label><input class="w-full c-pattern" data-oidx="' + oidx + '" data-aidx="' + aidx + '" value="' + v('pattern') + '" placeholder="如 ^[0-9]+$" /></div>' +
+      '<div class="col-span-2"><label class="text-[10px] text-slate-500">最小值</label><input class="w-full c-min" data-oidx="' + oidx + '" data-aidx="' + aidx + '" value="' + v('minimum') + '" placeholder="如 0" /></div>' +
+      '<div class="col-span-2"><label class="text-[10px] text-slate-500">最大值</label><input class="w-full c-max" data-oidx="' + oidx + '" data-aidx="' + aidx + '" value="' + v('maximum') + '" placeholder="如 9999" /></div>' +
+    '</div>' +
+    '<div class="mt-2"><label class="text-[10px] text-slate-500">枚举值（逗号分隔）</label><input class="w-full c-enum" data-oidx="' + oidx + '" data-aidx="' + aidx + '" value="' + (c.enum ? esc(c.enum.join(', ')) : '') + '" placeholder="如 pending, paid, shipped" /></div>' +
+  '</div>';
+}
+
+function toggleAttrConstraints(oidx, aidx) {
+  const card = $('objectForms').children[oidx];
+  if (!card) return;
+  const row = card.querySelector('.attr-constraints[data-aidx="' + aidx + '"]');
+  if (row) row.style.display = (row.style.display === 'none' || !row.style.display) ? 'block' : 'none';
+}
+
+// 从属性行 DOM 收集 constraints（空输入 → 空对象）
+function collectAttrConstraints(card, aidx) {
+  const q = cls => { const el = card.querySelector('.' + cls + '[data-aidx="' + aidx + '"]'); return el ? el.value.trim() : ''; };
+  const c = {};
+  const mn = parseInt(q('c-minlen'), 10); if (!isNaN(mn)) c.min_length = mn;
+  const mx = parseInt(q('c-maxlen'), 10); if (!isNaN(mx)) c.max_length = mx;
+  const pat = q('c-pattern'); if (pat) c.pattern = pat;
+  const vmin = parseFloat(q('c-min')); if (!isNaN(vmin)) c.minimum = vmin;
+  const vmax = parseFloat(q('c-max')); if (!isNaN(vmax)) c.maximum = vmax;
+  const en = q('c-enum');
+  if (en) {
+    const dtEl = card.querySelector('.attr-type[data-aidx="' + aidx + '"]');
+    const dt = dtEl ? dtEl.value : 'string';
+    c.enum = en.split(/[,，]/).map(s => s.trim()).filter(Boolean).map(s =>
+      (dt === 'integer' && /^-?\d+$/.test(s)) ? parseInt(s, 10) :
+      (dt === 'float' && /^-?\d*\.?\d+$/.test(s)) ? parseFloat(s) : s);
+  }
+  return c;
 }
 
 // 2.1：关系"目标对象 ID"自动补全（本表单内全部对象）
@@ -969,15 +1157,19 @@ function cardSelect(cls, oidx, ridx, val) {
 }
 
 function syncFormObjectsFromDOM() {
+  syncGlobalConstraintsFromDOM();
   const cards = $('objectForms').children;
   for (let i = 0; i < cards.length; i++) {
     const card = cards[i];
+    if (!card.dataset || card.dataset.oidx == null) continue;
     const idx = parseInt(card.dataset.oidx);
     const obj = state.formObjects[idx];
     if (!obj) continue;
     obj.id = card.querySelector('.obj-id').value;
     obj.name = card.querySelector('.obj-name').value;
     obj.description = card.querySelector('.obj-desc').value;
+    obj.parent = (card.querySelector('.obj-parent') || {}).value || null;
+    const oldAttrs = obj.attributes || [];
     obj.attributes = [];
     card.querySelectorAll('.attr-id').forEach(el => {
       const aidx = parseInt(el.dataset.aidx);
@@ -986,7 +1178,8 @@ function syncFormObjectsFromDOM() {
         name: card.querySelector('.attr-name[data-aidx="' + aidx + '"]').value,
         data_type: card.querySelector('.attr-type[data-aidx="' + aidx + '"]').value,
         required: card.querySelector('.attr-required[data-aidx="' + aidx + '"]').checked,
-        constraints: {}
+        // 约束输入行始终在 DOM（折叠只是 display:none），统一读回
+        constraints: collectAttrConstraints(card, aidx)
       });
     });
     obj.relations = [];
@@ -1004,8 +1197,28 @@ function syncFormObjectsFromDOM() {
 
 function addObject() {
   syncFormObjectsFromDOM();
-  state.formObjects.push({ id: '', name: '', description: '', attributes: [], relations: [] });
+  state.formObjects.push({ id: '', name: '', description: '', parent: null, attributes: [], relations: [] });
   renderObjectForms();
+  // 新增卡片滚动入视（头/尾按钮通用；nearest 避免顶部按钮场景过度滚动；容器尾部还有共享 datalist，须锁定 object-card）
+  const cards = document.querySelectorAll('#objectForms .object-card');
+  if (cards.length) cards[cards.length - 1].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+// 父对象卡片「+ 子对象」：新建一个 parent 预填为该对象 id 的对象，滚动定位过去
+function addChildObject(oidx) {
+  syncFormObjectsFromDOM();
+  const parent = state.formObjects[oidx];
+  if (!parent || !parent.id) { toast('请先填写父对象的「对象 ID」', 'err'); return; }
+  state.formObjects.push({ id: '', name: '', description: '', parent: parent.id, attributes: [], relations: [] });
+  renderObjectForms();
+  const cards = $('objectForms').children;
+  const card = cards[cards.length - 1];
+  if (card) {
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.style.outline = '2px solid #38bdf8';
+    setTimeout(() => { card.style.outline = ''; }, 1600);
+    const idInput = card.querySelector('.obj-id');
+    if (idInput) idInput.focus();
+  }
 }
 function removeObject(idx) {
   syncFormObjectsFromDOM();
@@ -1042,15 +1255,114 @@ function collectFormOntology() {
     version: $('formVersion').value || '1',
     objects: state.formObjects.map(o => ({
       id: o.id, name: o.name, description: o.description || '',
-      attributes: o.attributes.map(a => ({ id: a.id, name: a.name, data_type: a.data_type, required: a.required, constraints: {} })),
+      parent: o.parent || null,
+      attributes: o.attributes.map(a => ({ id: a.id, name: a.name, data_type: a.data_type, required: a.required, constraints: a.constraints || {} })),
       relations: o.relations.map(r => ({ id: r.id, name: r.name, target_object: r.target_object, cardinality: r.cardinality }))
     })),
-    constraints: []
+    constraints: (globalConstraintRows || []).filter(c => c.id).map(c => ({
+      id: c.id, name: c.name || c.id, scope: c.scope || null, rule: c.rule, params: c.params || {}
+    }))
   };
+}
+
+// 保存前本地预检（后端仍会做权威校验）：父级存在/重复 ID/约束取值合法性
+function validateFormBeforeSave() {
+  const objs = state.formObjects;
+  const ids = new Set(objs.map(o => o.id).filter(Boolean));
+  for (const o of objs) {
+    const label = o.id || o.name || '?';
+    if (o.parent && !ids.has(o.parent)) return '对象 ' + label + ' 的上级对象 "' + o.parent + '" 在本表单中不存在';
+    if (o.id && objs.filter(x => x.id === o.id).length > 1) return '对象 ID 重复: ' + o.id;
+  }
+  for (const o of objs) {
+    for (const a of (o.attributes || [])) {
+      const c = a.constraints || {};
+      const al = a.id || a.name || '?';
+      if (c.min_length != null && c.max_length != null && c.min_length > c.max_length) return '属性 ' + al + ': 最小长度大于最大长度';
+      if (c.minimum != null && c.maximum != null && c.minimum > c.maximum) return '属性 ' + al + ': 最小值大于最大值';
+      if (c.enum && c.enum.length) {
+        if (a.data_type === 'integer' && c.enum.some(v => !/^-?\d+$/.test(v))) return '属性 ' + al + ': integer 的枚举值必须全部是整数（' + c.enum.join(', ') + '）';
+        if (a.data_type === 'float' && c.enum.some(v => isNaN(Number(v)))) return '属性 ' + al + ': float 的枚举值必须全部是数字（' + c.enum.join(', ') + '）';
+      }
+    }
+  }
+  for (const c of (globalConstraintRows || [])) {
+    if (!c.id) continue;
+    if (c.rule === 'unique') {
+      if (!c.scope) return '全局约束 ' + c.id + ': 缺少作用对象';
+      if (!c.params || !c.params.attribute) return '全局约束 ' + c.id + ': 缺少目标属性（unique 规则须指定属性）';
+    }
+  }
+  return null;
+}
+
+// ---- 本体级全局约束（unique 等）：作用对象 + 规则 + 参数（params.attribute） ----
+let globalConstraintRows = [];
+
+function renderGlobalConstraints() {
+  const box = $('constraintForms');
+  if (!box) return;
+  if (!globalConstraintRows.length) {
+    box.innerHTML = '<div class="text-xs text-slate-500">无全局约束。可为某对象的属性定义唯一性（unique）约束。</div>';
+    return;
+  }
+  box.innerHTML = globalConstraintRows.map((c, i) => {
+    const scopeObj = state.formObjects.find(o => o.id === c.scope);
+    const scopeOpts = state.formObjects.filter(o => o.id)
+      .map(o => '<option value="' + esc(o.id) + '"' + (c.scope === o.id ? ' selected' : '') + '>' + esc(o.id) + '</option>').join('');
+    const attrOpts = (scopeObj ? (scopeObj.attributes || []) : [])
+      .filter(a => a.id)
+      .map(a => '<option value="' + esc(a.id) + '"' + ((c.params || {}).attribute === a.id ? ' selected' : '') + '>' + esc(a.id) + '</option>').join('');
+    return '<div class="grid grid-cols-12 gap-2 items-end p-2 rounded bg-slate-900/40 border border-slate-700/40">' +
+      '<div class="col-span-2"><label class="text-[10px] text-slate-500">约束 ID</label><input class="w-full gc-id" data-cidx="' + i + '" value="' + esc(c.id) + '" placeholder="cst_sku_unique" /></div>' +
+      '<div class="col-span-2"><label class="text-[10px] text-slate-500">名称</label><input class="w-full gc-name" data-cidx="' + i + '" value="' + esc(c.name || '') + '" placeholder="SKU 唯一" /></div>' +
+      '<div class="col-span-3"><label class="text-[10px] text-slate-500">作用对象（scope）</label><select class="w-full gc-scope" data-cidx="' + i + '" onchange="onGcScopeChange(' + i + ')"><option value="">(选择对象)</option>' + scopeOpts + '</select></div>' +
+      '<div class="col-span-2"><label class="text-[10px] text-slate-500">规则</label><select class="w-full gc-rule" data-cidx="' + i + '"><option value="unique"' + (c.rule === 'unique' ? ' selected' : '') + '>unique 唯一</option></select></div>' +
+      '<div class="col-span-2"><label class="text-[10px] text-slate-500">目标属性（attribute）</label><select class="w-full gc-attr" data-cidx="' + i + '"><option value="">(选择属性)</option>' + attrOpts + '</select></div>' +
+      '<div class="col-span-1"><span class="remove-btn" onclick="removeGlobalConstraint(' + i + ')">删除</span></div>' +
+    '</div>';
+  }).join('');
+}
+
+function addGlobalConstraint() {
+  syncFormObjectsFromDOM();
+  const first = state.formObjects.find(o => o.id);
+  globalConstraintRows.push({ id: '', name: '', scope: (first && first.id) || '', rule: 'unique', params: {} });
+  renderGlobalConstraints();
+}
+
+function onGcScopeChange(i) {
+  const el = $('constraintForms') && $('constraintForms').querySelector('.gc-scope[data-cidx="' + i + '"]');
+  if (el) globalConstraintRows[i].scope = el.value; // 写回新作用对象，否则重渲染会弹回旧值
+  globalConstraintRows[i].params = {}; // 目标属性选项随作用对象变化，重置
+  renderGlobalConstraints();
+}
+
+function removeGlobalConstraint(i) {
+  globalConstraintRows.splice(i, 1);
+  renderGlobalConstraints();
+}
+
+function syncGlobalConstraintsFromDOM() {
+  const box = $('constraintForms');
+  if (!box) return;
+  box.querySelectorAll('.gc-id').forEach(el => {
+    const i = parseInt(el.dataset.cidx);
+    const row = globalConstraintRows[i];
+    if (!row) return;
+    row.id = el.value;
+    row.name = box.querySelector('.gc-name[data-cidx="' + i + '"]').value;
+    row.scope = box.querySelector('.gc-scope[data-cidx="' + i + '"]').value;
+    row.rule = box.querySelector('.gc-rule[data-cidx="' + i + '"]').value;
+    const attr = box.querySelector('.gc-attr[data-cidx="' + i + '"]').value;
+    row.params = (row.rule === 'unique' && attr) ? { attribute: attr } : {};
+  });
 }
 
 async function saveOntology() {
   const payload = collectFormOntology();
+  const preErr = validateFormBeforeSave();
+  if (preErr) { toast('保存前检查: ' + preErr, 'err'); return; }
   const isEdit = !!state.editingId;
   try {
     // 编辑既有本体走 PUT（原地更新，不再重复新建）；新建走 POST
@@ -1150,10 +1462,12 @@ function editCurrentOntology() {
   $('formModelingType').value = o.modeling_type || 'manual';
   $('formDesc').value = o.description || '';
   state.formObjects = (o.objects || []).map(x => ({
-    id: x.id, name: x.name, description: x.description || '',
+    id: x.id, name: x.name, description: x.description || '', parent: x.parent || null,
     attributes: (x.attributes || []).map(a => ({ id: a.id, name: a.name, data_type: a.data_type, required: !!a.required, constraints: a.constraints || {} })),
     relations: (x.relations || []).map(r => ({ id: r.id, name: r.name, target_object: r.target_object, cardinality: r.cardinality }))
   }));
+  // 本体级约束回显（unique 等）
+  globalConstraintRows = (o.constraints || []).map(c => ({ id: c.id, name: c.name, scope: c.scope || '', rule: c.rule, params: c.params || {} }));
   setEditorMode('form');
   renderObjectForms();
 }
@@ -1262,6 +1576,9 @@ function viewGraph() {
 function onIngestOntologyChange() {
   state.selectedIngestObject = null;
   state.selectedInstance = null;
+  state.allInstanceQ = '';
+  state.allInstanceObjectFilter = '';
+  const s = $('allInstanceSearch'); if (s) s.value = '';
   const sel = $('ingestOntology').value;
   const o = state.ontologies.find(x => x.id === sel);
   state.expandedTreeNodes = new Set(o ? (o.objects || []).map(x => x.id) : []);
@@ -1269,6 +1586,33 @@ function onIngestOntologyChange() {
   renderIngestTarget();
   renderIngestObjectMeta(null);
   refreshSingleImportContext();
+  renderInstanceList();
+  renderAllInstanceList();
+}
+
+// ---- 实例导入页子标签：对象视图 / 导入与审核 / 全部实例 ----
+const INGEST_TABS = { object: '对象视图', review: '导入与审核', all: '全部实例' };
+function setIngestTab(tab) {
+  if (!INGEST_TABS[tab]) tab = 'object';
+  state.ingestTab = tab;
+  Object.keys(INGEST_TABS).forEach(k => {
+    const btn = $('subtab' + k.charAt(0).toUpperCase() + k.slice(1));
+    const panel = $('ingestPanel' + k.charAt(0).toUpperCase() + k.slice(1));
+    if (btn) btn.classList.toggle('active', k === tab);
+    if (panel) { panel.classList.toggle('hidden', k !== tab); panel.classList.toggle('flex', k === tab); }
+  });
+  if (tab === 'object') renderInstanceList();
+  if (tab === 'all') renderAllInstanceList();
+}
+function updateIngestTabBadges() {
+  const rb = $('ingestBadgeReview');
+  if (rb) {
+    const pending = (state.candidates || []).filter(c => c.status === 'pending').length;
+    rb.textContent = pending;
+    rb.classList.toggle('hidden', pending <= 0);
+  }
+  const ab = $('ingestBadgeAll');
+  if (ab) ab.textContent = (state.instances || []).length;
 }
 
 // ---- 1.5 左侧实体层级树：按 many_to_one 关系构建父子层级（Protege 风格） ----
@@ -1372,6 +1716,9 @@ function toggleObjectTree(obj) {
   renderIngestTarget();
   renderIngestObjectMeta(obj);
   refreshSingleImportContext();
+  renderInstanceList();
+  // 选中对象即切到对象视图，保证用户看到的就是该对象的元数据 / 实例列表 / 导入入口
+  setIngestTab('object');
 }
 
 // ---- 1.2 单对象导入卡片：选中对象后才出现导入操作 ----
@@ -1492,10 +1839,22 @@ function downloadIngestTemplate() {
 
 function markTouched(id) { const el = $(id); if (el) el.dataset.touched = '1'; }
 
+// 属性约束摘要（只读视图"约束"列）：必填 + 长度/正则/取值范围/枚举
+function constraintSummary(a) {
+  const c = a.constraints || {};
+  const parts = [];
+  if (a.required) parts.push('<span class="text-red-400">必填</span>');
+  if (c.min_length != null || c.max_length != null) parts.push(esc('长度 ' + (c.min_length != null ? c.min_length : '?') + '–' + (c.max_length != null ? c.max_length : '?')));
+  if (c.pattern) parts.push(esc('正则 ' + c.pattern));
+  if (c.minimum != null || c.maximum != null) parts.push(esc('取值 [' + (c.minimum != null ? c.minimum : '−∞') + ', ' + (c.maximum != null ? c.maximum : '+∞') + ']'));
+  if (c.enum && c.enum.length) parts.push(esc('枚举 ' + c.enum.join('/')));
+  return parts.length ? parts.join(' · ') : '<span class="text-slate-600">—</span>';
+}
+
 function renderIngestObjectMeta(obj) {
   setObjectMetaActions(false);
   if (!obj) { $('ingestObjectMeta').innerHTML = '<div class="text-sm text-slate-400">点击左侧任意对象查看属性、关系与约束。</div>'; return; }
-  const attrs = (obj.attributes || []).map(a => '<tr><td class="border border-slate-700 p-1">' + esc(a.id) + '</td><td class="border border-slate-700 p-1">' + esc(a.name || '-') + '</td><td class="border border-slate-700 p-1">' + esc(a.data_type || 'string') + '</td><td class="border border-slate-700 p-1">' + (a.required ? '<span class="text-red-400">必填</span>' : '') + '</td></tr>').join('');
+  const attrs = (obj.attributes || []).map(a => '<tr><td class="border border-slate-700 p-1">' + esc(a.id) + '</td><td class="border border-slate-700 p-1">' + esc(a.name || '-') + '</td><td class="border border-slate-700 p-1">' + esc(a.data_type || 'string') + '</td><td class="border border-slate-700 p-1">' + constraintSummary(a) + '</td></tr>').join('');
   const rels = (obj.relations || []).length ? '<table class="w-full text-xs border-collapse mt-2"><thead><tr><th class="border border-slate-700 p-1 text-left">关系 ID</th><th class="border border-slate-700 p-1 text-left">名称</th><th class="border border-slate-700 p-1 text-left">目标对象</th><th class="border border-slate-700 p-1 text-left">基数</th></tr></thead><tbody>' + (obj.relations || []).map(r => '<tr><td class="border border-slate-700 p-1">' + esc(r.id) + '</td><td class="border border-slate-700 p-1">' + esc(r.name || '-') + '</td><td class="border border-slate-700 p-1">' + esc(r.target_object) + '</td><td class="border border-slate-700 p-1">' + esc(r.cardinality || 'N:1') + '</td></tr>').join('') + '</tbody></table>' : '<div class="text-xs text-slate-600 mt-2">无关系定义</div>';
   $('ingestObjectMeta').innerHTML = '<div class="mb-2"><strong class="text-slate-200">' + esc(obj.name || obj.id) + '</strong> <span class="text-slate-500">(' + esc(obj.id) + ')</span></div>' +
     '<div class="text-xs text-slate-400 mb-2">' + esc(obj.description || '暂无描述') + '</div>' +
@@ -1527,9 +1886,52 @@ function cancelEditObjectMeta() {
   setObjectMetaActions(false);
 }
 
+// 归化页对象编辑：属性约束录入行（折叠，输入始终在 DOM 中）
+function ecConstraintRowHtml(a, i) {
+  const c = a.constraints || {};
+  const v = k => esc(c[k] != null ? String(c[k]) : '');
+  return '<div class="ec-constraints p-1" data-eidx="' + i + '" style="display:none">' +
+    '<div class="text-[10px] text-slate-500 mb-1">属性约束（可选）：长度/正则用于 string；最小/最大值用于 integer/float；枚举值须与数据类型匹配，逗号分隔</div>' +
+    '<div class="grid grid-cols-12 gap-2">' +
+      '<div class="col-span-2"><label class="text-[10px] text-slate-500">最小长度</label><input class="w-full ec-c-minlen" data-eidx="' + i + '" value="' + v('min_length') + '" /></div>' +
+      '<div class="col-span-2"><label class="text-[10px] text-slate-500">最大长度</label><input class="w-full ec-c-maxlen" data-eidx="' + i + '" value="' + v('max_length') + '" /></div>' +
+      '<div class="col-span-4"><label class="text-[10px] text-slate-500">正则 pattern</label><input class="w-full ec-c-pattern" data-eidx="' + i + '" value="' + v('pattern') + '" /></div>' +
+      '<div class="col-span-2"><label class="text-[10px] text-slate-500">最小值</label><input class="w-full ec-c-min" data-eidx="' + i + '" value="' + v('minimum') + '" /></div>' +
+      '<div class="col-span-2"><label class="text-[10px] text-slate-500">最大值</label><input class="w-full ec-c-max" data-eidx="' + i + '" value="' + v('maximum') + '" /></div>' +
+    '</div>' +
+    '<div class="mt-1"><label class="text-[10px] text-slate-500">枚举值（逗号分隔）</label><input class="w-full ec-c-enum" data-eidx="' + i + '" value="' + (c.enum ? esc(c.enum.join(', ')) : '') + '" /></div>' +
+  '</div>';
+}
+
+function toggleEcConstraints(i) {
+  const row = $('ingestObjectMeta').querySelector('.ec-constraints[data-eidx="' + i + '"]');
+  if (row) row.style.display = (row.style.display === 'none' || !row.style.display) ? 'block' : 'none';
+}
+
+function collectEcConstraints(i) {
+  const box = $('ingestObjectMeta');
+  const q = cls => { const el = box.querySelector('.' + cls + '[data-eidx="' + i + '"]'); return el ? el.value.trim() : ''; };
+  const c = {};
+  const mn = parseInt(q('ec-c-minlen'), 10); if (!isNaN(mn)) c.min_length = mn;
+  const mx = parseInt(q('ec-c-maxlen'), 10); if (!isNaN(mx)) c.max_length = mx;
+  const pat = q('ec-c-pattern'); if (pat) c.pattern = pat;
+  const vmin = parseFloat(q('ec-c-min')); if (!isNaN(vmin)) c.minimum = vmin;
+  const vmax = parseFloat(q('ec-c-max')); if (!isNaN(vmax)) c.maximum = vmax;
+  const en = q('ec-c-enum');
+  if (en) {
+    const dtEl = $('edit_attr_type_' + i);
+    const dt = dtEl ? dtEl.value : 'string';
+    c.enum = en.split(/[,，]/).map(s => s.trim()).filter(Boolean).map(s =>
+      (dt === 'integer' && /^-?\d+$/.test(s)) ? parseInt(s, 10) :
+      (dt === 'float' && /^-?\d*\.?\d+$/.test(s)) ? parseFloat(s) : s);
+  }
+  return c;
+}
+
 function renderIngestObjectEditor(obj) {
-  const attrRows = (obj.attributes || []).map((a, i) =>
-    '<tr>' +
+  const attrRows = (obj.attributes || []).map((a, i) => {
+    const hasC = a.constraints && Object.keys(a.constraints).length > 0;
+    return '<tr>' +
       '<td class="border border-slate-700 p-1"><input class="w-full text-xs" id="edit_attr_id_' + i + '" value="' + esc(a.id) + '" /></td>' +
       '<td class="border border-slate-700 p-1"><input class="w-full text-xs" id="edit_attr_name_' + i + '" value="' + esc(a.name || '') + '" /></td>' +
       '<td class="border border-slate-700 p-1">' +
@@ -1542,8 +1944,11 @@ function renderIngestObjectEditor(obj) {
         '</select>' +
       '</td>' +
       '<td class="border border-slate-700 p-1 text-center"><input type="checkbox" id="edit_attr_required_' + i + '" ' + (a.required ? 'checked' : '') + ' /></td>' +
+      '<td class="border border-slate-700 p-1 text-center"><span class="cursor-pointer text-sky-400 text-xs hover:underline" onclick="toggleEcConstraints(' + i + ')">约束' + (hasC ? ' <span class="text-amber-400">●</span>' : '') + '</span></td>' +
       '<td class="border border-slate-700 p-1"><button class="btn secondary text-xs" onclick="removeEditAttr(' + i + ')">删</button></td>' +
-    '</tr>').join('');
+    '</tr>' +
+    '<tr class="bg-slate-900/30"><td colspan="6" class="border border-slate-700 p-0">' + ecConstraintRowHtml(a, i) + '</td></tr>';
+  }).join('');
 
   const relRows = (obj.relations || []).map((r, i) =>
     '<tr>' +
@@ -1557,14 +1962,27 @@ function renderIngestObjectEditor(obj) {
   const html = '<div class="mb-2"><label class="text-xs text-slate-500">对象名称</label><input id="edit_obj_name" class="w-full" value="' + esc(obj.name || '') + '" /></div>' +
     '<div class="mb-2"><label class="text-xs text-slate-500">描述</label><textarea id="edit_obj_desc" rows="2" class="w-full text-xs">' + esc(obj.description || '') + '</textarea></div>' +
     '<div class="flex justify-between items-center mb-1 mt-3"><strong class="text-sm text-slate-300">属性</strong><button class="btn secondary text-xs" onclick="addEditAttr()">+ 属性</button></div>' +
-    '<table class="w-full text-xs border-collapse"><thead><tr><th class="border border-slate-700 p-1 text-left">ID</th><th class="border border-slate-700 p-1 text-left">名称</th><th class="border border-slate-700 p-1 text-left">类型</th><th class="border border-slate-700 p-1 text-center">必填</th><th class="border border-slate-700 p-1"></th></tr></thead><tbody>' + attrRows + '</tbody></table>' +
+    '<table class="w-full text-xs border-collapse"><thead><tr><th class="border border-slate-700 p-1 text-left">ID</th><th class="border border-slate-700 p-1 text-left">名称</th><th class="border border-slate-700 p-1 text-left">类型</th><th class="border border-slate-700 p-1 text-center">必填</th><th class="border border-slate-700 p-1 text-center">约束</th><th class="border border-slate-700 p-1"></th></tr></thead><tbody>' + attrRows + '</tbody></table>' +
     '<div class="flex justify-between items-center mb-1 mt-3"><strong class="text-sm text-slate-300">关系</strong><button class="btn secondary text-xs" onclick="addEditRel()">+ 关系</button></div>' +
-    '<table class="w-full text-xs border-collapse"><thead><tr><th class="border border-slate-700 p-1 text-left">ID</th><th class="border border-slate-700 p-1 text-left">名称</th><th class="border border-slate-700 p-1 text-left">目标对象</th><th class="border border-slate-700 p-1 text-left">基数</th><th class="border border-slate-700 p-1"></th></tr></thead><tbody>' + relRows + '</tbody></table>';
+    '<table class="w-full text-xs border-collapse"><thead><tr><th class="border border-slate-700 p-1 text-left">ID</th><th class="border border-slate-700 p-1 text-left">名称</th><th class="border border-slate-700 p-1 text-left">目标对象</th><th class="border border-slate-700 p-1 text-left">基数</th><th class="border border-slate-700 p-1"></th></tr></thead><tbody>' + relRows + '</tbody></table>' +
+    // 底部保存入口：属性多/约束折叠区长时，无需回到卡片顶部找「保存」确认
+    '<div class="flex gap-2 items-center mt-3"><button class="btn success text-xs" onclick="saveObjectMeta()">保存</button><span class="text-[10px] text-slate-500">修改属性/约束后须点保存才会生效</span></div>';
   $('ingestObjectMeta').innerHTML = html;
+}
+
+// 结构操作（增删属性/关系）会整体重渲染编辑器，约束输入框按 clone 旧值回填——
+// 若 DOM 中已有未保存的录入值会被静默冲掉（"约束已更新"不名符其实）。
+// 故任何重渲染前先把 DOM 约束值回写 clone。
+function syncEcConstraintsToClone() {
+  if (!editingObjectClone) return;
+  (editingObjectClone.attributes || []).forEach((a, i) => {
+    a.constraints = collectEcConstraints(i);
+  });
 }
 
 function addEditAttr() {
   if (!editingObjectClone) return;
+  syncEcConstraintsToClone();
   editingObjectClone.attributes = editingObjectClone.attributes || [];
   editingObjectClone.attributes.push({ id: 'attr_new_' + editingObjectClone.attributes.length, name: '', data_type: 'string', required: false, constraints: {} });
   renderIngestObjectEditor(editingObjectClone);
@@ -1572,12 +1990,14 @@ function addEditAttr() {
 
 function removeEditAttr(i) {
   if (!editingObjectClone) return;
+  syncEcConstraintsToClone();
   editingObjectClone.attributes.splice(i, 1);
   renderIngestObjectEditor(editingObjectClone);
 }
 
 function addEditRel() {
   if (!editingObjectClone) return;
+  syncEcConstraintsToClone();
   editingObjectClone.relations = editingObjectClone.relations || [];
   editingObjectClone.relations.push({ id: 'rel_new_' + editingObjectClone.relations.length, name: '', target_object: '', cardinality: 'N:1' });
   renderIngestObjectEditor(editingObjectClone);
@@ -1585,6 +2005,7 @@ function addEditRel() {
 
 function removeEditRel(i) {
   if (!editingObjectClone) return;
+  syncEcConstraintsToClone();
   editingObjectClone.relations.splice(i, 1);
   renderIngestObjectEditor(editingObjectClone);
 }
@@ -1600,7 +2021,8 @@ function collectEditedObject() {
       name: $('edit_attr_name_' + i).value.trim() || id,
       data_type: $('edit_attr_type_' + i).value,
       required: $('edit_attr_required_' + i).checked,
-      constraints: (editingObjectClone.attributes[i].constraints) || {},
+      // 从约束录入行读回（不再恒透传 clone 旧值），让"对象约束已更新"名副其实
+      constraints: collectEcConstraints(i),
     });
   }
   const rels = [];
@@ -1803,6 +2225,7 @@ async function loadCandidates() {
     const j = await api(url);
     state.candidates = j.data.items || [];
     renderCandidateTable();
+    updateIngestTabBadges();
   } catch (e) { toast('加载候选失败: ' + e.message, 'err'); }
 }
 
@@ -2058,56 +2481,143 @@ async function deleteReviewInstance(idx) {
   } catch (e) { toast('删除失败: ' + e.message, 'err'); }
 }
 
+// 实例统一取「本体全局缓存」：左侧树各对象实例数、关系血缘、对象视图列表、全部实例列表
+// 都从同一份全量数据本地过滤。旧实现按选中对象请求会丢全量数据，导致树计数失真、
+// 跨对象血缘查不到实例；现在一次拉全，切换对象/搜索/过滤零请求
 async function loadInstances() {
   const ontologyId = $('ingestOntology').value;
-  const objectType = state.selectedIngestObject?.id || '';
-  let url = '/api/ingest/instances?ontology_id=' + encodeURIComponent(ontologyId);
-  if (objectType) url += '&object_type=' + encodeURIComponent(objectType);
+  if (!ontologyId) {
+    state.instances = [];
+    renderIngestTarget(); renderInstanceList(); renderAllInstanceList(); updateIngestTabBadges();
+    return;
+  }
   try {
-    const j = await api(url);
+    // 后端 pageSize 上限 200（le=200）
+    const j = await api('/api/ingest/instances?ontology_id=' + encodeURIComponent(ontologyId) + '&pageSize=200');
     state.instances = j.data.items || [];
+    // 若详情弹层正开着，刷新其指向为最新记录
+    if (state.selectedInstance) {
+      const cur = state.instances.find(x => x.id === state.selectedInstance.id);
+      if (cur) state.selectedInstance = cur;
+    }
     renderIngestTarget();
     renderInstanceList();
+    renderAllInstanceList();
+    updateIngestTabBadges();
   } catch (e) { toast('加载实例失败: ' + e.message, 'err'); }
 }
 
-// ---- 1.1 独立实例列表区（静态信息下方，点击行可编辑） ----
+// 对象视图：当前选中对象的实例列表（从全局缓存过滤，切换对象即时刷新）
 function renderInstanceList() {
   const el = $('instanceList');
   if (!el) return;
   const countEl = $('instanceCount');
-  const list = state.instances || [];
-  const scope = state.selectedIngestObject ? '「' + (state.selectedIngestObject.name || state.selectedIngestObject.id) + '」' : '全部对象';
+  const obj = state.selectedIngestObject;
+  const list = (state.instances || []).filter(it => !obj || it.object_type === obj.id);
+  const scope = obj ? '「' + (obj.name || obj.id) + '」' : '全部对象';
   if (countEl) countEl.textContent = scope + ' 共 ' + list.length + ' 条';
   if (!list.length) {
-    el.innerHTML = '<div class="text-sm text-slate-500">暂无已入库实例。选中左侧对象后使用「导入 / 添加实例」，或使用上方「多对象批量导入」。</div>';
+    if (!(state.ontologies || []).length) {
+      el.innerHTML = '<div class="text-sm text-slate-500">当前项目暂无本体，因此没有已入库实例。请先在「建模」页创建本体，或切换其他项目。</div>';
+    } else if (!obj) {
+      el.innerHTML = '<div class="text-sm text-slate-500">请先在左侧树中选择一个对象，此处展示该对象已入库的实例。</div>';
+    } else {
+      el.innerHTML = '<div class="text-sm text-slate-500">对象「' + esc(obj.name || obj.id) + '」暂无已入库实例。使用下方「导入 / 添加实例」上传文件或粘贴记录，或到「导入与审核」页做多对象批量导入。</div>';
+    }
     return;
   }
-  el.innerHTML = list.map(inst => {
-    const data = inst.instance || inst.props || inst;
-    const preview = Object.entries(data)
-      .filter(([k]) => !String(k).startsWith('_'))
-      .slice(0, 5)
-      .map(([k, v]) => esc(k) + '=' + esc(typeof v === 'object' ? JSON.stringify(v) : v))
-      .join('　');
-    const active = state.selectedInstance?.id === inst.id ? 'border-amber-500/60 bg-slate-800/60' : 'border-slate-700/50 hover:border-slate-600';
-    return '<div class="p-2 rounded-lg border ' + active + ' cursor-pointer" onclick="selectInstance(' + JSON.stringify(inst).replace(/"/g, '&quot;') + ')">' +
-      '<div class="flex justify-between"><span class="text-sm font-medium">' + esc(inst.object_type || '') + '</span><span class="text-xs text-slate-500">' + esc((inst.id || inst.node_id || '').slice(0, 16)) + '</span></div>' +
-      '<div class="text-xs text-slate-400 mt-1 truncate">' + preview + '</div></div>';
-  }).join('');
+  el.innerHTML = list.map(inst => _instanceRowHtml(inst, false)).join('');
+}
+
+// 全部实例 tab：全局列表 + 关键字搜索 + 对象类型过滤
+function renderAllInstanceList() {
+  const el = $('allInstanceList');
+  if (!el) return;
+  const countEl = $('allInstanceCount');
+  const sel = $('allInstanceFilter');
+  // 对象过滤下拉与当前本体的对象集合同步（本体切换后自动重置为全部）
+  if (sel) {
+    const ont = state.ontologies.find(o => o.id === $('ingestOntology').value);
+    const objs = ont ? (ont.objects || []) : [];
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">全部对象</option>' +
+      objs.map(o => '<option value="' + esc(o.id) + '">' + esc(o.name || o.id) + '</option>').join('');
+    if (cur && objs.some(o => o.id === cur)) sel.value = cur;
+    else { sel.value = ''; state.allInstanceObjectFilter = ''; }
+  }
+  const q = (state.allInstanceQ || '').trim().toLowerCase();
+  const objF = state.allInstanceObjectFilter || '';
+  const list = (state.instances || []).filter(it => {
+    if (objF && it.object_type !== objF) return false;
+    if (!q) return true;
+    const hay = JSON.stringify({ id: it.id || it.node_id, t: it.object_type, d: it.instance || it.props || it }).toLowerCase();
+    return hay.includes(q);
+  });
+  if (countEl) countEl.textContent = '共 ' + list.length + ' / ' + (state.instances || []).length + ' 条';
+  if (!list.length) {
+    el.innerHTML = '<div class="text-sm text-slate-500">' + ((state.instances || []).length
+      ? '没有符合搜索 / 过滤条件的实例。'
+      : '当前本体暂无已入库实例，先到「导入与审核」页上传数据。') + '</div>';
+    return;
+  }
+  el.innerHTML = list.map(inst => _instanceRowHtml(inst, true)).join('');
+}
+
+// 实例行（对象视图 / 全部实例共用）；global 模式下额外显示对象类型，避免混淆
+function _instanceRowHtml(inst, global) {
+  const data = inst.instance || inst.props || inst;
+  const preview = Object.entries(data)
+    .filter(([k]) => !String(k).startsWith('_'))
+    .slice(0, 5)
+    .map(([k, v]) => esc(k) + '=' + esc(typeof v === 'object' ? JSON.stringify(v) : v))
+    .join('　');
+  const active = state.selectedInstance?.id === inst.id ? 'border-amber-500/60 bg-slate-800/60' : 'border-slate-700/50 hover:border-slate-600';
+  return '<div class="p-2 rounded-lg border ' + active + ' cursor-pointer" onclick="selectInstance(' + JSON.stringify(inst).replace(/"/g, '&quot;') + ')">' +
+    '<div class="flex justify-between items-center"><span class="text-sm font-medium">' + esc(data.name || data.title || inst.id || inst.node_id || '') + (global ? ' <span class="badge">' + esc(inst.object_type || '') + '</span>' : '') + '</span>' +
+    '<span class="text-xs text-slate-500">' + esc((inst.id || inst.node_id || '').slice(0, 16)) + '</span></div>' +
+    '<div class="text-xs text-slate-400 mt-1 truncate">' + preview + '</div></div>';
+}
+
+// 实例详情弹层：懒创建一次，供左树节点 / 对象视图列表 / 全部实例列表三处入口共用。
+// 旧版是页面底部内联面板 + scrollIntoView，点击实例会把浏览位置带到页面底，
+// 且与全局卡片混排；改为弹层后列表上下文保持不动，看完即关
+function _ensureInstanceModal() {
+  let m = $('instanceModal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'instanceModal';
+    m.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden';
+    m.innerHTML =
+      '<div class="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[720px] max-w-[95vw] max-h-[88vh] flex flex-col">' +
+      '  <div class="flex justify-between items-start p-4 border-b border-slate-800">' +
+      '    <div><h3 id="instanceModalTitle" class="font-medium"></h3>' +
+      '    <div id="instanceModalMeta" class="text-xs text-slate-500 mt-1"></div></div>' +
+      '    <button class="btn secondary text-xs" onclick="closeInstanceDetail()">关闭 ✕</button>' +
+      '  </div>' +
+      '  <div id="instanceDetailBody" class="p-4 overflow-y-auto space-y-3"></div>' +
+      '  <div class="flex gap-2 p-4 border-t border-slate-800 justify-end">' +
+      '    <button class="btn" style="background:#991b1b" onclick="deleteInstance()">删除</button>' +
+      '    <button class="btn secondary" onclick="closeInstanceDetail()">关闭</button>' +
+      '    <button class="btn success" onclick="saveInstanceEdit()">保存</button>' +
+      '  </div>' +
+      '</div>';
+    document.body.appendChild(m);
+    m.addEventListener('click', e => { if (e.target === m) closeInstanceDetail(); });
+  }
+  return m;
 }
 
 function renderInstanceDetail(inst) {
-  const panel = $('instanceDetailPanel');
-  const body = $('instanceDetailBody');
-  const meta = $('instanceDetailMeta');
-  panel.classList.remove('hidden');
+  _ensureInstanceModal().classList.remove('hidden');
   state.selectedInstance = inst;
   const data = inst.instance || inst.props || inst;
   const ontology = state.ontologies.find(o => o.id === inst.ontology_id) || {};
   const objDef = (ontology.objects || []).find(o => o.id === inst.object_type) || {};
 
-  meta.textContent = (inst.id || inst.node_id || '') + ' · ' + (inst.object_type || '');
+  $('instanceModalTitle').innerHTML = esc(data.name || data.title || inst.id || inst.node_id || '实例详情') +
+    ' <span class="badge">' + esc(inst.object_type || '') + '</span>';
+  $('instanceModalMeta').textContent = (inst.id || inst.node_id || '') + ' · ' + (inst.object_type || '') +
+    (inst.imported_at ? ' · 入库 ' + inst.imported_at : '');
 
   let html = '';
 
@@ -2126,8 +2636,7 @@ function renderInstanceDetail(inst) {
 
   // 关系血缘
   html += renderLineage(inst, objDef, ontology);
-  body.innerHTML = html;
-  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  $('instanceDetailBody').innerHTML = html;
 }
 
 function renderSourceLineage(inst) {
@@ -2232,9 +2741,11 @@ function renderLineage(inst, objDef, ontology) {
 
 function closeInstanceDetail() {
   state.selectedInstance = null;
-  const panel = $('instanceDetailPanel');
-  if (panel) panel.classList.add('hidden');
+  const m = $('instanceModal');
+  if (m) m.classList.add('hidden');
   renderIngestTarget();
+  renderInstanceList();
+  renderAllInstanceList();
 }
 
 function showModal(title, content, opts) {
@@ -2447,20 +2958,24 @@ function setGraphTab(t) {
   state.graphTab = t;
   $('tabSchema').classList.toggle('bg-slate-700', t === 'schema');
   $('tabKnowledge').classList.toggle('bg-slate-700', t === 'knowledge');
+  if ($('tabTree')) $('tabTree').classList.toggle('bg-slate-700', t === 'tree');
   loadGraph();
 }
 
 async function loadGraph() {
   const id = $('graphOntology').value;
   if (!id) {
-    $('graphContainer').innerHTML = '<div class="p-8 text-center text-slate-500">当前项目下暂无本体，请先在「建模」页创建或切换到包含本体的项目。</div>';
+    $('graphContainer').innerHTML = '<div class="p-8 text-center text-slate-500">当前项目下暂无本体，请先在「建模」页创建，或切换到包含本体的项目。</div>';
     return;
   }
   try {
-    const j = await api('/api/graph/' + id + '?mode=' + state.graphTab);
+    // 类树视图取 schema 数据（节点含 parent 字段），在前端按继承关系构树
+    const mode = state.graphTab === 'tree' ? 'schema' : state.graphTab;
+    const j = await api('/api/graph/' + id + '?mode=' + mode);
     const o = state.ontologies.find(x => x.id === id);
     if (o) state.currentOntology = o;
-    drawGraph(j.data);
+    if (state.graphTab === 'tree') drawTree(j.data);
+    else drawGraph(j.data);
   } catch (e) { toast('加载图谱失败: ' + e.message, 'err'); }
 }
 
@@ -2540,19 +3055,125 @@ function drawGraph(data) {
   node.append('text').attr('dy', 4).attr('text-anchor', 'middle').text(d => d.label || d.name || d.id).attr('font-size', 11).attr('fill', '#fff');
 
   const tip = $('graphTooltip');
+  // tooltip 是容器（position:relative）内的 absolute 定位，必须用相对容器坐标；
+  // pageX/pageY 是文档级坐标（含页头/标签栏高度），直接写入会偏移几百像素
+  const moveTip = e => {
+    const rect = container.getBoundingClientRect();
+    tip.style.left = (e.clientX - rect.left + 12) + 'px';
+    tip.style.top = (e.clientY - rect.top + 12) + 'px';
+  };
   node.on('mouseover', (e, d) => {
     tip.style.opacity = 1;
     const k = nodeKind(d);
-    tip.innerHTML = '<strong>' + esc(d.label || d.name || d.id) + '</strong><br/>type: ' + k + (d.source ? '<br/>source: ' + d.source : '') + (d.object_type ? '<br/>object_type: ' + esc(d.object_type) : '');
-    tip.style.left = (e.pageX + 10) + 'px';
-    tip.style.top = (e.pageY + 10) + 'px';
-  }).on('mouseout', () => tip.style.opacity = 0);
+    tip.innerHTML = '<strong>' + esc(d.label || d.name || d.id) + '</strong><br/>type: ' + k + (d.source ? '<br/>source: ' + esc(d.source.id || d.source) : '') + (d.object_type ? '<br/>object_type: ' + esc(d.object_type) : '');
+    moveTip(e);
+  }).on('mousemove', moveTip)
+    .on('mouseout', () => tip.style.opacity = 0);
 
   simulation.on('tick', () => {
     link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
     linkLabel.attr('x', d => (d.source.x + d.target.x) / 2).attr('y', d => (d.source.y + d.target.y) / 2);
     node.attr('transform', d => 'translate(' + d.x + ',' + d.y + ')');
   });
+}
+
+// 类树视图：按对象 parent（RDFS.subClassOf 继承）把对象折叠成树，点击节点展开/折叠。
+// 数据来自 schema 图（节点含 parent 字段）；父不在本图谱节点集内（缺失占位/外部引用）的按根处理。
+function drawTree(data) {
+  const container = $('graphContainer');
+  const width = container.clientWidth;
+  const height = container.clientHeight || 500;
+  container.innerHTML = '<div class="graph-tooltip" id="graphTooltip"></div>';
+  const nodes = (data.nodes || []).filter(n => (n.kind || n.type) === 'object');
+  if (!nodes.length) {
+    container.innerHTML = '<div class="p-8 text-center text-slate-500">该本体暂无对象，无法生成类树。请先在「建模」页创建对象。</div>';
+    return;
+  }
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const children = new Map();
+  const roots = [];
+  for (const n of nodes) {
+    if (n.parent && n.parent !== n.id && byId.has(n.parent)) {
+      if (!children.has(n.parent)) children.set(n.parent, []);
+      children.get(n.parent).push(n);
+    } else {
+      roots.push(n);
+    }
+  }
+  // 多棵树挂到虚拟根下，共用一次 d3.tree 布局。
+  // d.data 恒为原始节点本身（浅拷贝补 children），渲染统一读 d.data.id/label/kind；
+  // children 须【递归】挂载——只挂根层会让深度 >=3 的节点（孙辈）整体丢失。
+  const toHier = n => {
+    const kids = children.get(n.id) || [];
+    return { ...n, children: kids.length ? kids.map(toHier) : undefined };
+  };
+  const rootData = { id: '__root__', label: '', kind: 'virtual', children: (roots.length ? roots : [nodes[0]]).map(toHier) };
+  const root = d3.hierarchy(rootData);
+  // 默认展开 2 层，更深层级折叠（点节点展开），避免深树铺满画布
+  root.descendants().forEach(d => {
+    if (d.depth > 2 && d.children) { d._children = d.children; d.children = null; }
+  });
+
+  const layout = d3.tree().nodeSize([28, 230]); // [垂直间距, 深度间距]（横向树）
+  const svg = d3.select('#graphContainer').append('svg').attr('width', width).attr('height', height);
+  const g = svg.append('g').attr('transform', 'translate(90,16)');
+  const tip = $('graphTooltip');
+
+  function update() {
+    layout(root);
+    const desc = root.descendants();
+    const links = root.links();
+    g.selectAll('*').remove();
+    g.selectAll('path').data(links).enter().append('path')
+      .attr('fill', 'none')
+      .attr('stroke', '#475569')
+      .attr('stroke-width', 1.5)
+      .attr('d', d3.linkHorizontal().x(d => d.y).y(d => d.x));
+    const nodeG = g.selectAll('g.tree-node').data(desc, d => d.data.id).enter().append('g')
+      .attr('class', 'tree-node')
+      .attr('transform', d => 'translate(' + d.y + ',' + d.x + ')')
+      .style('cursor', d => d.data.kind === 'virtual' ? 'default' : 'pointer')
+      .on('click', (event, d) => {
+        if (d.data.kind === 'virtual') return;
+        if (d.children) { d._children = d.children; d.children = null; }
+        else if (d._children) { d.children = d._children; d._children = null; }
+        update();
+      })
+      .on('mousemove', (event, d) => {
+        if (d.data.kind === 'virtual') return;
+        const n = d.data;
+        const kids = d.children || d._children || [];
+        tip.style.opacity = 1;
+        tip.innerHTML = '<strong>' + esc(n.label || n.id) + '</strong><br/>' + esc(n.id) +
+          (n.missing ? '<br/><span style="color:#fbbf24">被引用但未在当前本体定义</span>' : '') +
+          '<br/>子对象: ' + (kids.length ? kids.map(k => esc(k.data.label || k.data.id)).join(', ') : '无') +
+          '<br/><span style="color:#64748b">点击展开 / 折叠</span>';
+        // 同知识图谱：tooltip 相对容器定位，须用 clientX/Y 减去容器 rect，不能用 pageX/pageY
+        const rect = container.getBoundingClientRect();
+        tip.style.left = (event.clientX - rect.left + 12) + 'px';
+        tip.style.top = (event.clientY - rect.top + 10) + 'px';
+      })
+      .on('mouseout', () => { tip.style.opacity = 0; });
+    nodeG.each(function(d) {
+      const el = d3.select(this);
+      if (d.data.kind === 'virtual') return;
+      const missing = !!d.data.missing;
+      el.append('rect')
+        .attr('x', -7).attr('y', -12).attr('width', 14).attr('height', 24).attr('rx', 3)
+        .attr('fill', missing ? '#1e293b' : '#0f172a')
+        .attr('stroke', missing ? '#fbbf24' : '#38bdf8')
+        .attr('stroke-dasharray', missing ? '3,2' : null)
+        .attr('stroke-width', 1.5);
+      if (d._children) el.append('circle').attr('cx', 11).attr('cy', -12).attr('r', 3.5).attr('fill', '#38bdf8');
+      el.append('text')
+        .attr('x', 18).attr('dy', '0.32em')
+        .attr('fill', missing ? '#94a3b8' : '#e2e8f0')
+        .attr('font-size', 12)
+        .text((d.data.label || d.data.id) + (d._children ? ' +' + d._children.length : ''));
+    });
+  }
+  update();
+  svg.call(d3.zoom().scaleExtent([0.25, 3]).on('zoom', e => g.attr('transform', e.transform)));
 }
 
 // ---- 两行式下拉（业务友好）：主行=语义 label，次行小字=id ----

@@ -43,7 +43,8 @@ if (-not $SkipJena) {
     $jenaJar = Get-ChildItem -Path "$DEPS\apache-jena-fuseki-*" -Include "fuseki-server.jar","jena-fuseki-server-*.jar" -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\lib\\' } | Select-Object -First 1
     $jenaConfig = "$ROOT\backend\fuseki-config.ttl"
     if ($jenaJar) {
-        $jenaBase = $jenaJar.Directory.Parent.FullName
+        # jar 所在目录即发行根目录（内含 webapp/），取 Parent 会导致 Jena 找不到 webapp 而启动失败
+        $jenaBase = $jenaJar.Directory.FullName
         Write-Host "启动 Jena/Fuseki: $jenaBase" -ForegroundColor Cyan
         $env:FUSEKI_BASE = "$jenaBase\run"
         if (Test-Path $jenaConfig) {

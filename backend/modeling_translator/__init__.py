@@ -111,7 +111,10 @@ def _build_shapes(g: Graph, objects, obj_by_id, ontology) -> None:
             g.add((prop, RDFS.range, _xsd_for(attr.get("data_type", "string"))))
             g.add((prop, RDFS.label, Literal(attr.get("name", attr["id"]))))
 
-            ps = URIRef(BASE + _local(attr["id"]) + "PS")
+            # PS URI 必须按对象隔离：同一属性 ID 允许跨对象复用（共享词汇），
+            # 但各对象的约束（enum/长度/必填/类型）须各自成形状；若 PS 全局唯一，
+            # 多对象的约束会叠加到同一节点（如多条 sh:in）→ 形状图非法、实例一律无法入库
+            ps = URIRef(BASE + _local(o["id"]) + "_" + _local(attr["id"]) + "PS")
             g.add((node_shape, SH.property, ps))
             g.add((ps, SH.path, prop))
             g.add((ps, SH.datatype, _xsd_for(attr.get("data_type", "string"))))
@@ -129,7 +132,7 @@ def _build_shapes(g: Graph, objects, obj_by_id, ontology) -> None:
             if c.get("maximum") is not None:
                 g.add((ps, SH.maxInclusive, Literal(float(c["maximum"]))))
             if c.get("enum"):
-                _add_sh_in(g, ps, c["enum"])
+                _add_sh_in(g, ps, c["enum"], attr.get("data_type", "string"))
 
         for rel in o.get("relations", []):
             prop = URIRef(BASE + _local(rel["id"]))
@@ -145,7 +148,8 @@ def _build_shapes(g: Graph, objects, obj_by_id, ontology) -> None:
                 g.add((inv, RDFS.label, Literal(rel["inverse_name"])))
                 g.add((prop, OWL.inverseOf, inv))
 
-            ps = URIRef(BASE + _local(rel["id"]) + "PS")
+            # 同属性形状：关系 PS 也按对象隔离（关系 ID 跨对象复用时约束不得合并）
+            ps = URIRef(BASE + _local(o["id"]) + "_" + _local(rel["id"]) + "PS")
             g.add((node_shape, SH.property, ps))
             g.add((ps, SH.path, prop))
             if tgt:
@@ -165,16 +169,55 @@ def _build_shapes(g: Graph, objects, obj_by_id, ontology) -> None:
                 g.add((shape_lit, SH["datatype"], sk_dt))
                 g.add((list1, RDF.rest, RDF.nil))
 
-    # 全局约束（仅处理 unique 规则）
+    # 全局约束（仅处理 unique 规则）：编译为标准 SHACL sh:uniqueKey ( attr1 attr2 ... )
+    # （pyshacl/Fuseki 原生支持，实例级唯一性校验真正生效；支持 params.attribute 或 params.attributes）
     for cst in ontology.get("constraints", []):
         if cst.get("rule") == "unique" and cst.get("scope") in obj_by_id:
             node_shape = URIRef(BASE + _local(cst["scope"]) + "Shape")
-            attr_local = cst.get("params", {}).get("attribute")
-            if attr_local:
-                ps = URIRef(BASE + _local(attr_local) + "UniquePS")
-                g.add((node_shape, SH.property, ps))
-                g.add((ps, SH.path, URIRef(BASE + _local(attr_local))))
-                g.add((ps, URIRef(str(SH) + "unique"), Literal(True)))
+            uniq_attrs = cst.get("params", {}).get("attributes")
+            if not uniq_attrs:
+                attr_local = cst.get("params", {}).get("attribute")
+                uniq_attrs = [attr_local] if attr_local else []
+            if uniq_attrs:
+                head = BNode()
+                g.add((node_shape, URIRef(str(SH) + "uniqueKey"), head))
+                prev = head
+                for i, al in enumerate(uniq_attrs):
+                    g.add((prev, RDF.first, URIRef(BASE + _local(al))))
+                    rest = RDF.nil if i == len(uniq_attrs) - 1 else BNode()
+                    g.add((prev, RDF.rest, rest))
+                    prev = rest
+
+    assert_shapes_well_formed(g)
+
+
+# SHACL 单值约束谓词：同一主体上每个谓词出度最多 1（SHACL 规范中约束组件均为单值定义）。
+# 若同一形状节点叠加了多值（如同一 PS 两条 sh:in），形状图非法、引擎直接拒绝执行（所有实例无法入库），
+# 必须在生成期自检拦截，而不是等到实例入库才炸。
+_SINGLE_VALUED_SHACLS = (
+    "in", "datatype", "class", "node", "or", "path", "hasValue",
+    "minCount", "maxCount", "exactCount",
+    "minLength", "maxLength", "pattern", "flags",
+    "minInclusive", "maxInclusive", "lessThan", "greaterThan",
+)
+
+
+def assert_shapes_well_formed(g: Graph) -> None:
+    """形状图自检（P2 补强）：单值约束谓词每个主体出度 ≤ 1，非法则抛 ValueError。
+
+    覆盖 translate_to_turtle / translate_to_shacl 两条生成路径（_build_shapes 出口统一调用），
+    使约束合并类缺陷在保存/发布/校验阶段即暴露。
+    """
+    bad: list[str] = []
+    for name in _SINGLE_VALUED_SHACLS:
+        # 用 URIRef 直接构造而非 SH[name]：部分 rdflib 版本的 SHACL DefinedNamespace 未收录全部谓词，查找会抛 AttributeError
+        pred = URIRef(str(SH) + name)
+        for s in {s for s, _, _ in g.triples((None, pred, None))}:
+            n = sum(1 for _ in g.objects(s, pred))
+            if n > 1:
+                bad.append(f"{s} × sh:{name} ×{n}")
+    if bad:
+        raise ValueError("SHACL 形状图非法（单值约束谓词出现多值，约束被错误合并）: " + "; ".join(bad[:5]))
 
 
 def translate_to_turtle(ontology: dict[str, Any]) -> str:
@@ -252,13 +295,39 @@ def build_instance_graph(ontology: dict[str, Any], instances: list[dict[str, Any
     return g
 
 
-def _add_sh_in(g: Graph, ps, values: list) -> None:
-    """把枚举白名单生成为 sh:in 指向的 RDF list。"""
+def _enum_val_numeric(x) -> bool:
+    """判断枚举项可否数值化（integer/float data_type 的枚举项须与声明类型匹配）。"""
+    if isinstance(x, bool):
+        return False
+    if isinstance(x, (int, float)):
+        return True
+    try:
+        float(str(x).strip())
+        return True
+    except ValueError:
+        return False
+
+
+def _enum_literal(v, data_type: str) -> Literal:
+    """枚举字面量：datatype 与属性声明 data_type 对齐（integer→xsd:integer、float→xsd:float），
+    保证与实例字面量（typed_literal）同型，sh:in 匹配才成立；转换失败回退字符串（业务门已前置拦截）。"""
+    try:
+        if data_type == "integer":
+            return Literal(int(float(str(v))), datatype=XSD.integer)
+        if data_type == "float":
+            return Literal(float(v), datatype=XSD.float)
+    except (TypeError, ValueError):
+        pass
+    return Literal(str(v))
+
+
+def _add_sh_in(g: Graph, ps, values: list, data_type: str = "string") -> None:
+    """把枚举白名单生成为 sh:in 指向的 RDF list（各项字面量按 data_type 带 xsd 类型）。"""
     head = BNode()
     g.add((ps, SH["in"], head))
     prev = head
     for i, v in enumerate(values):
-        g.add((prev, RDF.first, Literal(v)))
+        g.add((prev, RDF.first, _enum_literal(v, data_type)))
         rest = RDF.nil if i == len(values) - 1 else BNode()
         g.add((prev, RDF.rest, rest))
         prev = rest
@@ -268,7 +337,7 @@ def validate_business_layer(ontology: dict[str, Any]) -> list[dict[str, Any]]:
     """翻译前轻量校验门（P-01/P-03）：纯本地 O(实体) 逻辑，不依赖 Jena。
 
     覆盖：id 唯一、业务语义定义、稳定主键、属性/关系名禁用敏感词、data_type/基数合法、
-    枚举定义合法、父级无环、引用完整性。
+    枚举定义合法、父级无环、引用完整性、跨对象属性 ID 复用（warning / data_type 冲突 error）。
     与 SHACL 互补——SHACL 负责实例级语义约束（minCount/datatype/length/unique/enum 取值），本门负责模型级完整性。
     """
     errors: list[dict[str, Any]] = []
@@ -306,9 +375,16 @@ def validate_business_layer(ontology: dict[str, Any]) -> list[dict[str, Any]]:
             c = attr.get("constraints") or {}
             en = c.get("enum")
             if en is not None:
-                if not isinstance(en, list) or not en or not all(isinstance(x, str) for x in en):
+                dt = attr.get("data_type", "string")
+                if not isinstance(en, list) or not en:
                     errors.append({"severity": "error", "path": f"{oid}/{aid}",
-                                   "message": "enum 约束必须为非空字符串数组"})
+                                   "message": "enum 约束必须为非空数组"})
+                elif not all(isinstance(x, (str, int, float)) and not isinstance(x, bool) for x in en):
+                    errors.append({"severity": "error", "path": f"{oid}/{aid}",
+                                   "message": "enum 项仅支持字符串/数字"})
+                elif dt in ("integer", "float") and not all(_enum_val_numeric(x) for x in en):
+                    errors.append({"severity": "error", "path": f"{oid}/{aid}",
+                                   "message": f"enum 项须为数值并与 data_type={dt} 匹配"})
 
         # O-01: stable_key 必须存在且指向本对象属性
         stable_key = o.get("stable_key")
@@ -353,7 +429,36 @@ def validate_business_layer(ontology: dict[str, Any]) -> list[dict[str, Any]]:
             chain.add(cur)
             cur = parent_map.get(cur)
 
+    # 跨对象属性 ID 复用（P1 补强）：复用本身合理（共享词汇），属性形状已按对象隔离、互不影响；
+    # 给出 warning 提示建模者确认业务含义一致。同一 ID 却声明不同 data_type 属含义漂移
+    # （datatype 约束相互矛盾），升级为 error 直接拦截。
+    cross: dict[str, list[tuple[str, str]]] = {}
+    for o in objects:
+        for attr in o.get("attributes", []):
+            cross.setdefault(attr["id"], []).append((o["id"], attr.get("data_type", "string")))
+    for aid, uses in cross.items():
+        if len(uses) < 2:
+            continue
+        oids = [u[0] for u in uses]
+        dts = sorted({u[1] for u in uses})
+        if len(dts) > 1:
+            errors.append({
+                "severity": "error", "path": aid,
+                "message": f"属性 id {aid} 在 {len(oids)} 个对象中复用但 data_type 不一致（{' / '.join(dts)}），业务含义应不同，请改用不同属性 id",
+            })
+        else:
+            shown = "、".join(oids[:3]) + ("…" if len(oids) > 3 else "")
+            errors.append({
+                "severity": "warning", "path": aid,
+                "message": f"属性 id {aid} 在 {len(oids)} 个对象中复用（{shown}），各对象将生成独立属性形状；若约束不同请确认是否同一业务含义",
+            })
+
     return errors
+
+
+def blocking_violations(ontology: dict[str, Any]) -> list[dict[str, Any]]:
+    """仅返回 error 级条目——用于保存/发布等阻塞场景（warning 级不阻断，见 validate_business_layer）。"""
+    return [e for e in validate_business_layer(ontology) if e.get("severity") == "error"]
 
 
 def validate_structure(ontology: dict[str, Any]) -> list[dict[str, Any]]:

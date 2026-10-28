@@ -62,6 +62,8 @@ class Viz:
                 "label": o.get("name", o["id"]),
                 "kind": "object",
                 "source": _INTERNAL,
+                # 父类（对象继承）：供前端"类树"视图构建层级
+                "parent": o.get("parent"),
             })
             for rel in o.get("relations", []):
                 target = rel.get("target_object")

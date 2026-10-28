@@ -41,6 +41,7 @@ class ProjectStore:
     def create(self, payload: ProjectCreate) -> dict[str, Any]:
         rec = payload.model_dump()
         rec["id"] = Project.generate_id()
+        rec["department"] = (rec.get("department") or "默认部门").strip() or "默认部门"
         rec["created_at"] = _now()
         rec["updated_at"] = rec["created_at"]
         self._meta.insert(rec)

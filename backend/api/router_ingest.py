@@ -22,7 +22,7 @@ from ingestion import approve as approve_candidate_logic
 from ingestion import preview as preview_candidate
 from jena_adapter import rdf_sync
 from logging_setup import get_logger
-from modeling_translator import validate_business_layer
+from modeling_translator import blocking_violations
 from schemas.ingest import ApproveResult, IngestPreviewRequest
 
 router = APIRouter(prefix="/api/ingest", tags=["ingest"])
@@ -49,6 +49,16 @@ def _instance_store_for(project_id: str):
 
 def _ontologies_for(project_id: str) -> JsonStore:
     return JsonStore("ontologies", project_id=project_id)
+
+
+def _namespace_ontology_ids(project_id: str, namespace: str) -> set[str]:
+    """指定部门空间内的本体 id 集合（无 namespace 字段的本体归属默认空间=项目 id）。"""
+    ns = namespace or project_id
+    return {
+        o["id"]
+        for o in _ontologies_for(project_id).all()
+        if (o.get("namespace") or project_id) == ns
+    }
 
 
 def _now() -> str:
@@ -260,7 +270,7 @@ async def upload_instances(
     未指定 object_type 时遍历所有 sheet，每个合法 sheet 生成一个候选。csv 必须指定 object_type。
     field_map 为 JSON 字符串，{源表头: 属性id}，显式覆盖自动匹配。"""
     ontology = _load_ontology(ontology_id, project_id)
-    biz_errors = validate_business_layer(ontology)
+    biz_errors = blocking_violations(ontology)
     if biz_errors:
         raise ApiError("VALIDATION_ERROR", "本体模型未通过业务层校验，无法生成候选", http_status=422,
                        details={"violations": biz_errors})
@@ -396,7 +406,7 @@ async def upload_instances_smart(
     - auto_apply=true 时直接生成 candidate 记录。
     """
     ontology = _load_ontology(ontology_id, project_id)
-    biz_errors = validate_business_layer(ontology)
+    biz_errors = blocking_violations(ontology)
     if biz_errors:
         raise ApiError("VALIDATION_ERROR", "本体模型未通过业务层校验", http_status=422,
                        details={"violations": biz_errors})
@@ -469,7 +479,7 @@ async def upload_instances_smart(
 @router.post("/preview")
 def preview(payload: IngestPreviewRequest, project_id: str = Depends(project_id_param)):
     ontology = _load_ontology(payload.ontology_id, project_id)
-    biz_errors = validate_business_layer(ontology)
+    biz_errors = blocking_violations(ontology)
     if biz_errors:
         raise ApiError("VALIDATION_ERROR", "本体模型未通过业务层校验，无法生成候选", http_status=422,
                        details={"violations": biz_errors})
@@ -496,6 +506,7 @@ def preview(payload: IngestPreviewRequest, project_id: str = Depends(project_id_
 @router.get("/candidates")
 def list_candidates(
     project_id: str = Depends(project_id_param),
+    namespace: str | None = None,
     ontology_id: str | None = None,
     status: str | None = None,
     page: int = Query(default=1, ge=1),
@@ -503,6 +514,8 @@ def list_candidates(
 ):
     page, page_size = parse_pagination(page, page_size)
     items = _store_for(project_id).all()
+    if namespace:
+        items = [c for c in items if c.get("ontology_id") in _namespace_ontology_ids(project_id, namespace)]
     if ontology_id:
         items = [c for c in items if c.get("ontology_id") == ontology_id]
     if status:
@@ -716,6 +729,7 @@ def delete_candidate_instance(
 @router.get("/instances")
 def list_instances(
     project_id: str = Depends(project_id_param),
+    namespace: str | None = None,
     ontology_id: str | None = None,
     object_type: str | None = None,
     page: int = Query(default=1, ge=1),
@@ -723,6 +737,8 @@ def list_instances(
 ):
     page, page_size = parse_pagination(page, page_size)
     items = _instance_store_for(project_id).all()
+    if namespace:
+        items = [it for it in items if it.get("ontology_id") in _namespace_ontology_ids(project_id, namespace)]
     if ontology_id:
         items = [it for it in items if it.get("ontology_id") == ontology_id]
     if object_type:

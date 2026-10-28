@@ -137,6 +137,13 @@
 - `stable_key`：必填，指向本对象的一个属性 id，作为实例写入 Neo4j 时的业务主键；**禁止**使用数据库自增 id。
 - `namespace`：可选，部门/域命名空间；MVP 默认继承 project。创建/列表接口支持通过 `?namespace=` 参数切换，本体对象在创建时会默认继承本体的 namespace。
 - `data_type` 取值：`string` / `integer` / `float` / `boolean` / `date` / `datetime`。
+- 属性 `constraints` 约束键（均可选，缺省=无该约束）：
+  - `min_length` / `max_length`（int）：长度上下界，编译为 `sh:minLength` / `sh:maxLength`；
+  - `pattern`（string）：正则表达式，编译为 `sh:pattern`；
+  - `minimum` / `maximum`（number）：数值闭区间，编译为 `sh:minInclusive` / `sh:maxInclusive`；
+  - `enum`（数组）：枚举白名单（值约束），编译为 `sh:in`；**元素类型跟随 data_type**——string 属性传字符串，integer/float 属性可传数值（各项按其字面类型带 xsd:integer / xsd:double 编译）。
+- 对象 `parent`（可选）：父类对象 id，编译为 `RDFS.subClassOf`，多个对象按 parent 组成类树（图谱页"类树"视图即按此折叠）；可经对象 PATCH 就地修改（§2.2），业务门校验"父存在/无继承环"。
+- 本体级 `constraints[]`：`rule=unique`（`params.attribute` 指定唯一属性）编译为标准 `sh:uniqueKey`；`scope` 指定作用对象（缺省作用于全本体）。
 - `cardinality` 取值：`one_to_one` / `one_to_many` / `many_to_one` / `many_to_many`。
 - `functions`（本体级）：元模型预留，用于声明无副作用计算逻辑（与 Action 的 `side_effect=true` 相对）。MVP 仅存储，V2 接入 function_engine 执行。
 
@@ -147,6 +154,7 @@
 | GET | `/api/ontologies` | 本体列表（分页） | query=`page`,`pageSize`,`keyword`(可选),`namespace`(可选，默认继承 project_id) |
 | GET | `/api/ontologies/{id}` | 读取业务层模型 | path=`id` |
 | PUT | `/api/ontologies/{id}` | 更新模型 | body=§2.1（可部分字段） |
+| PATCH | `/api/ontologies/{id}/objects/{object_id}` | 就地更新单个对象（元数据/约束/父类编辑） | body=§2.3 对象补丁（字段全可选，局部更新语义） |
 | DELETE | `/api/ontologies/{id}` | 删除本体 | path=`id` |
 | POST | `/api/ontologies/{id}/validate` | SHACL 一致性校验（VS2 真实校验） | path=`id`；body=`{ "level": "full", "sample_instances": [ { "object_type": "obj_customer", "attr_name": "张三" } ] }`（两者皆可选，不传 sample_instances 则对模型自身做结构+空数据 SHACL） |
 | POST | `/api/ontologies/{id}/export` | 导出 OWL/TTL（标准层） | path=`id`；body=`{ "format": "turtle" }`（默认 turtle） |
@@ -154,6 +162,24 @@
 | GET | `/api/ontologies/{id}/snapshots` | 历史快照列表（分页） | path=`id`；query=`page`,`pageSize` |
 
 - `POST /api/ontologies` 响应：`data` = 完整模型（带回填 `id`/`created_at`/`updated_at`），HTTP 201。
+- **对象就地更新 `PATCH /api/ontologies/{id}/objects/{object_id}`（§2.3，局部更新语义）**：
+  - 请求体字段全可选：`name` / `description` / `parent` / `attributes` / `relations`；**未传字段保持旧值**（端点回填原值），`parent` **显式传 null** 表示清除父级（变回根对象）。
+  - 更新后整体跑业务层门（父存在/无继承环/stable_key 属本对象属性，与 PUT 同口径），失败返回 422 且**不落库**；通过则重翻译 TTL 落盘。
+  - 对象无 `stable_key` 且改出 required string 属性时，自动取第一个此类属性为 stable_key。
+  - 响应 `data` = 更新后的完整本体模型。
+
+### 2.3 对象补丁（PATCH 请求体，字段全可选）
+```json
+{
+  "name": "车辆",
+  "description": "可选",
+  "parent": "obj_vehicle",
+  "attributes": [ { "id": "attr_vin", "name": "VIN码", "data_type": "string", "required": true, "constraints": { "min_length": 17, "max_length": 17, "pattern": "^[A-HJ-NPR-Z0-9]{17}$" } } ],
+  "relations": []
+}
+```
+- `parent` 三态：不传=保持旧父级；`null`=清除父级；对象 id=改挂新父级（随后整体业务门校验）。
+- `attributes` / `relations` 一旦传入即为**整体替换**（非按 id 合并），约束键见 §2.1。
 - **创建前轻量校验门（P-01/P-03）**：`POST /api/ontologies` 在翻译为 OWL **之前**先跑业务层门（id 唯一、父级无环、data_type/基数合法、枚举定义合法、属性/关系名禁用敏感词如 `password/secret/token`），不通过返回 `VALIDATION_ERROR`（HTTP 422，`error.details.violations` 同结构）；通过才进入翻译 + Jena + SHACL，省一次推理调用。
 - `POST /api/ontologies/{id}/validate` 响应（VS2：业务层门 + pyshacl 真实 SHACL 校验；violations 含 `focus_node` 指向违规实例节点）：
 ```json
@@ -199,10 +225,13 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/ingest/preview` | 生成候选（LLM/字段映射/外部读取），**不入库** |
-| GET | `/api/ingest/candidates` | 候选列表（分页，query=`ontology_id`,`status`,`page`,`pageSize`） |
+| GET | `/api/ingest/candidates` | 候选列表（分页，query=`namespace`,`ontology_id`,`status`,`page`,`pageSize`） |
 | GET | `/api/ingest/candidates/{id}` | 候选详情 |
 | POST | `/api/ingest/candidates/{id}/approve` | 人工审核通过 → SHACL → 落 Neo4j（返回落库结果） |
 | POST | `/api/ingest/candidates/{id}/reject` | 人工拒绝 |
+| GET | `/api/ingest/instances` | 已入库实例列表（分页，query=`namespace`,`ontology_id`,`object_type`,`page`,`pageSize`，默认 pageSize=50 上限 200） |
+
+- `namespace` 过滤（candidates/instances 通用）：只返回**指定部门空间内本体**的候选/实例（按本体的 `namespace` 归属判定，无 `namespace` 字段的本体归属默认空间=项目 id）；不传则返回整个项目的数据（向后兼容）。前端顶栏作用域为「部门 → 项目」，默认**不注入**该参数（项目级全量）；该参数保留供程序化调用 / 进阶过滤。
 
 - `POST /api/ingest/preview` 请求体（三选一来源）：
 ```json
@@ -480,6 +509,7 @@
 | POST | `/api/ontologies/{id}/publish` | 将 `draft` 状态本体发布为 `active` |
 
 - 所有逆向生成结果默认先为 `status=draft`，可编辑后发布；发布时调用翻译器写入 Jena。
+- `POST /api/ontologies/from-excel` 约束列（**均可选**，缺列=无约束）：属性表支持 `min_length` / `max_length` / `pattern` / `minimum` / `maximum` / `enum` 六个约束列（中文列名"最小长度/最大长度/正则/最小值/最大值/枚举"亦可）；`enum` 逗号分隔，数值属性的枚举项可为数字（类型跟随 data_type，同 §2.1）；数字列解析失败时**忽略该列**而非报错（宽容导入）。
 - `from-doc` 解析异常时返回 `error` 状态；LLM 不可达时启用确定性 fallback 生成最小可用本体。
 
 ---
@@ -521,10 +551,10 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/projects` | 新建项目，201；body `{name, description?}` |
-| GET | `/api/projects` | 项目列表（分页）；`?with_stats=true` 见下 |
+| POST | `/api/projects` | 新建项目，201；body `{name, description?, department?}` |
+| GET | `/api/projects` | 项目列表（分页）；`?with_stats=true` 见下；`?department=` 按所属部门精确过滤 |
 | GET | `/api/projects/{project_id}` | 项目详情 |
-| PUT | `/api/projects/{project_id}` | 更新 `name`/`description`（**status 只允许经 archive/restore 变更**） |
+| PUT | `/api/projects/{project_id}` | 更新 `name`/`description`/`department`（**status 只允许经 archive/restore 变更**）；`department` 传空串视为 `默认部门` |
 | DELETE | `/api/projects/{project_id}` | 删除项目；级联：MCP 发布态下线（尽力而为）+ 数据目录 + 归档包；`default`/`_shared` 返回 403 |
 | POST | `/api/projects/{project_id}/archive` | **归档**：重数据（本体/实例/候选/动作/TTL 快照）整目录压缩到 `data/archives/<id>.zip`（先写包并校验完整性，再删原目录），meta 仅保留 `status=archived` + `archive_info`（本体索引/计数/大小）；归档前自动下线 MCP；已归档再归档返回 400 |
 | POST | `/api/projects/{project_id}/restore` | **恢复**：解压归档包回 `projects/<id>/`（防 zip-slip 路径校验），删除归档包，`status` 置回 `active`；非归档状态返回 400，归档包缺失返回 404 |
@@ -540,6 +570,10 @@
 归档项目的 `stats` 直接读 `archive_info`（`size_kind=archive`，`data_size` 为压缩包大小），不解压。
 
 > 归档语义（用户定义）：只保留索引——项目仍出现在项目列表/首页（名称、ID、本体清单与计数），但本体定义、实例等重数据以压缩方式存放；Jena/Neo4j 远端数据**不在**本次归档范围（避免恢复失败造成不可逆丢失，列入待增强）。
+
+**所属部门（department）**：项目的顶层业务隔离维度（部门 ⊃ 项目 ⊃ 本体）。`department` 缺省为 `默认部门`；历史数据无该字段时读取/过滤一律按 `默认部门` 处理（无需迁移）。前端顶栏「所属部门」选择器选中某部门后，项目下拉、首页项目管理表与统计卡片均只显示该部门的项目；项目列表接口可用 `?department=<部门名>` 精确过滤。
+
+> 与第 17 节**部门空间（namespace）**的关系：namespace 是项目内的可选本体分组（进阶能力），department 是项目归属的部门。前端 UI 作用域自 2026-10-27 起统一为「部门 → 项目」两级（顶栏不再提供空间选择器，避免与部门维度混淆）；namespace 数据与 API 保留，供程序化调用或将来产品重新启用项目内多分组。
 
 ## 17. 部门空间（namespaces）
 
@@ -573,4 +607,4 @@
 }
 ```
 
-前端入口：首页「部门空间（当前项目）」卡片（列表/新建/进入/重命名/删除）；顶部导航的空间选择器数据源为 `GET /api/namespaces`。
+前端入口：已移除（2026-10-27 起前端不再提供空间选择器/管理卡片，UI 作用域统一为「部门 → 项目」，避免与部门维度混淆）。本节 API 完整保留，供程序化调用；若产品后续重新启用项目内多分组，可基于这些端点恢复 UI。

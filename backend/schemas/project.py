@@ -10,6 +10,7 @@ class Project(BaseModel):
     id: Optional[str] = None
     name: str
     description: Optional[str] = None
+    department: str = "默认部门"  # 所属部门：顶层业务隔离维度，项目空间按部门过滤（历史数据缺省视为默认部门）
     status: str = "active"  # active | archived（归档：仅保留索引，重数据压缩存放）
     archive_info: Optional[dict] = None  # 归档元信息（路径/大小/本体索引/计数）
     created_at: Optional[str] = None
@@ -24,8 +25,10 @@ class Project(BaseModel):
 class ProjectCreate(BaseModel):
     name: str
     description: Optional[str] = None
+    department: Optional[str] = None
 
 
 class ProjectUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    department: Optional[str] = None

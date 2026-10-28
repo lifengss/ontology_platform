@@ -27,9 +27,23 @@ REMOTE_MODE = "remote"
 
 
 def _is_reachable() -> bool:
+    """向目标数据集发一条轻量 SPARQL 查询探测可达性。
+
+    注意：不能用 GET 根路径探测——Jena 5.x（如 5.1.0）的根路径返回 404，
+    urllib 对 4xx 抛 HTTPError，会把存活服务误判为不可达，导致同步全部
+    静默降级文件模式（已实测复现）。数据集查询端点 200 才代表读写目标真正可用。
+    """
     settings = get_settings()
+    url = f"{settings.jena_base_url.rstrip('/')}/{settings.jena_dataset}/query"
+    data = urllib.parse.urlencode(
+        {"query": "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1"}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, method="POST",
+        headers={"Accept": "application/sparql-results+json",
+                 "Content-Type": "application/x-www-form-urlencoded"})
     try:
-        with urllib.request.urlopen(settings.jena_base_url, timeout=2) as resp:
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            resp.read()
             return resp.status < 500
     except Exception:  # noqa: BLE001 - 探测失败即降级
         return False

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -24,6 +25,7 @@ from jena_adapter import rdf_sync
 from jena_adapter.client import shacl_validate
 from logging_setup import get_logger
 from modeling_translator import (
+    blocking_violations,
     build_instance_graph,
     translate_to_shacl,
     translate_to_turtle,
@@ -71,6 +73,31 @@ def _sync_rdf(project_id: str, ontology_id: str) -> None:
         logger.warning("RDF 同步失败（不影响主流程） ontology_id=%s: %s", ontology_id, e)
 
 
+def _backfill_object_fields(obj: dict, namespace: str) -> None:
+    """对象级字段自动补齐（create/update 共用）。
+
+    前端表单不采集 business_definition/stable_key，缺失时按同一规则补齐：
+    业务语义定义回退 description→name 派生；稳定主键取首个 required string 属性
+    （回退首个 string 属性→任意属性）。update 路径若不做此补齐，PUT 整体替换
+    objects 会丢掉库中原有值，必被业务层校验门拦截（422）。
+    """
+    if not obj.get("namespace"):
+        obj["namespace"] = namespace
+    biz_def = (obj.get("business_definition") or obj.get("description") or f"{obj.get('name', '对象')}的业务语义").strip()
+    if len(biz_def) < 5:
+        biz_def = f"{obj.get('name', '对象')}的业务语义定义"
+    obj["business_definition"] = biz_def
+    attrs = obj.get("attributes") or []
+    if not obj.get("stable_key") and attrs:
+        candidates = [a for a in attrs if a.get("required") and a.get("data_type", "string") == "string"]
+        if not candidates:
+            candidates = [a for a in attrs if a.get("data_type", "string") == "string"]
+        if not candidates:
+            candidates = attrs
+        if candidates:
+            obj["stable_key"] = candidates[0]["id"]
+
+
 @router.post("", status_code=201)
 def create_ontology(
     payload: OntologyCreate,
@@ -86,22 +113,8 @@ def create_ontology(
     record["updated_at"] = record["created_at"]
     # 对象级 namespace 默认继承本体 namespace；并自动补齐业务语义定义与稳定主键
     for obj in record.get("objects", []):
-        if not obj.get("namespace"):
-            obj["namespace"] = record["namespace"]
-        biz_def = (obj.get("business_definition") or obj.get("description") or f"{obj.get('name', '对象')}的业务语义").strip()
-        if len(biz_def) < 5:
-            biz_def = f"{obj.get('name', '对象')}的业务语义定义"
-        obj["business_definition"] = biz_def
-        attrs = obj.get("attributes", [])
-        if not obj.get("stable_key") and attrs:
-            candidates = [a for a in attrs if a.get("required") and a.get("data_type", "string") == "string"]
-            if not candidates:
-                candidates = [a for a in attrs if a.get("data_type", "string") == "string"]
-            if not candidates:
-                candidates = attrs
-            if candidates:
-                obj["stable_key"] = candidates[0]["id"]
-    biz_errors = validate_business_layer(record)
+        _backfill_object_fields(obj, record["namespace"])
+    biz_errors = blocking_violations(record)
     if biz_errors:
         raise ApiError("VALIDATION_ERROR", "业务层校验未通过", http_status=422,
                        details={"violations": biz_errors})
@@ -157,14 +170,15 @@ def update_ontology(
     patch["updated_at"] = _now()
     if namespace:
         patch["namespace"] = namespace
-    for obj in patch.get("objects", []):
-        if not obj.get("namespace"):
-            obj["namespace"] = patch.get("namespace", existing.get("namespace", project_id))
     # 2.2：更新路径同样执行业务层校验（与 create 一致），失败时返回具体 violations
     if "objects" in patch:
+        # 与 create 对齐：自动补齐 business_definition/stable_key（表单不采集，PUT 整体替换会丢原值）
+        ns = patch.get("namespace") or existing.get("namespace") or project_id
+        for obj in patch["objects"]:
+            _backfill_object_fields(obj, ns)
         merged = dict(existing)
         merged.update(patch)
-        biz_errors = validate_business_layer(merged)
+        biz_errors = blocking_violations(merged)
         if biz_errors:
             raise ApiError("VALIDATION_ERROR", "业务层校验未通过", http_status=422,
                            details={"violations": biz_errors})
@@ -182,10 +196,12 @@ def patch_ontology_object(
     project_id: str = Depends(project_id_param),
     namespace: str | None = Depends(namespace_param),
 ):
-    """就地更新本体内单个对象（对象约束编辑）。
+    """就地更新本体内单个对象（对象元数据/约束/父级编辑）。
 
     仅当对象存在时更新；保留 id/namespace/stable_key/business_definition 等元数据，
-    用请求体覆盖 name/description/attributes/relations。更新后重翻译 TTL 落盘。
+    用请求体覆盖 name/description/parent/attributes/relations（parent 不传保持旧值，
+    显式 null 清除）。更新后整体跑业务层校验（父存在/继承环等，与 PUT 路径一致），
+    失败 422 不落库；通过则重翻译 TTL 落盘。
     """
     store = _store_for(project_id)
     existing = store.get(ontology_id)
@@ -198,10 +214,15 @@ def patch_ontology_object(
 
     patch = payload.model_dump(exclude_unset=True)
     patch["id"] = object_id
-    # 保留既有元数据（namespace/stable_key/business_definition 等继承原值）
-    for key in ("namespace", "stable_key", "business_definition", "parent"):
+    # 局部更新语义：请求体未传的字段保持旧值（显式传 null 清除 parent），
+    # 否则仅改 parent 会把 name/attributes 等冲掉，导致业务门误报 stable_key 不属于本对象
+    for key in ("name", "description", "namespace", "stable_key", "business_definition", "parent"):
         if key not in patch:
             patch[key] = objects[idx].get(key)
+    if "attributes" not in patch:
+        patch["attributes"] = objects[idx].get("attributes") or []
+    if "relations" not in patch:
+        patch["relations"] = objects[idx].get("relations") or []
     # 对象级 namespace 默认继承本体 namespace
     if not patch.get("namespace"):
         patch["namespace"] = namespace or existing.get("namespace", project_id)
@@ -220,6 +241,11 @@ def patch_ontology_object(
     objects[idx] = patch
     existing["objects"] = objects
     existing["updated_at"] = _now()
+    # 业务层校验（与 PUT 路径一致）：改父级后父存在/继承环等约束必须整体成立，失败不落库
+    biz_errors = blocking_violations(existing)
+    if biz_errors:
+        raise ApiError("VALIDATION_ERROR", "业务层校验未通过", http_status=422,
+                       details={"violations": biz_errors})
     updated = store.update(ontology_id, {"objects": objects, "updated_at": existing["updated_at"]})
     if updated is None:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
@@ -364,7 +390,7 @@ def enrich_ontology(
     merged, summary = _merge_ontology(existing, delta, namespace or existing.get("namespace") or project_id)
 
     # 5. 业务层校验
-    biz_errors = validate_business_layer(merged)
+    biz_errors = blocking_violations(merged)
     if biz_errors:
         raise ApiError("VALIDATION_ERROR", "增强后的本体未通过业务层校验",
                        http_status=422, details={"violations": biz_errors})
@@ -421,19 +447,24 @@ def validate_ontology(ontology_id: str, req: ValidateRequest | None = None, proj
     rec = _store_for(project_id).get(ontology_id)
     if not rec:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    # structural 含 warning 级条目（如跨对象属性 ID 复用提示）：展示给用户但不影响 valid；
+    # valid 仅由 error 级结构问题 + SHACL 违规决定
     structural = validate_business_layer(rec)
+    structural_blocking = [v for v in structural if v.get("severity") == "error"]
     shapes = translate_to_shacl(rec)
     data = build_instance_graph(rec, (req.sample_instances or [])) if req else Graph()
     shacl = shacl_validate(data, shapes)
     if shacl is None:
         violations = [{"severity": v["severity"], "path": v.get("path"),
                        "focus_node": None, "message": v["message"]} for v in structural]
+        valid = len(structural_blocking) == 0
     else:
         violations = shacl["violations"] + [
             {"severity": v["severity"], "path": v.get("path"),
              "focus_node": None, "message": v["message"]} for v in structural
         ]
-    result = ValidateResult(valid=len(violations) == 0, violations=violations)
+        valid = len(shacl["violations"]) == 0 and len(structural_blocking) == 0
+    result = ValidateResult(valid=valid, violations=violations)
     return success(result.model_dump())
 
 
@@ -604,7 +635,7 @@ def create_from_text(payload: OntologyFromTextRequest, project_id: str = Depends
     except Exception as e:  # noqa: BLE001
         logger.warning("from-text LLM 解析失败: %s", e)
         raise ApiError("LLM_ERROR", f"LLM 输出无法解析为合法本体: {e}", http_status=422)
-    biz_errors = validate_business_layer(record)
+    biz_errors = blocking_violations(record)
     if biz_errors:
         raise ApiError("VALIDATION_ERROR", "生成的本体未通过业务层校验", http_status=422, details={"violations": biz_errors})
     draft = _save_draft(record, "text", project_id)
@@ -625,7 +656,7 @@ def create_from_excel(file: UploadFile = File(...), project_id: str = Depends(pr
     except Exception as e:  # noqa: BLE001
         logger.warning("from-excel 解析失败: %s", e)
         raise ApiError("PARSE_ERROR", f"文件解析失败: {e}", http_status=422)
-    biz_errors = validate_business_layer(record)
+    biz_errors = blocking_violations(record)
     if biz_errors:
         raise ApiError("VALIDATION_ERROR", "表格生成的本体未通过业务层校验", http_status=422, details={"violations": biz_errors})
     draft = _save_draft(record, "excel", project_id)
@@ -679,7 +710,7 @@ def _run_doc_extraction(
         combined_text = "\n\n".join(texts)
         generated = generate_ontology_from_document(combined_text, llm_endpoint, model)
         record = _normalize_generated(generated)
-        biz_errors = validate_business_layer(record)
+        biz_errors = blocking_violations(record)
         if biz_errors:
             JOBS[job_id] = {"status": "error", "draft_id": None, "error": f"业务层校验未通过: {biz_errors}"}
             logger.warning("from-doc job=%s 业务层校验未通过: %s", job_id, biz_errors)
@@ -762,6 +793,55 @@ def _parse_spreadsheet(filename: str, stream: io.BytesIO) -> dict[str, Any]:
     return _parse_flat_rows(filename, rows)
 
 
+def _enum_cell(s: str):
+    """枚举单元格：数值形态转 int/float（与 data_type 数值型对齐），否则保持字符串。"""
+    s = s.strip()
+    if re.fullmatch(r"-?\d+", s):
+        return int(s)
+    try:
+        f = float(s)
+    except ValueError:
+        return s
+    return f if f == f and f not in (float("inf"), float("-inf")) else s
+
+
+def _constraint_from_values(vals: dict[str, str | None]) -> dict[str, Any]:
+    """由约束列的原始单元格文本组装属性 constraints（各列均可选，全部为空返回 {}）。
+
+    vals 键：min_length / max_length / pattern / minimum / maximum / enum（逗号分隔）。
+    数字列解析失败（非数字）时忽略该列而非报错，保持导入宽容度。
+    """
+    def _to_num(v: str | None) -> float | None:
+        v = (v or "").strip()
+        if not v:
+            return None
+        try:
+            return float(v)
+        except ValueError:
+            return None
+
+    c: dict[str, Any] = {}
+    mn = _to_num(vals.get("min_length"))
+    if mn is not None:
+        c["min_length"] = int(mn)
+    mx = _to_num(vals.get("max_length"))
+    if mx is not None:
+        c["max_length"] = int(mx)
+    pat = (vals.get("pattern") or "").strip()
+    if pat:
+        c["pattern"] = pat
+    vmin = _to_num(vals.get("minimum"))
+    if vmin is not None:
+        c["minimum"] = float(vmin)
+    vmax = _to_num(vals.get("maximum"))
+    if vmax is not None:
+        c["maximum"] = float(vmax)
+    en_raw = (vals.get("enum") or "").strip()
+    if en_raw:
+        c["enum"] = [_enum_cell(x) for x in re.split(r"[,，]", en_raw) if x.strip()]
+    return c
+
+
 def _parse_flat_rows(filename: str, rows: list[list[str]]) -> dict[str, Any]:
     if not rows:
         raise ValueError("空表格")
@@ -777,6 +857,13 @@ def _parse_flat_rows(filename: str, rows: list[list[str]]) -> dict[str, Any]:
     required_col = col_idx("必填", "required", "是否必填") or 3
     target_col = col_idx("关系目标", "target", "target_object", "目标对象") or 4
     card_col = col_idx("基数", "cardinality") or 5
+    # 可选约束列（缺省列时属性 constraints 为空）
+    c_minlen_col = col_idx("最小长度", "min_length")
+    c_maxlen_col = col_idx("最大长度", "max_length")
+    c_pattern_col = col_idx("正则", "pattern")
+    c_min_col = col_idx("最小值", "minimum")
+    c_max_col = col_idx("最大值", "maximum")
+    c_enum_col = col_idx("枚举", "enum")
 
     objects: dict[str, dict[str, Any]] = {}
     for row in rows[1:]:
@@ -797,7 +884,24 @@ def _parse_flat_rows(filename: str, rows: list[list[str]]) -> dict[str, Any]:
                 dtype = "string"
             req_text = row[required_col].strip().lower() if required_col is not None and required_col < len(row) else ""
             required = req_text in ("是", "true", "yes", "1")
-            obj["attributes"].append({"id": attr_id, "name": attr_name, "data_type": dtype, "required": required, "constraints": {}})
+
+            def _at(col: int | None) -> str:
+                return row[col].strip() if col is not None and col < len(row) else ""
+
+            obj["attributes"].append({
+                "id": attr_id,
+                "name": attr_name,
+                "data_type": dtype,
+                "required": required,
+                "constraints": _constraint_from_values({
+                    "min_length": _at(c_minlen_col),
+                    "max_length": _at(c_maxlen_col),
+                    "pattern": _at(c_pattern_col),
+                    "minimum": _at(c_min_col),
+                    "maximum": _at(c_max_col),
+                    "enum": _at(c_enum_col),
+                }),
+            })
         target_name = row[target_col].strip() if target_col is not None and target_col < len(row) else ""
         if target_name and target_name in objects:
             rel_id = "rel_" + _slug(obj_name) + "_" + _slug(target_name)
@@ -876,15 +980,26 @@ def _parse_b0_template(wb: Any) -> dict[str, Any]:
                 "name": cell(r, attr_header, "中文名") or attr_id,
                 "data_type": attr_type_map.get(dtype_raw, "string"),
                 "required": False,
-                "constraints": {},
+                # 可选约束列：最小长度/最大长度/正则/最小值/最大值/枚举（逗号分隔）
+                "constraints": _constraint_from_values({
+                    "min_length": cell(r, attr_header, "最小长度"),
+                    "max_length": cell(r, attr_header, "最大长度"),
+                    "pattern": cell(r, attr_header, "正则"),
+                    "minimum": cell(r, attr_header, "最小值"),
+                    "maximum": cell(r, attr_header, "最大值"),
+                    "enum": cell(r, attr_header, "枚举"),
+                }),
             })
 
     objects = []
     for cls_id, obj in classes.items():
         obj["relations"] = rels_by_domain.get(cls_id, [])
         obj["attributes"] = attrs_by_class.get(cls_id, [])
+        # 父类必须在本模板内显式定义，与 API 路径"父对象不存在报错"口径一致（不再静默抹掉）
         if obj["parent"] and obj["parent"] not in classes:
-            obj["parent"] = None
+            raise ValueError(
+                f"类层次：父类 '{obj['parent']}' 不存在（'1-类层次' sheet 缺少该类名），请修正模板后重新导入"
+            )
         objects.append(obj)
 
     return {"name": "B0参考本体导入", "description": "从 B0 三 sheet 模板导入", "objects": objects}

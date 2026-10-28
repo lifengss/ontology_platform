@@ -96,8 +96,11 @@ def _replace_named_graph(graph_uri: str, nt_triples: str) -> None:
     settings = get_settings()
     dataset = settings.jena_dataset
     url = f"{settings.jena_base_url.rstrip('/')}/{dataset}/update"
+    # 注意：必须用 `DELETE WHERE { ... }` 标准形式。
+    # Jena 5.1.0 下 `DELETE { ... } WHERE {}`（空 WHERE）不产生任何删除（no-op），
+    # 会导致每次重同步只增不删、图内累积重复三元组（已实测复现）。
     update = (
-        f"DELETE {{ GRAPH <{graph_uri}> {{ ?s ?p ?o . }} }} WHERE {{}} ;\n"
+        f"DELETE WHERE {{ GRAPH <{graph_uri}> {{ ?s ?p ?o . }} }} ;\n"
         f"INSERT DATA {{ GRAPH <{graph_uri}> {{\n{nt_triples.strip()}\n}} }}"
     )
     req = urllib.request.Request(

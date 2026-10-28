@@ -27,11 +27,15 @@ def list_projects(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100, alias="pageSize"),
     with_stats: bool = Query(default=False, description="附带项目级统计（本体数/实例数/数据量），首页总览用"),
+    department: str | None = Query(default=None, description="按所属部门精确过滤；历史数据无 department 字段视为默认部门"),
 ):
     page, page_size = parse_pagination(page, page_size)
     items = _store.list()
     for rec in items:
         rec.setdefault("status", "active")  # 历史数据无 status 字段，视为 active
+        rec.setdefault("department", "默认部门")  # 历史数据无 department 字段，视为默认部门
+    if department:
+        items = [rec for rec in items if (rec.get("department") or "默认部门") == department]
     total = len(items)
     start = (page - 1) * page_size
     page_items = items[start: start + page_size]
@@ -58,6 +62,8 @@ def update_project(project_id: str, payload: ProjectUpdate):
     if not _store.get(project_id):
         raise ApiError("NOT_FOUND", "项目不存在", http_status=404)
     patch = payload.model_dump(exclude_unset=True)
+    if "department" in patch:
+        patch["department"] = (patch["department"] or "").strip() or "默认部门"
     updated = _store.update(project_id, patch)
     return success(updated)
 

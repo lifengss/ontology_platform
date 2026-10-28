@@ -14,7 +14,7 @@ class AttributeConstraint(BaseModel):
     pattern: Optional[str] = None
     minimum: Optional[float] = None
     maximum: Optional[float] = None
-    enum: Optional[list[str]] = None  # 枚举白名单（值约束），生成 sh:in
+    enum: Optional[list[str | int | float]] = None  # 枚举白名单（值约束），生成 sh:in；项应与 data_type 匹配（integer/float 允许数值）
 
 
 class ObjectAttribute(BaseModel):
@@ -46,9 +46,16 @@ class OntologyObject(BaseModel):
 
 
 class OntologyObjectPatch(BaseModel):
-    """对象就地更新请求体：id 由路径参数决定，字段可选。"""
+    """对象就地更新请求体：id 由路径参数决定，字段可选。
+
+    parent 语义（partial update）：
+    - 不传：保持旧父级（由端点回填原值）
+    - 显式传 null：清除父级（变回根对象）
+    - 传对象 id：改挂新父级；端点随后整体跑业务层校验（父存在/继承环），失败 422
+    """
     name: Optional[str] = None
     description: Optional[str] = None
+    parent: Optional[str] = None
     attributes: Optional[list[ObjectAttribute]] = None
     relations: Optional[list[ObjectRelation]] = None
 

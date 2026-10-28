@@ -3,7 +3,7 @@
 @prefix fuseki: <http://jena.apache.org/fuseki#> .
 @prefix rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix tdb:    <http://jena.apache.org/2016/tdb#> .
+@prefix tdb2:   <http://jena.apache.org/2016/tdb#> .
 
 <#server> a fuseki:Server ;
     fuseki:services ( <#ontology> ) .
@@ -17,6 +17,9 @@
     fuseki:serviceData "data" ;
     fuseki:dataset <#ontologyDS> .
 
-# Jena 5：tdb:DatasetTDB（2016/tdb 命名空间）即 TDB2 数据集装配器，可读写
-<#ontologyDS> a tdb:DatasetTDB ;
-    tdb:location "d:/self_coding/ontology_platform/backend/data/fuseki" .
+# Jena 5.1.0 官方 TDB2 数据集装配器（见发行包 run/templates/config-tdb2）：
+# 前缀名 tdb2、IRI 为 2016/tdb 命名空间、类型 DatasetTDB2。
+# 注意：tdb:DatasetTDB 是 TDB1（legacy）装配器——在 TDB2 格式存储目录上会打开失败，
+# Fuseki 会静默回退 in-memory 数据集（数据重启即丢），切勿写回。
+<#ontologyDS> a tdb2:DatasetTDB2 ;
+    tdb2:location "d:/self_coding/ontology_platform/backend/data/fuseki" .

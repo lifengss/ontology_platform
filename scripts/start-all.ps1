@@ -17,6 +17,14 @@ $BACKEND = Join-Path $ROOT "backend"
 $FRONTEND = Join-Path $ROOT "frontend"
 $DEPS = Join-Path $ROOT "deps"
 
+# 优先使用项目内 JDK 21（Neo4j 2026.x 需要），否则回退系统 JAVA_HOME
+$localJdk = Get-ChildItem -Path $DEPS -Filter "jdk-*" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'jdk-2[1-9]' } | Select-Object -First 1
+if ($localJdk) {
+    $env:JAVA_HOME = $localJdk.FullName
+    $env:PATH = "$($localJdk.FullName)\bin;$env:PATH"
+    Info "使用项目内 JDK: $($localJdk.FullName)"
+}
+
 function Info($msg) { Write-Host "[INFO] $msg" -ForegroundColor Cyan }
 function OK($msg) { Write-Host "[OK]   $msg" -ForegroundColor Green }
 function Warn($msg) { Write-Host "[WARN] $msg" -ForegroundColor Yellow }
@@ -129,9 +137,16 @@ if (-not $SkipDeps) {
             Warn "或安装 Docker 后使用 -UseDocker 参数。"
             Warn "本次将仅启动前后端（部分功能降级）。"
         } else {
-            Info "启动本地 Jena/Fuseki..."
+            Info "启动本地 Jena/Fuseki（可写 TDB2，数据持久化到 backend/data/fuseki）..."
             $fusekiCmd = Join-Path $jena.FullName "fuseki-server.bat"
-            $fusekiProc = Start-Process -FilePath $fusekiCmd -ArgumentList "--mem","--update","/ontology" `
+            $jenaConfig = Join-Path $BACKEND "fuseki-config.ttl"
+            if (Test-Path $jenaConfig) {
+                $fusekiArgs = "--port 3030 --config `"$jenaConfig`""
+            } else {
+                Warn "未找到 backend/fuseki-config.ttl，回退 --mem（重启将丢失 Fuseki 数据）"
+                $fusekiArgs = "--mem --update /ontology"
+            }
+            $fusekiProc = Start-Process -FilePath $fusekiCmd -ArgumentList $fusekiArgs `
                 -WorkingDirectory $jena.FullName -WindowStyle Hidden -PassThru
             $depProcs += $fusekiProc
 

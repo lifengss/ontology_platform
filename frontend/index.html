@@ -31,6 +31,12 @@
     .subtab.active { background: var(--accent); color: #fff; }
     .object-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; background: #0f1627; }
     .remove-btn { color: var(--bad); font-size: 12px; cursor: pointer; }
+    /* 主键实时标记徽标（🔑 命中行）与属性/关系/对象上移下移小按钮 */
+    .pk-badge { font-size: 10px; color: #fbbf24; white-space: nowrap; font-weight: 600; }
+    .pk-rule { line-height: 1.5; }
+    .pk-move { padding: 1px 5px; font-size: 12px; line-height: 18px; border-radius: 4px; background: rgba(148,163,184,.12); border: 1px solid var(--border); color: var(--muted); cursor: pointer; }
+    .pk-move:hover:not(:disabled) { background: rgba(79,140,255,.18); color: var(--text); border-color: var(--accent); }
+    .pk-move:disabled { opacity: .3; cursor: not-allowed; }
     .badge { font-size: 10px; padding: 2px 6px; border-radius: 10px; background: #1e293b; border: 1px solid var(--border); }
     .badge.draft { color: #fbbf24; border-color: #78350f; background: #451a03; }
     .badge.active { color: #34d399; border-color: #065f46; background: #064e3b; }
@@ -55,12 +61,14 @@
       <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-bold">O</div>
       <h1 class="text-base font-semibold whitespace-nowrap">企业业务本体平台 <span class="text-xs text-slate-400 font-normal">MVP</span></h1>
     </div>
-    <div class="flex items-center gap-3 text-xs">
+    <div class="flex items-center gap-2 text-xs">
+      <span class="text-slate-500" title="所属部门：筛选项目空间（项目归属的业务部门）">部门</span>
+      <select id="departmentSelect" onchange="setDepartment(this.value)" title="所属部门（筛选项目空间）"
+        class="bg-[#0f1627] border border-slate-700/60 rounded px-2 py-1 text-xs text-slate-300"></select>
+      <span class="text-slate-500" title="项目空间（顶层隔离单元）">项目</span>
       <select id="projectSelect" onchange="setProject(this.value)"
         class="bg-[#0f1627] border border-slate-700/60 rounded px-2 py-1 text-xs text-slate-300"></select>
-      <select id="namespaceSelect" onchange="setNamespace(this.value)"
-        class="bg-[#0f1627] border border-slate-700/60 rounded px-2 py-1 text-xs text-slate-300"></select>
-      <span id="currentProjectLabel" class="text-slate-300 font-medium whitespace-nowrap" title="项目 / 部门空间"></span>
+      <span id="currentProjectLabel" class="text-slate-300 font-medium whitespace-nowrap" title="部门 / 项目"></span>
       <span class="w-px h-4 bg-slate-700/60"></span>
       <span id="healthDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
       <span id="healthText" class="text-slate-400 cursor-pointer hover:text-slate-200 whitespace-nowrap" onclick="toggleHealthDetails()">检查中…</span>
@@ -94,12 +102,12 @@
         <div class="card p-4">
           <div class="text-xs text-slate-400 mb-1">本体总数</div>
           <div id="homeStatOntologies" class="text-2xl font-semibold">-</div>
-          <div class="text-xs text-slate-500 mt-1">各项目构建的本体模型数量</div>
+          <div id="homeStatOntologiesSub" class="text-xs text-slate-500 mt-1">项目内本体模型数量</div>
         </div>
         <div class="card p-4">
           <div class="text-xs text-slate-400 mb-1">实例总数</div>
           <div id="homeStatInstances" class="text-2xl font-semibold">-</div>
-          <div class="text-xs text-slate-500 mt-1">归化入库后的实例</div>
+          <div id="homeStatInstancesSub" class="text-xs text-slate-500 mt-1">归化入库后的实例</div>
         </div>
         <div class="card p-4">
           <div class="text-xs text-slate-400 mb-1">MCP 在线项目</div>
@@ -121,8 +129,9 @@
             </div>
           </div>
           <div id="projectForm" class="hidden mb-3 p-3 rounded-lg border border-slate-700/60 bg-slate-900/40 grid grid-cols-12 gap-2">
-            <input id="newProjectName" class="col-span-4" placeholder="项目名称（必填）" />
-            <input id="newProjectDesc" class="col-span-6" placeholder="项目描述（可选）" />
+            <input id="newProjectName" class="col-span-3" placeholder="项目名称（必填）" />
+            <input id="newProjectDepartment" class="col-span-3" placeholder="所属部门（默认：默认部门）" />
+            <input id="newProjectDesc" class="col-span-4" placeholder="项目描述（可选）" />
             <div class="col-span-2 flex gap-2">
               <button class="btn flex-1" type="button" onclick="submitNewProject()">创建</button>
               <button class="btn secondary flex-1" type="button" onclick="toggleProjectForm(false)">取消</button>
@@ -134,6 +143,7 @@
                 <tr class="text-slate-400 text-xs">
                   <th class="p-1 text-left">名称</th>
                   <th class="p-1 text-left">项目ID</th>
+                  <th class="p-1 text-left">所属部门</th>
                   <th class="p-1 text-left">状态</th>
                   <th class="p-1 text-left">本体数</th>
                   <th class="p-1 text-left">实例数</th>
@@ -144,41 +154,6 @@
                 </tr>
               </thead>
               <tbody id="projectTableBody"></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-      <div class="col-span-12">
-        <div class="card p-4">
-          <div class="flex items-center justify-between mb-3">
-            <div>
-              <h3 class="font-medium mb-0">部门空间（当前项目）</h3>
-              <div class="text-xs text-slate-500 mt-1">空间是项目内的本体分组；建模/导入按当前空间隔离。默认空间不可删除。</div>
-            </div>
-            <button class="btn" type="button" onclick="toggleNsForm()">＋ 新建空间</button>
-          </div>
-          <div id="nsForm" class="hidden mb-3 p-3 rounded-lg border border-slate-700/60 bg-slate-900/40 grid grid-cols-12 gap-2">
-            <input id="newNsName" class="col-span-3" placeholder="空间名称（必填）" />
-            <input id="newNsId" class="col-span-3" placeholder="空间ID（可选，字母开头；缺省自动生成）" />
-            <input id="newNsDesc" class="col-span-4" placeholder="空间说明（可选）" />
-            <div class="col-span-2 flex gap-2">
-              <button class="btn flex-1" type="button" onclick="submitNewNamespace()">创建</button>
-              <button class="btn secondary flex-1" type="button" onclick="toggleNsForm(false)">取消</button>
-            </div>
-          </div>
-          <div class="overflow-x-auto">
-            <table class="w-full text-sm">
-              <thead>
-                <tr class="text-slate-400 text-xs">
-                  <th class="p-1 text-left">名称</th>
-                  <th class="p-1 text-left">空间ID</th>
-                  <th class="p-1 text-left">说明</th>
-                  <th class="p-1 text-left">本体数</th>
-                  <th class="p-1 text-left">创建时间</th>
-                  <th class="p-1 text-left">操作</th>
-                </tr>
-              </thead>
-              <tbody id="nsTableBody"></tbody>
             </table>
           </div>
         </div>
@@ -202,7 +177,8 @@
       </div>
       <div class="col-span-12 lg:col-span-8 flex flex-col gap-4">
         <div id="editorCard" class="card p-4 hidden">
-          <div class="flex justify-between items-center mb-3">
+          <!-- sticky：对象多时表单很长，保存按钮随滚动始终可见，无需回滚到顶部确认 -->
+          <div class="flex justify-between items-center mb-3 sticky top-0 z-20 bg-[var(--card)] py-2 -mx-4 px-4 rounded-t-[10px]">
             <h3 class="font-medium" id="editorTitle">新建本体</h3>
             <div class="flex gap-2">
               <button class="btn success" onclick="saveOntology()">保存</button>
@@ -226,6 +202,12 @@
             <div class="mb-3"><label>描述</label><textarea id="formDesc" rows="2" class="w-full" placeholder="简要描述本体的业务范围"></textarea></div>
             <div class="form-section-title"><span>对象定义</span><button class="btn" onclick="addObject()">+ 添加对象</button></div>
             <div id="objectForms"></div>
+            <div class="mb-4 flex gap-2">
+              <button class="btn secondary flex-1" onclick="addObject()">+ 添加对象</button>
+              <button class="btn success flex-1" onclick="saveOntology()">保存本体</button>
+            </div>
+            <div class="form-section-title"><span>全局约束</span><button class="btn" onclick="addGlobalConstraint()">+ 约束</button></div>
+            <div id="constraintForms" class="space-y-2 mb-3"></div>
           </div>
 
           <div id="modeAi" class="hidden">
@@ -278,17 +260,26 @@
         <select id="ingestOntology" class="w-full mb-3" onchange="onIngestOntologyChange()"></select>
         <div id="ingestTarget" class="text-xs text-slate-400 lg:flex-1 lg:min-h-0 lg:overflow-y-auto"></div>
       </div>
-      <div class="col-span-12 lg:col-span-8 flex flex-col gap-4 lg:overflow-y-auto lg:min-h-0">
+      <div class="col-span-12 lg:col-span-8 flex flex-col gap-3 lg:min-h-0">
+        <!-- 子标签：对象视图（单对象）/ 导入与审核（本体全局）/ 全部实例（本体全局） -->
+        <div class="flex gap-1 bg-slate-900/50 p-1 rounded-lg inline-flex self-start">
+          <button class="subtab active" id="subtabObject" onclick="setIngestTab('object')">对象视图</button>
+          <button class="subtab" id="subtabReview" onclick="setIngestTab('review')">导入与审核 <span id="ingestBadgeReview" class="hidden ml-1 px-1.5 rounded-full text-[10px] font-semibold bg-amber-500/20 text-amber-300"></span></button>
+          <button class="subtab" id="subtabAll" onclick="setIngestTab('all')">全部实例 <span id="ingestBadgeAll" class="ml-1 px-1.5 rounded-full text-[10px] bg-slate-700 text-slate-300"></span></button>
+        </div>
+
+        <!-- Tab 1：对象视图（随左侧树选中对象联动） -->
+        <div id="ingestPanelObject" class="flex flex-col gap-4 lg:overflow-y-auto lg:min-h-0">
         <div class="card p-4">
           <div class="flex items-center justify-between mb-2">
             <h3 class="font-medium">对象元数据</h3>
             <div id="objectMetaActions"></div>
           </div>
-          <div id="ingestObjectMeta" class="text-sm text-slate-400"></div>
+          <div id="ingestObjectMeta" class="text-sm text-slate-400">请先在左侧树中选择一个对象。</div>
         </div>
         <div class="card p-4">
           <div class="flex items-center justify-between mb-2">
-            <h3 class="font-medium">实例列表 <span class="text-xs font-normal text-slate-500">当前所选对象已入库的实例，点行可编辑</span></h3>
+            <h3 class="font-medium">实例列表 <span class="text-xs font-normal text-slate-500">该对象已入库的实例，点行查看详情 / 编辑</span></h3>
             <span id="instanceCount" class="text-xs text-slate-500"></span>
           </div>
           <div id="instanceList" class="space-y-2 max-h-[300px] overflow-auto"></div>
@@ -310,7 +301,7 @@
                 <button class="btn secondary" onclick="downloadIngestTemplate()">下载模板</button>
               </div>
             </div>
-            <p class="text-xs text-slate-500 mb-4">Excel 表头建议与对象属性 ID 保持一致，未匹配列会被忽略。导入后到下方「候选审核」确认再入库。</p>
+            <p class="text-xs text-slate-500 mb-4">Excel 表头建议与对象属性 ID 保持一致，未匹配列会被忽略。导入后到「导入与审核」页的「候选审核」确认再入库。</p>
             <h4 class="text-sm font-medium mb-2">② 粘贴记录 / LLM 文本抽取</h4>
             <div class="flex gap-4 mb-3 text-xs">
               <label class="flex items-center gap-1">
@@ -333,6 +324,10 @@
             <pre id="ingestPreviewResult" class="mt-3 hidden"></pre>
           </div>
         </div>
+        </div><!-- /ingestPanelObject -->
+
+        <!-- Tab 2：导入与审核（本体全局操作） -->
+        <div id="ingestPanelReview" class="hidden flex-col gap-4 lg:overflow-y-auto lg:min-h-0">
         <div class="card p-4">
           <h3 class="font-medium mb-1">多对象批量导入 <span class="text-xs font-normal text-slate-500">逆向建模模式：Excel 每个 sheet 自动匹配对象，命中对象一次性生成候选，需逐条确认入库</span></h3>
           <div class="grid grid-cols-2 gap-3 mb-3">
@@ -344,7 +339,7 @@
               <span id="ingestUploadMsgGlobal" class="text-xs text-slate-400"></span>
             </div>
           </div>
-          <p class="text-xs text-slate-500">与「导入 / 添加实例」的区别：无需选中对象，按 sheet 名匹配，可把实例批量导入全部命中对象；结果统一进入下方「候选审核」。</p>
+          <p class="text-xs text-slate-500">与「导入 / 添加实例」的区别：无需选中对象，按 sheet 名匹配，可把实例批量导入全部命中对象；结果统一进入同页下方「候选审核」。</p>
         </div>
         <div class="card p-4">
           <div class="flex justify-between items-center mb-2 flex-wrap gap-2">
@@ -367,19 +362,24 @@
           <div id="candidateList" class="max-h-[420px] overflow-auto"></div>
           <div id="candidateTotal" class="text-xs text-slate-500 mt-2"></div>
         </div>
+        </div><!-- /ingestPanelReview -->
 
-        <div id="instanceDetailPanel" class="card p-4 hidden">
-          <div class="flex justify-between items-center mb-3">
-            <h3 class="font-medium">实例详情</h3>
-            <div class="flex gap-2">
-              <button class="btn success" onclick="saveInstanceEdit()">保存</button>
-              <button class="btn secondary" onclick="closeInstanceDetail()">关闭</button>
-              <button class="btn" style="background:#991b1b" onclick="deleteInstance()">删除</button>
-            </div>
+        <!-- Tab 3：全部实例（本体全局） -->
+        <div id="ingestPanelAll" class="hidden flex-col gap-4 lg:overflow-y-auto lg:min-h-0">
+        <div class="card p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-medium">全部实例 <span class="text-xs font-normal text-slate-500">当前本体所有已入库实例，点行查看详情 / 编辑</span></h3>
+            <span id="allInstanceCount" class="text-xs text-slate-500"></span>
           </div>
-          <div class="text-xs text-slate-400 mb-2" id="instanceDetailMeta"></div>
-          <div id="instanceDetailBody" class="space-y-3"></div>
+          <div class="flex gap-2 mb-3">
+            <input id="allInstanceSearch" class="flex-1 text-xs" placeholder="按实例 ID / 属性值搜索…" oninput="state.allInstanceQ=this.value;renderAllInstanceList()" />
+            <select id="allInstanceFilter" class="text-xs" onchange="state.allInstanceObjectFilter=this.value;renderAllInstanceList()">
+              <option value="">全部对象</option>
+            </select>
+          </div>
+          <div id="allInstanceList" class="space-y-2 max-h-[520px] overflow-auto"></div>
         </div>
+        </div><!-- /ingestPanelAll -->
       </div>
     </section>
 
@@ -389,6 +389,7 @@
         <select id="graphOntology" class="min-w-[200px]" onchange="loadGraph()"></select>
         <div class="flex bg-slate-800/60 rounded-lg p-1 text-xs">
           <button id="tabSchema" class="px-3 py-1 rounded-md bg-slate-700" onclick="setGraphTab('schema')">本体视图</button>
+          <button id="tabTree" class="px-3 py-1 rounded-md" onclick="setGraphTab('tree')">类树</button>
           <button id="tabKnowledge" class="px-3 py-1 rounded-md" onclick="setGraphTab('knowledge')">知识图谱</button>
         </div>
       </div>
@@ -761,6 +762,6 @@
   </main>
   </div>
 
-  <script src="app.js?v=20261022f"></script>
+  <script src="app.js?v=20261028a"></script>
 </body>
 </html>
