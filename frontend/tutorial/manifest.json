@@ -1,0 +1,20 @@
+{
+  "title": "企业级业务本体平台 · 使用教程",
+  "systemVersion": "1.0.0",
+  "minor": 0,
+  "version": "1.0",
+  "updatedAt": "2026-10-28",
+  "chapters": [
+    { "id": "overview", "title": "全流程总览" },
+    { "id": "prepare", "title": "准备工作" },
+    { "id": "modeling", "title": "按本体清单建立本体" },
+    { "id": "constraints", "title": "设置约束与关系" },
+    { "id": "publish", "title": "校验并发布本体" },
+    { "id": "import", "title": "导入实例数据" },
+    { "id": "review", "title": "数据审核" },
+    { "id": "views", "title": "查看视图" },
+    { "id": "mcp", "title": "发布 MCP 服务" },
+    { "id": "ai", "title": "AI 平台调用" },
+    { "id": "appendix", "title": "附录：速查与常见坑" }
+  ]
+}

@@ -20,6 +20,33 @@
     .tab { padding: 8px 14px; margin-bottom: 2px; border-left: 2px solid transparent; color: var(--muted); cursor: pointer; border-radius: 0 6px 6px 0; font-size: 13px; transition: all .15s ease; }
     .tab:hover { color: var(--text); background: rgba(79,140,255,.06); }
     .tab.active { color: var(--text); border-left-color: var(--accent); background: rgba(79,140,255,.10); font-weight: 500; }
+    /* ---------- 使用教程 ---------- */
+    .tut-toc-h { font-size: 11px; color: #64748b; margin: 10px 4px 2px; }
+    .tut-toc a { display: flex; gap: 6px; align-items: baseline; padding: 5px 8px; border-radius: 6px; color: var(--muted); font-size: 12.5px; cursor: pointer; }
+    .tut-toc a:hover { background: rgba(79,140,255,.08); color: var(--text); }
+    .tut-toc a.on { background: rgba(79,140,255,.16); color: var(--text); }
+    .tut-toc a .n { color: #64748b; font-size: 11px; min-width: 14px; text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .tut-toc a.on .n { color: var(--accent); }
+    .tut-img { display: block; max-width: 100%; border: 1px solid var(--border); border-radius: 10px; margin: 10px 0 2px; box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+    .tut-cap { font-size: 11px; color: var(--muted); text-align: center; margin-bottom: 12px; }
+    .tut-nav { display: flex; justify-content: space-between; align-items: center; margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border); }
+    .tut-ver { margin-top: 8px; font-size: 11px; color: #64748b; text-align: right; }
+    .tut-md h1 { font-size: 18px; margin: 0 0 12px; }
+    .tut-md h2 { font-size: 16px; margin: 22px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+    .tut-md h3 { font-size: 14px; margin: 16px 0 6px; color: #bfdbfe; }
+    .tut-md p { font-size: 13px; line-height: 1.75; margin: 8px 0; }
+    .tut-md ul, .tut-md ol { font-size: 13px; line-height: 1.7; margin: 8px 0 8px 20px; }
+    .tut-md li { margin: 3px 0; }
+    .tut-md table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 12px; }
+    .tut-md th, .tut-md td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; vertical-align: top; }
+    .tut-md th { background: #0f1627; color: #cbd5e1; font-weight: 600; }
+    .tut-md code { background: #0b1222; border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 11.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .tut-md pre { margin: 10px 0; background: #0b1222; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow: auto; }
+    .tut-md pre code { border: none; padding: 0; background: transparent; font-size: 11.5px; line-height: 1.6; }
+    .tut-md blockquote { border-left: 3px solid var(--accent); background: rgba(79,140,255,.07); padding: 8px 12px; margin: 10px 0; border-radius: 0 8px 8px 0; font-size: 12.5px; line-height: 1.7; color: #cbd5e1; }
+    .tut-md blockquote.warn { border-left-color: #f59e0b; background: rgba(245,158,11,.08); }
+    .tut-md hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+    .tut-md a { color: var(--accent); text-decoration: underline; }
     pre { background: #0b1222; border: 1px solid var(--border); border-radius: 8px; padding: 10px; overflow: auto; max-height: 320px; font-size: 12px; }
     input, textarea, select { background: #0b1222; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
     label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
@@ -88,6 +115,8 @@
     <div class="tab" data-tab="mcp" onclick="switchTab('mcp')">MCP</div>
     <div class="tab" data-tab="logs" onclick="switchTab('logs')">日志</div>
     <div class="tab" data-tab="settings" onclick="switchTab('settings')">设置</div>
+    <div class="border-t border-slate-700/50 mt-2 pt-2 mb-1"></div>
+    <div class="tab" data-tab="tutorial" onclick="switchTab('tutorial')">使用教程</div>
   </nav>
 
   <main class="flex-1 p-4 overflow-auto">
@@ -765,6 +794,21 @@
             <div><label>实例抽取</label><textarea id="promptInstanceExtraction" rows="2" class="w-full text-xs"></textarea></div>
             <div><label>文档逆向</label><textarea id="promptReverseEngineering" rows="2" class="w-full text-xs"></textarea></div>
             <div><label>知识图谱</label><textarea id="promptKgConstruction" rows="2" class="w-full text-xs"></textarea></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 使用教程（frontend/tutorial/ 独立数据 + 独立版本号，规则参考 knowledgeOS） -->
+    <section id="tutorial" class="tab-content hidden">
+      <div class="flex gap-4 items-start">
+        <div class="w-56 shrink-0 card p-3 sticky top-0" style="max-height: calc(100vh - 120px); overflow: auto;">
+          <div id="tutVersion" class="text-xs text-slate-400 mb-2 leading-relaxed"></div>
+          <div id="tutToc" class="tut-toc"></div>
+        </div>
+        <div class="flex-1 card p-5" style="min-width: 0;">
+          <div id="tutContent" class="tut-md">
+            <div class="p-4 text-sm text-slate-400">点击左侧章节开始阅读…</div>
           </div>
         </div>
       </div>

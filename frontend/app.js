@@ -778,6 +778,7 @@ function switchTab(name) {
   if (name === 'mcp') { loadMcpOntologies(1); loadMcpTools(); loadMcpToken(); }
   if (name === 'logs') { loadServerLogs(); }
   if (name === 'settings') { loadLLMSettings(); }
+  if (name === 'tutorial') loadTutorial();
   _lastTab = name;
 }
 
@@ -4261,3 +4262,136 @@ window.addEventListener('unhandledrejection', e => {
   switchTab('home');
   setInterval(checkHealth, 10000);
 })();
+
+/* ================= 使用教程（frontend/tutorial/） =================
+   数据结构（版本化规则参考 knowledgeOS）：
+   tutorial/manifest.json      { title, systemVersion, minor, version, updatedAt, chapters[] }
+   tutorial/chapters/<id>.md   每章独立 Markdown
+   tutorial/assets/*.png       页面截图（与正文一一对应）
+   版本规则：教程 version = 系统主版本.教程小版本（如系统 1.x → 教程 1.n）；
+   系统主版本升级时教程主版本跟随并重置 minor；仅内容更新 minor+1 并重写 version。 */
+const tutState = { manifest: null };
+
+async function loadTutorial() {
+  try {
+    if (!tutState.manifest) {
+      const res = await fetch('tutorial/manifest.json', { cache: 'no-cache' });
+      if (!res.ok) throw new Error('manifest.json 加载失败 (' + res.status + ')');
+      tutState.manifest = await res.json();
+    }
+    const m = tutState.manifest;
+    $('tutVersion').textContent = m.title + ' · 教程 v' + m.version + '（系统 v' + m.systemVersion + '）· 更新 ' + m.updatedAt;
+    renderTutToc(m);
+    openTutChapter(m.chapters[0].id);
+  } catch (e) {
+    $('tutContent').innerHTML = '<p class="text-sm text-red-400">教程加载失败：' + esc(e.message) + '</p>';
+  }
+}
+
+function renderTutToc(m) {
+  let html = '';
+  m.chapters.forEach((ch, i) => {
+    html += '<div class="tut-toc-h">第 ' + (i + 1) + ' 章</div>'
+      + '<a data-ch="' + ch.id + '" title="' + esc(ch.title) + '"><span class="n">' + (i + 1) + '</span><span>' + esc(ch.title) + '</span></a>';
+  });
+  $('tutToc').innerHTML = html;
+  document.querySelectorAll('#tutToc a').forEach(a => { a.onclick = () => openTutChapter(a.dataset.ch); });
+}
+
+async function openTutChapter(id) {
+  const m = tutState.manifest;
+  if (!m) return;
+  const idx = m.chapters.findIndex(c => c.id === id);
+  document.querySelectorAll('#tutToc a').forEach(a => a.classList.toggle('on', a.dataset.ch === id));
+  const box = $('tutContent');
+  box.innerHTML = '<p class="text-sm text-slate-400">加载中…</p>';
+  try {
+    const res = await fetch('tutorial/chapters/' + id + '.md', { cache: 'no-cache' });
+    if (!res.ok) throw new Error('章节加载失败 (' + res.status + ')');
+    const md = await res.text();
+    const prev = idx > 0 ? m.chapters[idx - 1] : null;
+    const next = idx < m.chapters.length - 1 ? m.chapters[idx + 1] : null;
+    box.innerHTML = renderTutorialMarkdown(md)
+      + '<div class="tut-nav">'
+      + (prev ? '<button class="btn secondary" data-ch="' + prev.id + '">← ' + esc(prev.title) + '</button>' : '<span></span>')
+      + (next ? '<button class="btn" data-ch="' + next.id + '">' + esc(next.title) + ' →</button>' : '<span></span>')
+      + '</div>'
+      + '<div class="tut-ver">教程 v' + m.version + ' · 系统 v' + m.systemVersion + ' · 更新 ' + m.updatedAt + '</div>';
+    box.querySelectorAll('[data-ch]').forEach(b => { b.onclick = () => openTutChapter(b.dataset.ch); });
+    window.scrollTo({ top: 0 });
+  } catch (e) {
+    box.innerHTML = '<p class="text-sm text-red-400">' + esc(e.message) + '</p>';
+  }
+}
+
+/* 教程 Markdown 渲染：覆盖章节用到的子集（标题/表格/代码块/引用/列表/分隔线/图片/行内样式） */
+function renderTutorialMarkdown(src) {
+  const attr = s => esc(s).replace(/"/g, '&quot;');
+  const blocks = [];
+  src = src.replace(/```[\s\S]*?```/g, m => {
+    blocks.push(m.replace(/^```\w*\n?/, '').replace(/\n?```$/, ''));
+    return '\u0000B' + (blocks.length - 1) + '\u0000';
+  });
+  const inline = s => esc(s)
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)/g,
+      (m, alt, url, cap) => {
+        const abs = /^(?:[a-z]+:)?\/\//.test(url) || url.startsWith('/') || url.startsWith('data:');
+        const src = abs ? url : 'tutorial/' + url;
+        return '<img class="tut-img" src="' + attr(src) + '" alt="' + attr(alt) + '">' + (cap ? '<div class="tut-cap">' + attr(cap) + '</div>' : '');
+      })
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  const lines = src.split(/\r?\n/);
+  let html = '', i = 0, list = null;
+  const closeList = () => { if (list) { html += '</' + list + '>'; list = null; } };
+  while (i < lines.length) {
+    const t = lines[i].trim();
+    if (!t) { closeList(); i++; continue; }
+    if (/^\u0000B\d+\u0000$/.test(t)) {
+      closeList();
+      html += '<pre><code>' + esc(blocks[+t.match(/\d+/)[0]]) + '</code></pre>';
+      i++; continue;
+    }
+    const hm = t.match(/^(#{1,4})\s+(.*)$/);
+    if (hm) { closeList(); html += '<h' + hm[1].length + '>' + inline(hm[2]) + '</h' + hm[1].length + '>'; i++; continue; }
+    if (/^(-{3,}|\*{3,})$/.test(t)) { closeList(); html += '<hr>'; i++; continue; }
+    if (t.startsWith('|')) {
+      closeList();
+      const rows = [];
+      while (i < lines.length && lines[i].trim().startsWith('|')) { rows.push(lines[i].trim()); i++; }
+      const cells = r => r.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+      const isSep = r => /^[\s|:-]+$/.test(r) && r.includes('-');
+      const body = rows.filter(r => !isSep(r));
+      html += '<table><thead><tr>' + cells(body[0]).map(c => '<th>' + inline(c) + '</th>').join('') + '</tr></thead><tbody>'
+        + body.slice(1).map(r => '<tr>' + cells(r).map(c => '<td>' + inline(c) + '</td>').join('') + '</tr>').join('') + '</tbody></table>';
+      continue;
+    }
+    if (t.startsWith('>')) {
+      closeList();
+      const q = [];
+      while (i < lines.length && lines[i].trim().startsWith('>')) { q.push(lines[i].trim().replace(/^>\s?/, '')); i++; }
+      const txt = q.join(' ');
+      html += '<blockquote' + (/⚠|注意|Warning/i.test(txt) ? ' class="warn"' : '') + '>' + inline(txt) + '</blockquote>';
+      continue;
+    }
+    if (/^[-*]\s+/.test(t)) {
+      if (list !== 'ul') { closeList(); html += '<ul>'; list = 'ul'; }
+      html += '<li>' + inline(t.replace(/^[-*]\s+/, '')) + '</li>'; i++; continue;
+    }
+    if (/^\d+[.)]\s+/.test(t)) {
+      if (list !== 'ol') { closeList(); html += '<ol>'; list = 'ol'; }
+      html += '<li>' + inline(t.replace(/^\d+[.)]\s+/, '')) + '</li>'; i++; continue;
+    }
+    closeList();
+    const p = [t]; i++;
+    while (i < lines.length) {
+      const nt = lines[i].trim();
+      if (!nt || /^#{1,4}\s/.test(nt) || nt.startsWith('|') || nt.startsWith('>') || /^[-*]\s+/.test(nt)
+        || /^\d+[.)]\s+/.test(nt) || /^(-{3,}|\*{3,})$/.test(nt) || /^\u0000B\d+\u0000$/.test(nt)) break;
+      p.push(nt); i++;
+    }
+    html += '<p>' + inline(p.join(' ')) + '</p>';
+  }
+  closeList();
+  return html.replace(/\u0000B(\d+)\u0000/g, (m, n) => '<pre><code>' + esc(blocks[+n]) + '</code></pre>');
+}

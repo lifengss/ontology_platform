@@ -69,3 +69,7 @@ _research_oswalpalash/
 .workbuddy/
 tmp_verify_ingest/
 tmp_calc/
+
+# 根目录业务工作文件（业务数据，不随项目提交）
+/成本清单_维保服务产品_复算版.xlsx
+/L6采购计划_示例实例.xlsx

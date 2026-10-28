@@ -40,10 +40,14 @@ def _log_path(log_dir: str, day: datetime) -> str:
     return os.path.join(log_dir, f"app-{day.strftime('%Y-%m-%d')}.log")
 
 
-def _sweep_old_logs(log_dir: str, retention_days: int = DEFAULT_RETENTION_DAYS) -> None:
-    """删除超过 retention_days 天的日志文件。"""
+def _sweep_old_logs(
+    log_dir: str,
+    retention_days: int = DEFAULT_RETENTION_DAYS,
+    pattern: str = "app-*.log",
+) -> None:
+    """删除 mtime 超过 retention_days 天且匹配 pattern 的日志文件。"""
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-    for path in glob.glob(os.path.join(log_dir, "app-*.log")):
+    for path in glob.glob(os.path.join(log_dir, pattern)):
         try:
             mtime = datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc)
             if mtime < cutoff:
@@ -125,6 +129,33 @@ def get_logger(name: str, extra: dict | None = None) -> logging.Logger:
 
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
+    logger.propagate = False
+    return logger
+
+
+def get_llm_logger(name: str = "ai_helper.llm") -> logging.Logger:
+    """LLM 请求/响应内容专用日志：``logs/llm/llm-YYYY-MM-DD.log``（JSON 行，按天）。
+
+    - 记录完整请求体（messages/prompt）与完整响应体，便于诊断 prompt 质量与模型输出
+    - 不记录请求头（避免泄露 API Key）；仅落文件，不刷 stdout（prompt 可能很大）
+    - 保留策略复用应用日志（DEFAULT_RETENTION_DAYS 天，按 mtime 清扫）
+    """
+    settings = get_settings()
+    logger = logging.getLogger(name)
+    if logger.handlers:
+        return logger
+    logger.setLevel(settings.log_level)
+
+    llm_dir = os.path.join(settings.log_dir, "llm")
+    os.makedirs(llm_dir, exist_ok=True)
+    _sweep_old_logs(llm_dir, DEFAULT_RETENTION_DAYS, pattern="llm-*.log")
+
+    file_handler = logging.FileHandler(
+        os.path.join(llm_dir, f"llm-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.log"),
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(JsonFormatter())
+    logger.addHandler(file_handler)
     logger.propagate = False
     return logger
 
