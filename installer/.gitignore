@@ -1,0 +1,3 @@
+# 构建产物（build.ps1 每次运行自动重建/下载，不入 git）
+payload/
+downloads/

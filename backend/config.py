@@ -46,7 +46,7 @@ class Settings:
 
     def __init__(self) -> None:
         self.app_name: str = os.getenv("APP_NAME", "EnterpriseOntologyPlatform")
-        self.version: str = os.getenv("APP_VERSION", "1.0.0")
+        self.version: str = os.getenv("APP_VERSION", "1.0.1")
 
         # 依赖服务（VS0 健康检查会探测可达性）
         # MVP 默认从本机启动，不依赖 Docker；Docker Compose 通过环境变量覆盖即可

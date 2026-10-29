@@ -427,7 +427,7 @@
 ```json
 { "success": true, "data": {
     "status": "ok",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "dependencies": { "jena": "healthy", "neo4j": "healthy", "postgres": "healthy" }
 }, "error": null }
 ```
@@ -559,6 +559,8 @@
 | POST | `/api/ontologies/{id}/publish` | 将 `draft` 状态本体发布为 `active` |
 
 - 所有逆向生成结果默认先为 `status=draft`，可编辑后发布；发布时调用翻译器写入 Jena。
+- `POST /api/ontologies/from-text` 请求体可选 `max_tokens`（整数 ≥1）：LLM 生成最大 token 数，缺省用 LLM 设置中的 `max_tokens`。**不要传小值**：思考型模型（如 qwen3.8-27b）的 reasoning tokens 计入 completion_tokens，小值会被推理过程吃光导致正文为空。
+- LLM 生成失败（不可达/正文为空/JSON 非法）时自动回退确定性模板，草稿仍正常返回，但记录带 `generation_mode` 字段：`"llm"`=模型真实产出，`"fallback"`=确定性兜底（`from-text` 与 `from-doc` 均适用）；前端对 `fallback` 结果有显式「模板兜底」标识，勿将兜底结果当 AI 产出。
 - `POST /api/ontologies/from-excel` 约束列（**均可选**，缺列=无约束）：属性表支持 `min_length` / `max_length` / `pattern` / `minimum` / `maximum` / `enum` 六个约束列（中文列名"最小长度/最大长度/正则/最小值/最大值/枚举"亦可）；`enum` 逗号分隔，数值属性的枚举项可为数字（类型跟随 data_type，同 §2.1）；数字列解析失败时**忽略该列**而非报错（宽容导入）。
 - `from-doc` 解析异常时返回 `error` 状态；LLM 不可达时启用确定性 fallback 生成最小可用本体。
 
