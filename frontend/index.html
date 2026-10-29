@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>企业业务本体平台 · MVP</title>
+  <title>格物 Lattice（企业业务本体平台）· Beta V1.0</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <style>
@@ -86,8 +86,9 @@
 <body class="h-screen overflow-hidden flex flex-col">
   <header class="panel mx-4 mt-4 px-5 py-3 flex items-center justify-between">
     <div class="flex items-center gap-3">
-      <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-bold">O</div>
-      <h1 class="text-base font-semibold whitespace-nowrap">企业业务本体平台 <span class="text-xs text-slate-400 font-normal">MVP</span></h1>
+      <img id="brandLogo" src="assets/logo-inspur.png" alt="浪潮信息" class="h-7 w-auto select-none" draggable="false" />
+      <span class="w-px h-5 bg-slate-700/60"></span>
+      <h1 class="text-base font-semibold whitespace-nowrap">格物 Lattice <span class="text-xs text-slate-400 font-normal">· 企业业务本体平台 · Beta V1.0</span></h1>
     </div>
     <div class="flex items-center gap-2 text-xs">
       <span class="text-slate-500" title="所属部门：筛选项目空间（项目归属的业务部门）">部门</span>
@@ -775,7 +776,7 @@
             <div class="col-span-2"><label>Base URL</label><input id="llmBaseUrl" class="w-full" placeholder="https://api.example.com/v1" /></div>
             <div class="col-span-2"><label>API Key <span id="llmKeyStatus" class="badge draft">未配置</span></label>
               <div class="flex gap-2">
-                <input id="llmApiKey" type="password" class="w-full" placeholder="留空表示不修改" />
+                <input id="llmApiKey" type="password" class="w-full" placeholder="保持不变表示不修改" />
                 <button class="btn secondary" onclick="toggleApiKeyVisibility()" id="apiKeyEye">👁</button>
               </div>
             </div>
@@ -817,6 +818,101 @@
   </main>
   </div>
 
-  <script src="app.js?v=20261028e"></script>
+  <!-- 彩蛋：按住 Alt 连点 Logo 5 次弹出开发者信息；鼠标靠近「×」弹框随机躲闪；Esc（或抓到 × 点击）关闭 -->
+  <div id="devEasterModal" class="hidden"
+       style="position:fixed; z-index:1000; width:min(360px, calc(100vw - 32px)); left:50%; top:50%; transform:translate(-50%,-50%); transition:left .25s ease-out, top .25s ease-out;">
+    <div class="panel p-5" style="box-shadow:0 16px 48px rgba(0,0,0,.55);">
+      <div class="flex items-start justify-between mb-3">
+        <div class="text-[11px] text-slate-500 tracking-[0.2em]">DEVELOPER</div>
+        <button id="devEasterClose" title="关闭"
+                class="w-6 h-6 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-slate-700/50 text-base leading-none">&times;</button>
+      </div>
+      <div class="text-sm font-semibold">浪潮电子信息产业股份有限公司</div>
+      <div class="text-sm text-slate-300 mt-1.5">智能化转型部&nbsp;&nbsp;李峰</div>
+      <div class="text-sm text-slate-300 mt-1.5">欢迎邮件垂询：<a href="mailto:lif_lc@ieisystem.com" class="text-[#4f8cff] hover:underline">lif_lc@ieisystem.com</a></div>
+      <div class="text-[11px] text-slate-500 mt-4">按 Esc 键关闭</div>
+    </div>
+  </div>
+  <script>
+  (function () {
+    var modal = document.getElementById('devEasterModal');
+    var closeBtn = document.getElementById('devEasterClose');
+    var logo = document.getElementById('brandLogo');
+    if (!modal || !closeBtn || !logo) return;
+
+    var MARGIN = 16, MIN_DIST = 160, TRIGGER_DIST = 56, DODGE_CD = 250;
+    var isOpen = false, lastDodge = 0, altClicks = 0, altTimer = null;
+
+    function centerModal() {
+      modal.style.left = ((window.innerWidth - modal.offsetWidth) / 2) + 'px';
+      modal.style.top = ((window.innerHeight - modal.offsetHeight) / 2) + 'px';
+    }
+
+    function randomDodge(mx, my) {
+      var vw = window.innerWidth, vh = window.innerHeight;
+      var minX = MARGIN + modal.offsetWidth / 2, maxX = vw - MARGIN - modal.offsetWidth / 2;
+      var minY = MARGIN + modal.offsetHeight / 2, maxY = vh - MARGIN - modal.offsetHeight / 2;
+      var cx = minX, cy = minY;
+      for (var i = 0; i < 24; i++) {
+        cx = minX + Math.random() * Math.max(0, maxX - minX);
+        cy = minY + Math.random() * Math.max(0, maxY - minY);
+        if (Math.hypot(cx - mx, cy - my) >= MIN_DIST) break;
+      }
+      modal.style.left = cx + 'px';
+      modal.style.top = cy + 'px';
+    }
+
+    function onMove(e) {
+      if (!isOpen) return;
+      var now = Date.now();
+      if (now - lastDodge < DODGE_CD) return;
+      var r = closeBtn.getBoundingClientRect();
+      var bx = r.left + r.width / 2, by = r.top + r.height / 2;
+      if (Math.hypot(bx - e.clientX, by - e.clientY) < TRIGGER_DIST) {
+        lastDodge = now;
+        randomDodge(e.clientX, e.clientY);
+      }
+    }
+
+    function onKey(e) {
+      if (e.key === 'Escape') { e.stopPropagation(); close(); }
+    }
+
+    function open() {
+      if (isOpen) return;
+      isOpen = true;
+      modal.classList.remove('hidden');
+      centerModal();
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('keydown', onKey, true);
+    }
+
+    function close() {
+      if (!isOpen) return;
+      isOpen = false;
+      modal.classList.add('hidden');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('keydown', onKey, true);
+    }
+
+    closeBtn.addEventListener('click', close);
+
+    logo.addEventListener('click', function (e) {
+      if (e.altKey) {
+        altClicks++;
+        clearTimeout(altTimer);
+        altTimer = setTimeout(function () { altClicks = 0; }, 2000);
+        if (altClicks >= 5) { altClicks = 0; open(); }
+      } else {
+        altClicks = 0;
+      }
+    });
+
+    window.addEventListener('keyup', function (e) {
+      if (e.key === 'Alt') altClicks = 0;
+    });
+  })();
+  </script>
+  <script src="app.js?v=20261029a"></script>
 </body>
 </html>
