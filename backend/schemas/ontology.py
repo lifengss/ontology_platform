@@ -112,6 +112,10 @@ class OntologyFromTextRequest(BaseModel):
     text: str
     llm_endpoint: Optional[str] = None
     model: Optional[str] = None
+    max_tokens: Optional[int] = Field(
+        default=None, ge=1,
+        description="LLM 生成最大 token 数；缺省用 LLM 设置中的 max_tokens（思考型模型勿设小值，reasoning 计入 completion_tokens）",
+    )
 
 
 class OntologyEnrichRequest(BaseModel):

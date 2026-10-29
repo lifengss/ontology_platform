@@ -21,7 +21,7 @@
 | Provider | `OpenAI 兼容` / `openai` / `azure` |
 | Model | 模型 id（如 `deepseek-v4-flash`） |
 | Base URL | 端点（如 `https://api.icompify.com/v1`） |
-| API Key | 留空表示不修改；显示为密码框 |
+| API Key | 保持不变表示不修改；已有 key 默认以 ······· 回显（密码框），点 👁 眼睛图标显示明文 |
 | Temperature / Timeout / Max Tokens | 采样与超时参数 |
 | 保存设置 / 测试连通 | 保存后点「测试连通」验证端点可用 |
 

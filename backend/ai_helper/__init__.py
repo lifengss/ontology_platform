@@ -175,22 +175,38 @@ def generate_ontology_from_text(
     endpoint: str | None = None,
     model: str | None = None,
     fallback: bool = True,
-) -> dict[str, Any]:
+    max_tokens: int | None = None,
+) -> tuple[dict[str, Any], str]:
+    """自然语言 → 本体定义。返回 (本体 dict, 来源)。
+
+    来源为 "llm"（模型真实产出）或 "fallback"（确定性兜底），供 UI 区分，
+    避免用户把兜底结果误当成 AI 产出。
+
+    max_tokens 默认 None → 取 LLM 设置中的 max_tokens（如 65535）。
+    不要硬编码小值：思考型模型的 reasoning tokens 计入 completion_tokens，
+    固定 8192 会被推理过程吃光导致 content 为空、误判失败走兜底。
+    """
     prompt = render_ontology_generation(text)
     try:
-        # 本体生成需要完整 JSON，不设置 max_tokens 避免被截断；使用较低温度提升稳定性
-        result = call_llm(prompt, base_url=endpoint, model=model, temperature=0.1, max_tokens=8192)
-        content = result["choices"][0]["message"]["content"]
-        return extract_json(content)
+        result = call_llm(prompt, base_url=endpoint, model=model, temperature=0.1, max_tokens=max_tokens)
+        message = result.get("choices", [{}])[0].get("message") or {}
+        content = message.get("content")
+        # 思考型模型可能只产 reasoning 不产 content（token 被思考吃光）→ 视为失败
+        if not content:
+            logger.warning("LLM content 为空（reasoning 耗尽 max_tokens 或未输出正文），使用确定性 fallback 抽取")
+            raise ValueError("LLM 返回内容为空")
+        return extract_json(str(content)), "llm"
     except Exception as e:  # noqa: BLE001
         logger.warning("LLM 调用失败，使用确定性 fallback 抽取: %s", e)
         if not fallback:
             raise
-        return deterministic_extract_ontology(text)
+        return deterministic_extract_ontology(text), "fallback"
 
 
-def generate_ontology_from_document(text: str, endpoint: str | None = None, model: str | None = None) -> dict[str, Any]:
-    return generate_ontology_from_text(text, endpoint, model, fallback=True)
+def generate_ontology_from_document(
+    text: str, endpoint: str | None = None, model: str | None = None, max_tokens: int | None = None
+) -> tuple[dict[str, Any], str]:
+    return generate_ontology_from_text(text, endpoint, model, fallback=True, max_tokens=max_tokens)
 
 
 # ---- 确定性 fallback：LLM 不可达时从关键词生成最小可用本体 ----

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from ai_helper import reload_llm_config, test_connection
 from ai_helper.config import get_llm_config
 from core.responses import success
-from credential_store import delete_secret, save_secret
+from credential_store import save_secret
 from logging_setup import get_logger
 
 router = APIRouter(prefix="/api/llm", tags=["llm"])
@@ -48,6 +48,17 @@ def get_llm_settings():
     return success(data)
 
 
+@router.get("/settings/reveal")
+def reveal_llm_api_key():
+    """返回当前生效 API key 明文（供设置页以 ······· 回显、点眼睛图标显示明文）。
+
+    本机单用户模式（平台自身无鉴权层），且 key 本就落盘本机 secrets 文件，
+    回给本机前端无新增暴露面；严禁把 key 写入日志。
+    """
+    cfg = get_llm_config()
+    return success({"api_key": cfg.api_key() or ""})
+
+
 @router.put("/settings")
 def update_llm_settings(payload: LLMSettingsUpdate):
     """更新 LLM 运行时配置（保存到 data/llm_config.json）；api_key 单独落到 secrets。"""
@@ -62,11 +73,10 @@ def update_llm_settings(payload: LLMSettingsUpdate):
         data["prompts"].update(payload.prompts)
     cfg.save(data)
 
-    if payload.api_key is not None:
-        if payload.api_key.strip():
-            save_secret("LLM_API_KEY", payload.api_key.strip())
-        else:
-            delete_secret("LLM_API_KEY")
+    # 空串 / null = 不修改（与前端"保持不变表示不修改"契约一致）。
+    # 修复：旧版把空串当"清除"，改非 key 设置保存时会删掉已配置的 key。
+    if payload.api_key is not None and payload.api_key.strip():
+        save_secret("LLM_API_KEY", payload.api_key.strip())
 
     reload_llm_config()
     logger.info("LLM settings updated")

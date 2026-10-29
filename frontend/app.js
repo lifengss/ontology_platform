@@ -816,7 +816,7 @@ function renderOntologyList() {
   el.innerHTML = items.map(o => {
     const status = o.status || 'active';
     return '<div class="group p-2 rounded-lg hover:bg-slate-800/60 cursor-pointer border border-transparent hover:border-slate-700 ' + (state.currentOntology?.id === o.id ? 'bg-slate-800 border-slate-700' : '') + '" onclick="selectOntology(' + JSON.stringify(o).replace(/"/g, '&quot;') + ')">' +
-      '<div class="flex justify-between items-center"><span class="font-medium text-sm">' + esc(o.name) + '</span><span class="badge ' + status + '">' + (status === 'draft' ? '草稿' : '已发布') + '</span></div>' +
+      '<div class="flex justify-between items-center"><span class="font-medium text-sm">' + esc(o.name) + '</span><span class="flex gap-1">' + (o.generation_mode === 'fallback' ? '<span class="badge draft" title="LLM 不可用，结果为确定性关键词抽取兜底，非 AI 产出">模板兜底</span>' : '') + '<span class="badge ' + status + '">' + (status === 'draft' ? '草稿' : '已发布') + '</span></span></div>' +
       '<div class="text-xs text-slate-500">' + o.id + ' · ' + (o.objects?.length || 0) + ' 对象</div>' +
       '<div class="mt-1 flex gap-3 text-xs opacity-0 group-hover:opacity-100 hover:opacity-100">' +
         '<span class="text-sky-400" onclick="event.stopPropagation(); editListOntology(&quot;' + o.id + '&quot;)">编辑</span>' +
@@ -852,7 +852,8 @@ function selectOntology(o) {
   const status = o.status || 'active';
   $('detailBadge').textContent = status === 'draft' ? '草稿' : '已发布';
   $('detailBadge').className = 'badge ' + status;
-  $('detailMeta').textContent = o.id + ' · ' + (o.modeling_type || 'manual') + ' · ' + (o.objects?.length || 0) + ' 对象 · v' + o.version;
+  const genMode = o.generation_mode === 'fallback' ? ' · 模板兜底(非AI)' : '';
+  $('detailMeta').textContent = o.id + ' · ' + (o.modeling_type || 'manual') + genMode + ' · ' + (o.objects?.length || 0) + ' 对象 · v' + o.version;
   $('detailBody').textContent = JSON.stringify(o, null, 2);
   $('validateResult').classList.add('hidden');
   $('btnPublish').classList.toggle('hidden', status !== 'draft');
@@ -1396,11 +1397,15 @@ async function generateFromText() {
   const text = $('aiText').value.trim();
   if (!text) return toast('请先输入业务描述', 'info');
   $('btnAiGen').disabled = true;
-  toast('AI 正在生成本体…', 'info', 2000);
+  toast('AI 正在生成本体…（思考型模型可能需要 1~3 分钟）', 'info', 5000);
   try {
     const j = await api('/api/ontologies/from-text', { method: 'POST', body: JSON.stringify({ text }) });
     const draft = j.data;
-    toast('已生成本体草稿: ' + draft.name, 'ok');
+    if (draft.generation_mode === 'fallback') {
+      toast('LLM 生成失败，已回退到确定性模板（仅关键词抽取，非 AI 产出）。请检查「设置 → LLM」后重新生成: ' + draft.name, 'err', 10000);
+    } else {
+      toast('已生成本体草稿: ' + draft.name, 'ok');
+    }
     closeEditor();
     await loadOntologies();
     selectOntology(draft);
@@ -1434,10 +1439,14 @@ async function pollJob(jobId) {
       const j = await api('/api/ontologies/jobs/' + jobId);
       const st = j.data.status;
       if (st === 'done') {
-        toast('文档解析完成', 'ok');
         $('btnDocParse').disabled = false;
         await loadOntologies();
         const draft = state.ontologies.find(o => o.id === j.data.draft_id);
+        if (draft && draft.generation_mode === 'fallback') {
+          toast('文档解析完成（LLM 不可用，使用模板兜底结果，非 AI 产出）', 'err', 10000);
+        } else {
+          toast('文档解析完成', 'ok');
+        }
         if (draft) selectOntology(draft);
         return;
       }
@@ -3661,6 +3670,17 @@ async function loadLLMSettings() {
       keyStatus.textContent = '未配置';
       keyStatus.className = 'text-xs badge draft';
     }
+    // key 已配置时预填明文到密码框（默认显示 ·······，点眼睛图标显示明文）；
+    // 保存时仅当值确实变化才回传，改其他设置不会误触 key
+    if (keyStatus.textContent.startsWith('已配置')) {
+      try {
+        const rev = await api('/api/llm/settings/reveal', { projectId: null });
+        state.llmKeyLoaded = (rev.data && rev.data.api_key) || '';
+        $('llmApiKey').value = state.llmKeyLoaded;
+      } catch (_) { state.llmKeyLoaded = ''; }
+    } else {
+      state.llmKeyLoaded = '';
+    }
     const prompts = s.prompts || {};
     $('promptOntologyGeneration').value = prompts.ontology_generation || '';
     $('promptInstanceExtraction').value = prompts.instance_extraction || '';
@@ -3691,7 +3711,8 @@ async function saveLLMSettings() {
     temperature: parseFloat($('llmTemperature').value),
     timeout: parseInt($('llmTimeout').value, 10),
     max_tokens: parseInt($('llmMaxTokens').value, 10),
-    api_key: $('llmApiKey').value,
+    // key 仅当用户确实修改过（非空且不同于预填值）才发送；否则 null = 不修改
+    api_key: ($('llmApiKey').value.trim() && $('llmApiKey').value.trim() !== state.llmKeyLoaded) ? $('llmApiKey').value.trim() : null,
     prompts: {
       ontology_generation: $('promptOntologyGeneration').value,
       instance_extraction: $('promptInstanceExtraction').value,
@@ -3701,7 +3722,6 @@ async function saveLLMSettings() {
   };
   try {
     await api('/api/llm/settings', { method: 'PUT', body: JSON.stringify(payload), projectId: null });
-    $('llmApiKey').value = '';
     state.llmSettings.base_url = payload.base_url;
     state.llmSettings.model = payload.model;
     await loadLLMSettings();
@@ -3714,9 +3734,12 @@ async function testLLMConnection() {
   el.classList.remove('hidden');
   el.textContent = '测试中…';
   try {
+    const keyVal = $('llmApiKey').value.trim();
     const payload = {
       base_url: $('llmBaseUrl').value.trim() || undefined,
       model: $('llmModel').value.trim() || undefined,
+      // 用户改过 key 时用新值测（否则后端用已保存的旧 key，测的不是要保存的配置）
+      api_key: (keyVal && keyVal !== state.llmKeyLoaded) ? keyVal : undefined,
       timeout: 30
     };
     const j = await api('/api/llm/test', { method: 'POST', body: JSON.stringify(payload), projectId: null });

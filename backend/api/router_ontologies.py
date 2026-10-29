@@ -515,12 +515,15 @@ def list_snapshots(
 # ---- 用户友好的逆向/辅助生成入口（VS5+） ----
 
 
-def _save_draft(record: dict[str, Any], source: str, project_id: str) -> dict[str, Any]:
+def _save_draft(record: dict[str, Any], source: str, project_id: str, generation_mode: str | None = None) -> dict[str, Any]:
     record["id"] = uuid.uuid4().hex
     record["modeling_type"] = "reverse"
     record["status"] = "draft"
     record["project_id"] = project_id
     record["draft_source"] = source
+    # generation_mode: "llm"=模型真实产出 / "fallback"=确定性兜底（LLM 失败降级），供 UI 明确提示
+    if generation_mode:
+        record["generation_mode"] = generation_mode
     record["created_at"] = _now()
     record["updated_at"] = record["created_at"]
     _store_for(project_id).insert(record)
@@ -629,7 +632,9 @@ def create_from_text(payload: OntologyFromTextRequest, project_id: str = Depends
     if not payload.text.strip():
         raise ApiError("VALIDATION_ERROR", "text 不能为空", http_status=422)
     try:
-        generated = generate_ontology_from_text(payload.text, payload.llm_endpoint, payload.model)
+        generated, gen_mode = generate_ontology_from_text(
+            payload.text, payload.llm_endpoint, payload.model, max_tokens=payload.max_tokens
+        )
         record = _normalize_generated(generated)
     except ApiError:
         raise
@@ -639,8 +644,8 @@ def create_from_text(payload: OntologyFromTextRequest, project_id: str = Depends
     biz_errors = blocking_violations(record)
     if biz_errors:
         raise ApiError("VALIDATION_ERROR", "生成的本体未通过业务层校验", http_status=422, details={"violations": biz_errors})
-    draft = _save_draft(record, "text", project_id)
-    logger.info("from-text draft_id=%s project_id=%s", draft["id"], project_id)
+    draft = _save_draft(record, "text", project_id, gen_mode)
+    logger.info("from-text draft_id=%s project_id=%s generation_mode=%s", draft["id"], project_id, gen_mode)
     return success(draft, http_status=201)
 
 
@@ -709,16 +714,16 @@ def _run_doc_extraction(
         for filename, content in file_infos:
             texts.append(f"--- 文档: {filename} ---\n" + _extract_document_text(filename, io.BytesIO(content)))
         combined_text = "\n\n".join(texts)
-        generated = generate_ontology_from_document(combined_text, llm_endpoint, model)
+        generated, gen_mode = generate_ontology_from_document(combined_text, llm_endpoint, model)
         record = _normalize_generated(generated)
         biz_errors = blocking_violations(record)
         if biz_errors:
             JOBS[job_id] = {"status": "error", "draft_id": None, "error": f"业务层校验未通过: {biz_errors}"}
             logger.warning("from-doc job=%s 业务层校验未通过: %s", job_id, biz_errors)
             return
-        draft = _save_draft(record, "document", project_id)
+        draft = _save_draft(record, "document", project_id, gen_mode)
         JOBS[job_id] = {"status": "done", "draft_id": draft["id"], "error": None}
-        logger.info("from-doc job=%s done draft_id=%s", job_id, draft["id"])
+        logger.info("from-doc job=%s done draft_id=%s generation_mode=%s", job_id, draft["id"], gen_mode)
     except Exception as e:  # noqa: BLE001
         logger.warning("from-doc job=%s 失败: %s", job_id, e)
         JOBS[job_id] = {"status": "error", "draft_id": None, "error": f"{type(e).__name__}: {e}"}
@@ -1068,13 +1073,17 @@ def _generate_ontology_enrichment(
 1. 顶层字段只能是 name、description、objects、constraints。
 2. 必须保留并复用已有对象 id；只有新材料中确实出现的新业务实体才新增对象。
 3. 新增属性应放在最相关的已有对象或新增对象上，避免重复。
-4. data_type 只能是 string/integer/float/boolean/date；cardinality 只能是 one_to_one/one_to_many/many_to_one/many_to_many。
+4. data_type 只能是 string/integer/float/boolean/date/datetime；cardinality 只能是 one_to_one/one_to_many/many_to_one/many_to_many。
 5. target_object 必须指向 objects 中真实存在的 id。
 6. id 使用小写下划线，全局唯一，建议以 obj_/attr_/rel_ 前缀区分。
 """
-    result = call_llm(prompt, base_url=endpoint, model=model, temperature=0.1, max_tokens=8192, system_message=system_msg)
-    content = result["choices"][0]["message"]["content"]
-    return extract_json(content)
+    # 不硬编码 max_tokens：思考型模型的 reasoning 计入 completion_tokens，小值会被吃光导致 content 为空
+    result = call_llm(prompt, base_url=endpoint, model=model, temperature=0.1, system_message=system_msg)
+    message = result.get("choices", [{}])[0].get("message") or {}
+    content = message.get("content")
+    if not content:
+        raise ApiError("LLM_ERROR", "LLM 返回内容为空（reasoning 耗尽 max_tokens 或未输出正文），请重试或调大 LLM 设置中的 max_tokens", http_status=422)
+    return extract_json(str(content))
 
 
 def _merge_ontology(

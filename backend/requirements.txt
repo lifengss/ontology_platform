@@ -1,3 +1,4 @@
+# coding: utf-8
 # 企业业务本体平台 — 后端依赖（MVP，本地 Docker Compose）
 # 核心 Web 框架
 fastapi==0.115.0
@@ -6,7 +7,8 @@ pydantic==2.14.1
 python-multipart==0.0.12
 
 # 本体 / 推理（Jena 以独立 HTTP 服务调用，不直接依赖 Java 库）
-rdflib==7.0.0
+# 注：pyshacl 0.40.1 要求 rdflib>=7.3.0；运行环境实际为 7.6.0，此处对齐（原 7.0.0 无法与 pyshacl 共存安装）
+rdflib==7.6.0
 # SHACL 校验引擎（纯 Python，离线可用；VS2 权威校验）
 pyshacl==0.40.1
 
