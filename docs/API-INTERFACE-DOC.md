@@ -427,7 +427,7 @@
 ```json
 { "success": true, "data": {
     "status": "ok",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "dependencies": { "jena": "healthy", "neo4j": "healthy", "postgres": "healthy" }
 }, "error": null }
 ```

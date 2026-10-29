@@ -65,6 +65,21 @@ function Get-NextFreePort([int]$defaultPort, [int]$step = 200) {
     Fail "端口 $defaultPort 附近 $step 个端口全部被占用，无法自动分配"
     return $defaultPort
 }
+# 试运行探测：解释器是否"实际能跑"（import sys/encodings/site 成功且 prefix 指向 python 安装树）。
+# 背景（2026-10-30 远程机实锤）：python.exe 是安装时最先释放的文件，"文件存在"≠安装完整；
+# 标准库 Lib\ / python310.zip 未落盘时会 Fatal init_fs_encoding / No module named 'encodings'。
+function Test-PythonRunnable([string]$exe) {
+    if (-not (Test-Path $exe)) { return $false }
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    # 宿主环境（IDE/智能体 shim）注入的 PYTHONHOME/PYTHONPATH 会让解释器算错 prefix —— 探测时清空
+    $oldHome = $env:PYTHONHOME; $oldPath = $env:PYTHONPATH
+    $env:PYTHONHOME = $null; $env:PYTHONPATH = $null
+    $probe = (& $exe -c "import sys,encodings,site;print(sys.prefix)" 2>&1 | Select-Object -First 1)
+    $code = $LASTEXITCODE
+    $env:PYTHONHOME = $oldHome; $env:PYTHONPATH = $oldPath
+    return (($code -eq 0) -and ("$probe" -match 'python'))
+}
 # 在 conf 文件中替换（含注释行）或追加 key 行
 function Set-ConfLine($path, $keyRegex, $newLine) {
     $content = [System.IO.File]::ReadAllText($path)
@@ -81,6 +96,49 @@ Log "===== 本体平台安装配置开始 InstallDir=$InstallDir ====="
 $runtime = Join-Path $InstallDir "runtime"
 $depsDir = Join-Path $InstallDir "deps"
 $scriptsDir = $PSScriptRoot
+
+# ---------------------------------------------------------------------------
+# 0. 撤销指向本安装目录的历史"重启后删除"登记（PendingFileRenameOperations）
+#    场景（2026-10-30 远程机实锤）：卸载时安装目录删不净 → 某工具把整目录登记为延迟删除 →
+#    重装完成后，下次开机 smss 在系统早期把刚装好的整个安装目录删掉（表现为"重启后安装目录消失"）。
+#    对策：仅移除指向 $InstallDir 本体的条目（兼容 \??\ 前缀 / 8.3 短名 / 正斜杠变体）；
+#    其他路径的登记一律不动。非致命：任何失败只告警，不阻断安装。
+# ---------------------------------------------------------------------------
+$pfroKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+try {
+    $pfro = (Get-ItemProperty -LiteralPath $pfroKey -Name PendingFileRenameOperations -ErrorAction Stop).PendingFileRenameOperations
+    if ($pfro) {
+        $norm = $InstallDir.TrimEnd('\').ToLower()
+        $keep = New-Object System.Collections.Generic.List[string]
+        $removed = 0
+        for ($i = 0; $i -lt $pfro.Count; $i++) {
+            $e = $pfro[$i]
+            $p = $e
+            if ($p.StartsWith('\??\')) { $p = $p.Substring(4) } elseif ($p.StartsWith('\??/')) { $p = $p.Substring(4) }
+            $hit = $false
+            if ($p -and $p.ToLower().Replace('/', '\') -eq $norm) { $hit = $true }
+            if (-not $hit -and $p -and (Test-Path -LiteralPath $p)) {
+                try { $hit = ((Resolve-Path -LiteralPath $p).Path.ToLower()) -eq $norm } catch {}
+            }
+            if ($hit) {
+                $removed++
+                # 删除/重命名登记为成对项（源路径 + 紧随的目标路径，删除时目标为空串）——一并移除避免悬挂空项
+                if (($i + 1) -lt $pfro.Count -and $pfro[$i + 1] -eq '') { $i++ }
+                continue
+            }
+            $keep.Add($e)
+        }
+        if ($removed -gt 0) {
+            if ($keep.Count -eq 0) { Remove-ItemProperty -LiteralPath $pfroKey -Name PendingFileRenameOperations }
+            else { Set-ItemProperty -LiteralPath $pfroKey -Name PendingFileRenameOperations -Value ([string[]]$keep.ToArray()) -Type MultiString }
+            Log "已撤销 $removed 条指向 $InstallDir 的历史『重启后删除』登记（PendingFileRenameOperations），重装内容将不再被开机删除"
+        } else {
+            Log "未发现指向本安装目录的历史『重启后删除』登记"
+        }
+    }
+} catch {
+    Log "WARNING: 读取/清理 PendingFileRenameOperations 失败（不影响安装继续）：$($_.Exception.Message)"
+}
 
 # ---------------------------------------------------------------------------
 # 1. 端口检测与自动重分配（默认：backend 8000 / frontend 8123 / fuseki 3030 / neo4j 7474+7687 / postgres 5432）
@@ -159,6 +217,10 @@ $env:PATH = "$javaHome\bin;$env:PATH"
 #    系统已有 3.10+pip → 建 venv（跳过捆绑 Python 安装）；否则静默安装捆绑 Python 3.10.11
 # ---------------------------------------------------------------------------
 Log "--- Python 检测 ---"
+# 宿主环境（IDE/智能体 shim 等）可能注入 PYTHONHOME/PYTHONPATH，会让解释器算错 sys.prefix
+# （实测 PYTHONPATH=...\vendor\shim 可放大此类故障）——本脚本全程清空（含后续 venv 创建/pip）
+$env:PYTHONHOME = $null
+$env:PYTHONPATH = $null
 $pythonExe = $null
 $pyMode = ""
 $targetMinor = 10
@@ -197,9 +259,15 @@ if ($pythonExe) {
     $pyMode = "bundled"
     $pyTarget = Join-Path $runtime "python"
     $pyExeBundled = Join-Path $pyTarget "python.exe"
-    if (Test-Path $pyExeBundled) {
-        Log "捆绑 Python 已存在，跳过安装：$pyTarget"
+    if (Test-PythonRunnable $pyExeBundled) {
+        Log "捆绑 Python 已就绪（试运行通过），跳过安装：$pyTarget"
     } else {
+        # 复用判据=试运行而非"文件存在"（2026-10-30 远程机实锤：上次装到一半的残缺目录
+        # python.exe 在但标准库缺失，旧逻辑反复跳过 → venv 必失败）。不可运行则清空重装。
+        if (Test-Path $pyTarget) {
+            Log "检测到无法运行的残留捆绑 Python（多为上次安装中断），清空重装：$pyTarget"
+            Remove-Item $pyTarget -Recurse -Force
+        }
         $pyInstaller = Join-Path $runtime ("python-3.10.{0}-amd64.exe" -f $targetMinor)
         # 兼容小版本文件名差异：runtime 目录下任一 python-*-amd64.exe
         if (-not (Test-Path $pyInstaller)) {
@@ -209,24 +277,29 @@ if ($pythonExe) {
         if (-not (Test-Path $pyInstaller)) { Fail "缺少捆绑 Python 安装包（runtime\python-*-amd64.exe）" }
         Log "未检测到匹配 Python 3.$targetMinor，静默安装捆绑 Python（约 1-2 分钟）..."
         $pyInstallLog = Join-Path $InstallDir "logs\python-install.log"
-        # InstallAllUsers=1：目标在 C:\Program Files（机器级）且安装器已以 admin 运行；
-        # 用按用户(0)模式配 Program Files 的 TargetDir 会让 Python 引导器提前退出（瞬间返回 0 却未真正安装）。
+        # InstallAllUsers=1：安装器已以 admin 运行（机器级上下文），对任何 TargetDir 都成立；
+        # 历史教训：按用户(0)模式配 Program Files 的 TargetDir 会让 Python 引导器提前退出
+        # （瞬间返回 0 却未真正安装）。1.0.2 起默认安装目录已改 LOCALAPPDATA\Programs，
+        # 机器级安装器写该目录同样正常。
         $pyArgs = @("/quiet", "InstallAllUsers=1", "TargetDir=$pyTarget", "Include_pip=1", "Include_test=0", "PrependPath=0", "Shortcuts=0", "/Log=$pyInstallLog")
         & $pyInstaller @pyArgs
         $pyExit = $LASTEXITCODE
-        # 引导器可能瞬间返回、把实际安装留给后台同名子进程；
-        # 以“安装器进程已退出 且 产物 python.exe 已生成”为真正完成判据，轮询最多 6 分钟。
+        # 完成判据 = 解释器实际能跑（试运行探测），而非"进程退出 + python.exe 存在"：
+        # 引导进程 exit 早于全部文件落盘，python.exe 是最先出现的文件，仅凭文件存在会在
+        # 标准库 Lib\ / python310.zip 尚未释放时误判完成 → venv 创建即 Fatal init_fs_encoding。
+        # 轮询：每 5 秒探测一次，最多 6 分钟。
         $pyProcName = [System.IO.Path]::GetFileNameWithoutExtension($pyInstaller)
         $deadline = (Get-Date).AddMinutes(6)
         $pyOk = $false
         while ((Get-Date) -lt $deadline) {
-            if ((-not (Get-Process -Name $pyProcName -ErrorAction SilentlyContinue)) -and (Test-Path $pyExeBundled)) { $pyOk = $true; break }
-            Start-Sleep -Seconds 3
+            if ((-not (Get-Process -Name $pyProcName -ErrorAction SilentlyContinue)) -and (Test-PythonRunnable $pyExeBundled)) { $pyOk = $true; break }
+            Start-Sleep -Seconds 5
         }
         if (-not $pyOk) {
-            Fail ("捆绑 Python 安装失败（安装程序 exit={0}，6 分钟内 {1} 未生成 python.exe；MSI 日志：{2}）" -f $pyExit, $pyTarget, $pyInstallLog)
+            $probe = (& $pyExeBundled -c "import sys,encodings,site;print(sys.prefix)" 2>&1 | Out-String).Trim()
+            Fail ("捆绑 Python 安装失败（安装程序 exit={0}，6 分钟内试运行探测未通过；探测输出：{1}；MSI 日志：{2}）" -f $pyExit, $probe.Substring(0, [Math]::Min(120, $probe.Length)), $pyInstallLog)
         }
-        Log "捆绑 Python 就绪：$pyTarget（installer exit=$pyExit）"
+        Log "捆绑 Python 就绪（试运行通过）：$pyTarget（installer exit=$pyExit）"
     }
     $pythonExe = $pyExeBundled
 }
@@ -239,8 +312,12 @@ if (Test-Path $depsMarker) {
 } else {
     if (-not (Test-Path $venvPython)) {
         Log "创建 Python venv..."
+        $env:PYTHONHOME = $null; $env:PYTHONPATH = $null   # 二次保险（见 Python 检测段说明）
         & $pythonExe -m venv $venvDir
-        if ($LASTEXITCODE -ne 0) { Fail "venv 创建失败" }
+        if ($LASTEXITCODE -ne 0) {
+            $probe = (& $pythonExe -c "import sys,encodings;print(sys.prefix)" 2>&1 | Out-String).Trim()
+            Fail ("venv 创建失败：解释器 {0} 试运行探测：{1}（多为残缺安装——Lib\ / python310.zip 缺失；删除 runtime\python 后重跑安装即可）" -f $pythonExe, $probe.Substring(0, [Math]::Min(160, $probe.Length)))
+        }
     }
     Log "离线安装后端依赖（wheelhouse）..."
     & $venvPython -m pip install --no-index --find-links (Join-Path $runtime "wheelhouse") -r (Join-Path $InstallDir "backend\requirements.txt") --quiet

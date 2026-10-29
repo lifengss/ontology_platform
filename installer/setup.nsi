@@ -1,13 +1,16 @@
 ; setup.nsi - Enterprise Ontology Platform Windows installer (ASCII only; Chinese strings live in PS-generated .bat/.lnk)
 !define PRODUCT_NAME "Enterprise Ontology Platform"
-!define PRODUCT_VERSION "1.0.1"
+!define PRODUCT_VERSION "1.0.2"
 !define PRODUCT_PUBLISHER "lifengss"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 
 Unicode true
 Name "${PRODUCT_NAME} ${PRODUCT_VERSION}"
 OutFile "dist\OntologyPlatform-Setup-${PRODUCT_VERSION}.exe"
-InstallDir "$PROGRAMFILES64\OntologyPlatform"
+; 安装目录：注册表优先（升级/重装保持原路径，兼容旧版 Program Files 安装）；
+; 否则默认 当前用户 LOCALAPPDATA\Programs（2026-10-30 起：Program Files 受保护树上
+; 部分环境创建文件被拦截/权限不足导致安装失败；用户仍可在目录页手动选 Program Files）
+InstallDir "$LOCALAPPDATA\Programs\OntologyPlatform"
 InstallDirRegKey HKLM "${UNINST_KEY}" "InstallDir"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
@@ -86,4 +89,9 @@ Section "Uninstall"
   Delete "C:\Users\Public\Desktop\$R1"
   RMDir /r "$INSTDIR"
   DeleteRegKey HKLM "${UNINST_KEY}"
+  ; 残留反馈（2026-10-30 远程机反馈：卸载后目录删不净且无任何提示）：
+  ; 多为文件被占用（命令行/IDE 占用、服务未停净）——提示用户手动清理或重启后删除
+  IfFileExists "$INSTDIR" 0 .noLeftover
+  MessageBox MB_ICONWARNING "The install directory could not be fully removed (some files may still be in use):$\r$\n$INSTDIR$\r$\n$\r$\nClose any console/IDE windows holding files in it (and make sure all platform services are stopped), then delete the folder manually - or delete it after a reboot."
+.noLeftover:
 SectionEnd

@@ -83,7 +83,7 @@ if (-not $SkipZip) {
     $distDir = Join-Path $inst "dist"
     $exeName = Get-ChildItem $distDir -Filter "*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | ForEach-Object { $_.Name }
     Copy-Item (Join-Path $inst "docs") (Join-Path $distDir "docs") -Recurse -Force
-    $zip = Join-Path $distDir "OntologyPlatform-1.0.1-windows-dist.zip"
+    $zip = Join-Path $distDir "OntologyPlatform-1.0.2-windows-dist.zip"
     if (Test-Path $zip) { Remove-Item $zip -Force }
     $py = Get-Command python -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($py) {

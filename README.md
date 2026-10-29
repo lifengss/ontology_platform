@@ -132,7 +132,7 @@ cd backend && pytest -q
 | `ACTION_BREAKER_FAILURE_THRESHOLD` / `ACTION_BREAKER_COOLDOWN_SECONDS` | `3` / `30` | Action 按外部端点熔断：连续失败阈值 / OPEN 冷却期（秒）（PRD §6.6） |
 | `CREDENTIAL_ENCRYPTION_ENABLED` | `false` | 凭据加密开关（生产建议开启） |
 | `LLM_ENDPOINT` / `LLM_MODEL` | `http://localhost:11434/v1` / `default` | 默认 LLM 端点/模型 |
-| `APP_NAME` / `APP_VERSION` | `EnterpriseOntologyPlatform` / `1.0.1` | 应用名/版本（`/health` 返回） |
+| `APP_NAME` / `APP_VERSION` | `EnterpriseOntologyPlatform` / `1.0.2` | 应用名/版本（`/health` 返回） |
 
 ### 健康检查与降级语义
 `GET /health` 返回 `{ success, data:{ status, version, dependencies:{ jena, neo4j, postgres } } }`：
