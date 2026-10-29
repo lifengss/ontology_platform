@@ -7,9 +7,11 @@
 Unicode true
 Name "${PRODUCT_NAME} ${PRODUCT_VERSION}"
 OutFile "dist\OntologyPlatform-Setup-${PRODUCT_VERSION}.exe"
-; 安装目录：注册表优先（升级/重装保持原路径，兼容旧版 Program Files 安装）；
-; 否则默认 当前用户 LOCALAPPDATA\Programs（2026-10-30 起：Program Files 受保护树上
-; 部分环境创建文件被拦截/权限不足导致安装失败；用户仍可在目录页手动选 Program Files）
+; InstallDir: registry first (keeps the original path on upgrade/reinstall,
+; compatible with older Program Files installs); otherwise default to the
+; current user's LOCALAPPDATA\Programs (2026-10-30: on some machines file
+; creation under the protected Program Files tree is blocked / permission
+; denied and the install fails; users may still pick Program Files manually)
 InstallDir "$LOCALAPPDATA\Programs\OntologyPlatform"
 InstallDirRegKey HKLM "${UNINST_KEY}" "InstallDir"
 RequestExecutionLevel admin
@@ -89,9 +91,11 @@ Section "Uninstall"
   Delete "C:\Users\Public\Desktop\$R1"
   RMDir /r "$INSTDIR"
   DeleteRegKey HKLM "${UNINST_KEY}"
-  ; 残留反馈（2026-10-30 远程机反馈：卸载后目录删不净且无任何提示）：
-  ; 多为文件被占用（命令行/IDE 占用、服务未停净）——提示用户手动清理或重启后删除
+  ; Leftover feedback (2026-10-30 remote machine report: install dir not fully
+  ; removed after uninstall with no notice at all) - usually files still in use
+  ; (console/IDE holding files, services not fully stopped): tell the user to
+  ; clean up manually or after a reboot
   IfFileExists "$INSTDIR" 0 .noLeftover
-  MessageBox MB_ICONWARNING "The install directory could not be fully removed (some files may still be in use):$\r$\n$INSTDIR$\r$\n$\r$\nClose any console/IDE windows holding files in it (and make sure all platform services are stopped), then delete the folder manually - or delete it after a reboot."
+  MessageBox MB_ICONEXCLAMATION "The install directory could not be fully removed (some files may still be in use):$\r$\n$INSTDIR$\r$\n$\r$\nClose any console/IDE windows holding files in it (and make sure all platform services are stopped), then delete the folder manually - or delete it after a reboot."
 .noLeftover:
 SectionEnd
