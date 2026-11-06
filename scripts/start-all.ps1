@@ -30,13 +30,21 @@ if ($localJdk) {
     Info "使用项目内 JDK: $($localJdk.FullName)"
 }
 
-function Wait-Http($url, $timeoutSec = 120) {
+function Wait-Http($url, $timeoutSec = 120, $label = "") {
+    # 2026-11-03: 旧实现用 Invoke-RestMethod 且判 if ($r)，对返回空体/重定向的端点会恒假；
+    # 且全程无输出，等待期看起来像"卡死"。改为按 HTTP 状态码判定 + 每 10 秒打印进度。
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastReport = 0
     while ($sw.Elapsed.TotalSeconds -lt $timeoutSec) {
         try {
-            $r = Invoke-RestMethod -Uri $url -TimeoutSec 2 -ErrorAction SilentlyContinue
-            if ($r) { return $true }
+            $wr = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+            if ($wr.StatusCode -ge 200 -and $wr.StatusCode -lt 400) { return $true }
         } catch {}
+        $el = [int]$sw.Elapsed.TotalSeconds
+        if ($label -and (($el - $lastReport) -ge 10)) {
+            $lastReport = $el
+            Info ("$label 尚未就绪，已等待 $el 秒（超时 $timeoutSec 秒）...")
+        }
         Start-Sleep -Milliseconds 500
     }
     return $false
@@ -112,10 +120,10 @@ if (-not $SkipDeps) {
         docker compose -f "$ROOT\\docker-compose.yml" up -d jena neo4j postgres 2>&1 | Out-Null
 
         Info "等待 Jena/Fuseki (3030)..."
-        if (Wait-Http "http://localhost:3030/" 120) { OK "Jena 就绪" } else { Warn "Jena 未在 120 秒内就绪" }
+        if (Wait-Http "http://localhost:3030/" 120 "Jena") { OK "Jena 就绪" } else { Warn "Jena 未在 120 秒内就绪" }
 
         Info "等待 Neo4j (7474)..."
-        if (Wait-Http "http://localhost:7474/" 300) { OK "Neo4j 就绪" } else { Warn "Neo4j 未在 300 秒内就绪（首次启动需初始化，可稍后手动重试）" }
+        if (Wait-Http "http://localhost:7474/" 300 "Neo4j") { OK "Neo4j 就绪" } else { Warn "Neo4j 未在 300 秒内就绪（首次启动需初始化，可稍后手动重试）" }
 
         Info "等待 Postgres (5432)..."
         $pgReady = $false
@@ -169,11 +177,23 @@ if (-not $SkipDeps) {
             $depProcs += $pgProc
 
             Info "等待 Jena/Fuseki (3030)..."
-            if (Wait-Http "http://localhost:3030/" 120) { OK "Jena 就绪" } else { Warn "Jena 未在 120 秒内就绪" }
+            if (Wait-Http "http://localhost:3030/" 120 "Jena") { OK "Jena 就绪" } else { Warn "Jena 未在 120 秒内就绪" }
 
             if ($neo4j) {
                 Info "等待 Neo4j (7474)..."
-                if (Wait-Http "http://localhost:7474/" 300) { OK "Neo4j 就绪" } else { Warn "Neo4j 未在 300 秒内就绪（首次启动需初始化，可稍后手动重试）" }
+                if (Wait-Http "http://localhost:7474/" 180 "Neo4j") {
+                    OK "Neo4j 就绪"
+                } else {
+                    Warn "Neo4j 未在 180 秒内就绪。诊断信息："
+                    $neo4jLog = Join-Path $neo4j.FullName "logs\neo4j.log"
+                    if (Test-Path $neo4jLog) {
+                        Write-Host "  --- $neo4jLog 尾部 15 行 ---" -ForegroundColor DarkGray
+                        Get-Content $neo4jLog -Tail 15 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ("  " + $_) -ForegroundColor DarkGray }
+                    }
+                    $alive = Get-CimInstance Win32_Process -Filter "Name='java.exe'" -ErrorAction SilentlyContinue | Where-Object { "$($_.CommandLine)" -match 'neo4j' }
+                    if (-not $alive) { Warn "  未检测到运行中的 Neo4j java 进程——可能启动失败（JAVA_HOME / 内存 / 端口被占）。" }
+                    Warn "  可浏览器打开 http://localhost:7474 手动确认，或稍后重试。"
+                }
             }
 
             Info "等待 Postgres (5432)..."

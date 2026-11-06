@@ -49,11 +49,32 @@ if (-not (Test-Path $wh)) { throw "缺少 wheelhouse，请先执行：python -m 
 $whFiles = Get-ChildItem $wh -File
 if ($whFiles.Count -lt 10) { throw "wheelhouse 文件数异常（$($whFiles.Count)）" }
 Copy-Item $whFiles.FullName (Join-Path $payload "runtime\wheelhouse\")
-[System.IO.File]::WriteAllText((Join-Path $payload "runtime\wheelhouse-target.json"), '{"major": 3, "minor": 10}', (New-Object System.Text.UTF8Encoding($false)))
-Write-Host ("wheelhouse: {0} 个文件" -f $whFiles.Count)
+# 计算 wheelhouse 实际支持的 Python minor 集：对每个含 cp 专属 wheel（-cp3XX-cp3XX-）的包
+# 取跨包 cp 标签交集（任一包缺该版本 wheel 则该版本离线装不上）；abi3 仅构成下限、纯 wheel 不限。
+# 结果写入 wheelhouse-target.json，install-deps.ps1 据此过滤系统 Python 候选（>=3.10，不必非得 3.10）。
+$cpPkgMinors = @{}
+foreach ($wf in $whFiles) {
+    if ($wf.Name -match '-cp3(\d+)-cp3\1-') {
+        $pkg = ($wf.Name -split '-')[0]
+        $mn = [int]$Matches[1]
+        if (-not $cpPkgMinors.ContainsKey($pkg)) { $cpPkgMinors[$pkg] = New-Object System.Collections.Generic.HashSet[int] }
+        [void]$cpPkgMinors[$pkg].Add($mn)
+    }
+}
+$supportedMinors = $null
+foreach ($pkg in $cpPkgMinors.Keys) {
+    if ($null -eq $supportedMinors) { $supportedMinors = New-Object System.Collections.Generic.HashSet[int]; [void]$supportedMinors.UnionWith($cpPkgMinors[$pkg]) }
+    else { [void]$supportedMinors.IntersectWith($cpPkgMinors[$pkg]) }
+}
+if ($null -eq $supportedMinors -or $supportedMinors.Count -eq 0) { $supportedMinors = New-Object System.Collections.Generic.HashSet[int]; [void]$supportedMinors.Add(10) }
+$minorsSorted = @($supportedMinors | Sort-Object)
+$whTargetJson = '{"major": 3, "minors": [' + (($minorsSorted | ForEach-Object { "$_" }) -join ', ') + ']}'
+[System.IO.File]::WriteAllText((Join-Path $payload "runtime\wheelhouse-target.json"), $whTargetJson, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host ("wheelhouse: {0} 个文件，支持 Python 3.{1}" -f $whFiles.Count, ($minorsSorted -join '/'))
 
 Write-Host "===== [5/6] 脚本与产品文档 ====="
 Copy-Item (Join-Path $inst "scripts\*.ps1") (Join-Path $payload "scripts\")
+Copy-Item (Join-Path $inst "scripts\post-install.bat") (Join-Path $payload "scripts\")
 Copy-Item (Join-Path $inst "docs\*.md") (Join-Path $payload "docs\")
 # 快捷方式图标（源 installer\icons\，生成器: <workspace>\scripts\make-shortcut-icons.ps1）
 New-Item -ItemType Directory -Force -Path (Join-Path $payload "icons") | Out-Null

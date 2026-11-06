@@ -51,6 +51,9 @@ HOST, PORT = "127.0.0.1", 8000
 
 
 def _get_token() -> str:
+    env = os.environ.get("ONTOLOGY_MCP_TOKEN", "")
+    if env:
+        return env
     if not os.path.exists(TOK_PATH):
         raise RuntimeError("未找到平台 token 文件: %s" % TOK_PATH)
     d = json.load(open(TOK_PATH, encoding="utf-8"))
@@ -114,14 +117,29 @@ class _PlatformClient:
         self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
         self.initialized = True
 
-    def call(self, tool, args):
-        self._ensure_init()
-        st, j = self._post({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                            "params": {"name": tool, "arguments": args}})
+    def _reset_session(self):
+        self.sid = None
+        self.initialized = False
+
+    @staticmethod
+    def _fmt(j):
         try:
             return j["result"]["content"][0]["text"]
         except Exception:
             return json.dumps(j, ensure_ascii=False)
+
+    def call(self, tool, args):
+        self._ensure_init()
+        st, j = self._post({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                            "params": {"name": tool, "arguments": args}})
+        out = self._fmt(j)
+        if "UNAUTHORIZED" in out or st == 401:
+            self._reset_session()
+            self._ensure_init()
+            st, j = self._post({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                "params": {"name": tool, "arguments": args}})
+            out = self._fmt(j)
+        return out
 
 
 from mcp.server.mcpserver import MCPServer

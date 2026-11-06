@@ -7,6 +7,11 @@
 Unicode true
 Name "${PRODUCT_NAME} ${PRODUCT_VERSION}"
 OutFile "dist\OntologyPlatform-Setup-${PRODUCT_VERSION}.exe"
+; 2026-10-30 remote report: NSIS is a 32-bit process -> without SetRegView 64 the ARP
+; (Add/Remove Programs) entry is written to WOW6432Node and may NOT appear in the
+; Windows 11 Settings "Installed apps" list. SetRegView 64 is applied INSIDE the sections
+; below (it is not valid at top level). InstallDirRegKey (page init) reads the default
+; 32-bit view, so the -install section also mirrors InstallDir there for upgrades.
 ; InstallDir: registry first (keeps the original path on upgrade/reinstall,
 ; compatible with older Program Files installs); otherwise default to the
 ; current user's LOCALAPPDATA\Programs (2026-10-30: on some machines file
@@ -24,6 +29,8 @@ UninstPage instfiles
 
 Section -install
   SectionIn RO
+  ; ARP entry -> native 64-bit Uninstall hive (visible in Windows 11 Settings)
+  SetRegView 64
   SetOutPath "$INSTDIR"
   File /r "payload\*.*"
 
@@ -32,13 +39,25 @@ Section -install
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
   WriteRegStr HKLM "${UNINST_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
   WriteRegStr HKLM "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\start-platform.bat"
+  WriteRegStr HKLM "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\icons\start.ico"
   WriteRegStr HKLM "${UNINST_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
+  ; silent uninstall (matches: Uninstall.exe /S _?=<dir>)
+  WriteRegStr HKLM "${UNINST_KEY}" "QuietUninstallString" '"$INSTDIR\Uninstall.exe" /S _?=$INSTDIR'
+  WriteRegDWORD HKLM "${UNINST_KEY}" "NoModify" 1
+  WriteRegDWORD HKLM "${UNINST_KEY}" "NoRepair" 1
   WriteRegStr HKLM "${UNINST_KEY}" "InstallDir" "$INSTDIR"
+  ; mirror InstallDir into the 32-bit view: InstallDirRegKey (line 16) runs at directory-page
+  ; init with the default 32-bit view, before any section calls SetRegView 64.
+  SetRegView 32
+  WriteRegStr HKLM "${UNINST_KEY}" "InstallDir" "$INSTDIR"
+  SetRegView 64
 
   MessageBox MB_OK "Platform files have been deployed to the target directory.$\r$\nNext: auto port detection/re-assignment and dependency provisioning (JDK / Python / Postgres / Neo4j).$\r$\nThis may take 3-10 minutes. NOTE: this installer window will APPEAR FROZEN while the$\r$\nblack command console runs - that is normal, watch the console for progress.$\r$\nIf it hangs for more than ~10 minutes you may close the console window and check the log.$\r$\nLog: <install dir>\logs\install.log"
 
-  ExecWait 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\scripts\install-deps.ps1" -InstallDir "$INSTDIR"'
+  ; Launch via post-install.bat (2026-10-30 field report: inline powershell command
+  ; line flashes and closes with no visible error when the script fails; the bat
+  ; keeps the window open on non-zero exit and points to the log files)
+  ExecWait "$INSTDIR\scripts\post-install.bat"
   ; Success/failure is decided by the result file written by the script (positive confirmation):
   ; Status=OK only when the whole provisioning run truly finished. A missing file means the
   ; console was closed / the script crashed - treat as failure in all non-OK cases.
@@ -57,8 +76,15 @@ Section -install
 SectionEnd
 
 Section "Uninstall"
+  ; 2026-10-30 remote report: match the 64-bit ARP hive used by -install
+  SetRegView 64
   ; stop services best-effort (ignore failure)
   ExecWait 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\scripts\stop-services.ps1" -InstallDir "$INSTDIR"'
+  ; 2026-10-30 remote report: a residual cmd.exe (left by start-platform.bat with its CWD
+  ; stuck in the install dir) kept the folder locked, so RMDir failed. Run the cleanup
+  ; script first: it kills those processes AND deletes shortcuts by resolved .lnk target
+  ; (avoids the PS 5.1 Chinese-name encoding mismatch). Best effort - ignore failure.
+  ExecWait 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\scripts\uninstall-cleanup.ps1" -InstallDir "$INSTDIR"'
   ; database/data OUTSIDE the install dir: ask the user (backup recommended before delete)
   ; NOTE: $ALLUSERSPROFILE / $COMMONAPPDATA are NOT built-in NSIS vars in v3.12
   ; (verified: they pass through as literals). Read ProgramData from registry instead.
@@ -90,7 +116,11 @@ Section "Uninstall"
   IfFileExists "C:\Users\Public\Desktop\$R1" 0 +2
   Delete "C:\Users\Public\Desktop\$R1"
   RMDir /r "$INSTDIR"
+  ; clean ARP entry from BOTH registry views (older builds may have written WOW6432Node)
   DeleteRegKey HKLM "${UNINST_KEY}"
+  SetRegView 32
+  DeleteRegKey HKLM "${UNINST_KEY}"
+  SetRegView 64
   ; Leftover feedback (2026-10-30 remote machine report: install dir not fully
   ; removed after uninstall with no notice at all) - usually files still in use
   ; (console/IDE holding files, services not fully stopped): tell the user to

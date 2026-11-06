@@ -75,10 +75,32 @@ function Test-PythonRunnable([string]$exe) {
     # 宿主环境（IDE/智能体 shim）注入的 PYTHONHOME/PYTHONPATH 会让解释器算错 prefix —— 探测时清空
     $oldHome = $env:PYTHONHOME; $oldPath = $env:PYTHONPATH
     $env:PYTHONHOME = $null; $env:PYTHONPATH = $null
-    $probe = (& $exe -c "import sys,encodings,site;print(sys.prefix)" 2>&1 | Select-Object -First 1)
+    # 注意：原生命令输出不能过 "Select-Object -First 1"——管道提前终止会让进程被强杀、
+    # $LASTEXITCODE 变 -1（2026-10-30 实锤：此 bug 让本函数恒 false，装好的 Python 被判"未通过"，
+    # 轮询空等 6 分钟 → 用户看到"进程死了/无反应"）。改用 @() 取首行。
+    # 2026-10-30 远程机补充修复（D1）：stderr 走 2>$null 而非 2>&1——否则报错信息（含 "python" 字样）
+    # 会被当成功输出、让"标准库缺失"的损坏解释器被误判为可用（见 docs/...Python-3.10安装故障分析.md）。
+    $probeOut = (& $exe -c "import sys,encodings,site;print(sys.prefix)" 2>$null)
     $code = $LASTEXITCODE
+    $probe = @($probeOut)[0]
     $env:PYTHONHOME = $oldHome; $env:PYTHONPATH = $oldPath
     return (($code -eq 0) -and ("$probe" -match 'python'))
+}
+# 清除指向本安装目录的 Python 幽灵注册表（2026-10-30 远程机实锤，见 docs/OntologyPlatform-Python-3.10安装故障分析与修复报告.md §2.1）：
+# 上次安装中断在 Standard Library 组件 → 注册表登记完备、磁盘只有 6 个引导文件 → MSI 进入"维护模式"而非全新安装 →
+# 4 秒返 1603 死循环。仅当注册表 InstallPath 指向本安装目录（即我们自己的残缺登记）才清，绝不碰用户真实的系统 Python。
+function Clear-PhantomPythonReg([string]$pyTarget) {
+    $roots = @('HKCU:\SOFTWARE\Python\PythonCore', 'HKLM:\SOFTWARE\Python\PythonCore')
+    foreach ($root in $roots) {
+        if (-not (Test-Path $root)) { continue }
+        foreach ($key in (Get-ChildItem $root -ErrorAction SilentlyContinue)) {
+            $ip = (Get-ItemProperty -Path $key.PSPath -Name 'InstallPath' -ErrorAction SilentlyContinue).InstallPath
+            if ($ip -and ($ip.TrimEnd('\') -eq $pyTarget.TrimEnd('\'))) {
+                Log ("清除指向本目录的 Python 幽灵注册表：{0}" -f $key.PSPath)
+                Remove-Item -Path $key.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 }
 # 在 conf 文件中替换（含注释行）或追加 key 行
 function Set-ConfLine($path, $keyRegex, $newLine) {
@@ -97,6 +119,15 @@ $runtime = Join-Path $InstallDir "runtime"
 $depsDir = Join-Path $InstallDir "deps"
 $scriptsDir = $PSScriptRoot
 
+# 权限守卫：本脚本需要管理员上下文（机器级 Python / Windows 服务 / HKLM）。
+# NSIS 拉起时恒为 admin；手工运行须"以管理员身份运行"——非 admin 下 Python 安装
+# (InstallAllUsers=1) 与服务注册会失败且难以察觉（2026-10-30 实测：非 admin 手工
+# 运行时 Python 安装器进程瞬间退出、控制台静默无输出）
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Fail "当前 shell 无管理员权限：请右键 PowerShell → 以管理员身份运行，再执行本脚本（或重新运行安装器）。非 admin 无法安装机器级 Python 与注册服务"
+}
+
 # ---------------------------------------------------------------------------
 # 0. 撤销指向本安装目录的历史"重启后删除"登记（PendingFileRenameOperations）
 #    场景（2026-10-30 远程机实锤）：卸载时安装目录删不净 → 某工具把整目录登记为延迟删除 →
@@ -108,6 +139,8 @@ $pfroKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
 try {
     $pfro = (Get-ItemProperty -LiteralPath $pfroKey -Name PendingFileRenameOperations -ErrorAction Stop).PendingFileRenameOperations
     if ($pfro) {
+        # 归一为数组：注册表值仅 1 条时 Get-ItemProperty 返回裸字符串，索引字符串会得到字符导致误判
+        $pfro = @($pfro)
         $norm = $InstallDir.TrimEnd('\').ToLower()
         $keep = New-Object System.Collections.Generic.List[string]
         $removed = 0
@@ -116,9 +149,10 @@ try {
             $p = $e
             if ($p.StartsWith('\??\')) { $p = $p.Substring(4) } elseif ($p.StartsWith('\??/')) { $p = $p.Substring(4) }
             $hit = $false
-            if ($p -and $p.ToLower().Replace('/', '\') -eq $norm) { $hit = $true }
+            $pl = $p.ToLower().Replace('/', '\').TrimEnd('\')
+            if ($p -and $pl -eq $norm) { $hit = $true }
             if (-not $hit -and $p -and (Test-Path -LiteralPath $p)) {
-                try { $hit = ((Resolve-Path -LiteralPath $p).Path.ToLower()) -eq $norm } catch {}
+                try { $hit = ((Resolve-Path -LiteralPath $p).Path.ToLower().TrimEnd('\')) -eq $norm } catch {}
             }
             if ($hit) {
                 $removed++
@@ -213,8 +247,11 @@ $env:JAVA_HOME = $javaHome
 $env:PATH = "$javaHome\bin;$env:PATH"
 
 # ---------------------------------------------------------------------------
-# 3. Python 检测（要求 3.10，与捆绑 wheelhouse 的 cp310 二进制轮子匹配）
-#    系统已有 3.10+pip → 建 venv（跳过捆绑 Python 安装）；否则静默安装捆绑 Python 3.10.11
+# 3. Python 检测（要求 3.10+ 且 minor ∈ wheelhouse 支持集，见 wheelhouse-target.json 的 minors；
+#    当前 wheelhouse 覆盖 cp310/cp311/cp312。平台代码对 3.10+ 无限制，
+#    约束仅来自离线轮子的 cp 标签——3.13+ 需升级依赖 pin 后补轮子）
+#    系统已有受支持版本+pip → 建 venv（跳过捆绑 Python 安装，优先最低 minor，最贴近已验证的 3.10 基线）；
+#    否则静默安装捆绑 Python 3.10.11（wheelhouse 必有 cp310 变体，兜底恒成立）
 # ---------------------------------------------------------------------------
 Log "--- Python 检测 ---"
 # 宿主环境（IDE/智能体 shim 等）可能注入 PYTHONHOME/PYTHONPATH，会让解释器算错 sys.prefix
@@ -223,39 +260,55 @@ $env:PYTHONHOME = $null
 $env:PYTHONPATH = $null
 $pythonExe = $null
 $pyMode = ""
-$targetMinor = 10
+$supportedMinors = @(10)
 $whTargetFile = Join-Path $runtime "wheelhouse-target.json"
 if (Test-Path $whTargetFile) {
     $whTarget = Get-Content $whTargetFile -Raw | ConvertFrom-Json
-    $targetMinor = $whTarget.minor
+    if ($whTarget.minors) { $supportedMinors = @($whTarget.minors | ForEach-Object { [int]$_ }) }
+    elseif ($whTarget.minor) { $supportedMinors = @([int]$whTarget.minor) }
 }
-$candidates = @()
+# 候选收集：py 启动器注册的全部 3.x 解释器（不再按单一 minor 过滤）+ PATH 上的 python/python3
+$candidatePaths = @()
 $pyCmd = Get-Command py -ErrorAction SilentlyContinue
 if ($pyCmd) {
     try {
+        # 兼容 py -0p / --list 行格式：" -3.10-64 *  C:\...\python.exe" / " -V:3.10  C:\...\python.exe"
         $pyList = & py -0p 2>$null | Out-String
-        foreach ($m in [regex]::Matches($pyList, ("^\s*\*?-?3\.({0})-\d+\s+(\S+python\.exe)" -f $targetMinor))) {
-            $candidates += $m.Groups[2].Value
+        foreach ($m in [regex]::Matches($pyList, '^\s*[*-]?\s*(?:V:)?3\.(\d+)(?:-\d+)?\s+(?:\*\s+)?(\S+python\.exe)')) {
+            $candidatePaths += $m.Groups[2].Value
         }
     } catch {}
 }
 $pyCmd2 = Get-Command python -ErrorAction SilentlyContinue
-if ($pyCmd2) { $candidates += $pyCmd2.Source }
-foreach ($c in $candidates) {
+if ($pyCmd2) { $candidatePaths += $pyCmd2.Source }
+$pyCmd3 = Get-Command python3 -ErrorAction SilentlyContinue
+if ($pyCmd3) { $candidatePaths += $pyCmd3.Source }
+# 逐个探测（版本以解释器自身输出为准，不信任启动器文本）：minor ∈ 支持集 且 pip 可用 → 合格；
+# 按 minor 升序取最低（最贴近 3.10 基线）
+$eligible = @()
+foreach ($c in ($candidatePaths | Select-Object -Unique)) {
     if (-not $c -or -not (Test-Path $c)) { continue }
     try {
-        $ver = & $c -c "import sys;print(sys.version_info[1])" 2>$null | Select-Object -First 1
-        $pip = & $c -m pip --version 2>$null
-        if ([int]$ver -eq $targetMinor -and $LASTEXITCODE -eq 0) {
-            $pythonExe = $c
-            $pyMode = "system"
-            break
-        }
+        $env:PYTHONHOME = $null; $env:PYTHONPATH = $null
+        # 同 Test-PythonRunnable：原生命令输出禁过 -First 1 管道（会把退出码弄成 -1）
+        $verOut = & $c -c "import sys;print(sys.version_info[1])" 2>$null
+        $verCode = $LASTEXITCODE
+        $ver = @($verOut)[0]
+        if ($verCode -ne 0 -or "$ver" -notmatch '^\d+$') { continue }
+        $minor = [int]$ver
+        if ($supportedMinors -notcontains $minor) { continue }
+        $null = & $c -m pip --version 2>$null
+        if ($LASTEXITCODE -ne 0) { continue }
+        $eligible += [pscustomobject]@{ Minor = $minor; Path = $c }
     } catch {}
 }
-if ($pythonExe) {
-    Log "检测到系统 Python 3.$targetMinor（含 pip）→ 使用系统解释器（跳过捆绑 Python 安装）：$pythonExe"
+if ($eligible.Count -gt 0) {
+    $pick = $eligible | Sort-Object Minor | Select-Object -First 1
+    $pythonExe = $pick.Path
+    $pyMode = "system"
+    Log ("检测到系统 Python 3.{0}（含 pip，wheelhouse 支持 3.{1}）→ 使用系统解释器（跳过捆绑 Python 安装）：{2}" -f $pick.Minor, ($supportedMinors -join '/'), $pythonExe)
 } else {
+    Log ("未检测到 wheelhouse 支持的系统 Python（支持 3.{0}）→ 使用捆绑安装器 3.10.11" -f ($supportedMinors -join '/'))
     $pyMode = "bundled"
     $pyTarget = Join-Path $runtime "python"
     $pyExeBundled = Join-Path $pyTarget "python.exe"
@@ -268,14 +321,18 @@ if ($pythonExe) {
             Log "检测到无法运行的残留捆绑 Python（多为上次安装中断），清空重装：$pyTarget"
             Remove-Item $pyTarget -Recurse -Force
         }
-        $pyInstaller = Join-Path $runtime ("python-3.10.{0}-amd64.exe" -f $targetMinor)
-        # 兼容小版本文件名差异：runtime 目录下任一 python-*-amd64.exe
+        # 捆绑兜底恒为 3.10（wheelhouse 必有 cp310 变体）。直接 glob，不猜文件名
+        # （旧模板 "python-3.10.$targetMinor-amd64.exe" 会生成不存在的 python-3.10.10，靠通配兜底才没出错）
+        $pyInstaller = (Get-ChildItem $runtime -Filter "python-3.10*-amd64.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
         if (-not (Test-Path $pyInstaller)) {
             $found = Get-ChildItem $runtime -Filter "python-*-amd64.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($found) { $pyInstaller = $found.FullName }
         }
         if (-not (Test-Path $pyInstaller)) { Fail "缺少捆绑 Python 安装包（runtime\python-*-amd64.exe）" }
-        Log "未检测到匹配 Python 3.$targetMinor，静默安装捆绑 Python（约 1-2 分钟）..."
+        # 2026-10-30 远程机修复（D2）：静默安装前先清"指向本目录"的 Python 幽灵注册表，
+        # 否则 MSI 进"维护模式" → 4 秒返 1603 死循环（见 docs/OntologyPlatform-Python-3.10安装故障分析与修复报告.md §2.1）
+        Clear-PhantomPythonReg $pyTarget
+        Log "静默安装捆绑 Python 3.10.11（约 1-3 分钟，每 5 秒打印进度）..."
         $pyInstallLog = Join-Path $InstallDir "logs\python-install.log"
         # InstallAllUsers=1：安装器已以 admin 运行（机器级上下文），对任何 TargetDir 都成立；
         # 历史教训：按用户(0)模式配 Program Files 的 TargetDir 会让 Python 引导器提前退出
@@ -284,22 +341,43 @@ if ($pythonExe) {
         $pyArgs = @("/quiet", "InstallAllUsers=1", "TargetDir=$pyTarget", "Include_pip=1", "Include_test=0", "PrependPath=0", "Shortcuts=0", "/Log=$pyInstallLog")
         & $pyInstaller @pyArgs
         $pyExit = $LASTEXITCODE
-        # 完成判据 = 解释器实际能跑（试运行探测），而非"进程退出 + python.exe 存在"：
-        # 引导进程 exit 早于全部文件落盘，python.exe 是最先出现的文件，仅凭文件存在会在
-        # 标准库 Lib\ / python310.zip 尚未释放时误判完成 → venv 创建即 Fatal init_fs_encoding。
-        # 轮询：每 5 秒探测一次，最多 6 分钟。
+        # 引导进程"提前退出"是安装器正常行为（实际安装由 MSI 后台继续；远程机实测全程约 2 分 42 秒）。
+        # 完成判据 = 解释器实际能跑（试运行探测），而非"进程退出 + python.exe 存在"
+        # （python.exe 最先出现，标准库 Lib\ / python310.zip 可能尚未落盘 → venv 创建即 Fatal init_fs_encoding）。
+        # 轮询：每 5 秒探测并打印一行进度——控制台静默超过 2 分钟正是用户误判"卡死/进程死了"的原因。
         $pyProcName = [System.IO.Path]::GetFileNameWithoutExtension($pyInstaller)
         $deadline = (Get-Date).AddMinutes(6)
+        # 引导进程退出码非 0（3010=需重启除外）：大概率已立即失败（权限不足/被安全软件拦截/MSI 被占用），
+        # 60 秒宽限后快速失败，不再静默等满 6 分钟
+        $failAfter = $null
+        if (($pyExit -ne 0) -and ($pyExit -ne 3010)) { $failAfter = (Get-Date).AddSeconds(60) }
         $pyOk = $false
+        $elapsed = 0
         while ((Get-Date) -lt $deadline) {
-            if ((-not (Get-Process -Name $pyProcName -ErrorAction SilentlyContinue)) -and (Test-PythonRunnable $pyExeBundled)) { $pyOk = $true; break }
+            if (Test-PythonRunnable $pyExeBundled) { $pyOk = $true; break }
+            $elapsed += 5
+            $instAlive = [bool](Get-Process -Name $pyProcName -ErrorAction SilentlyContinue)
+            $msiAlive  = [bool](Get-Process -Name MsiExec -ErrorAction SilentlyContinue)
+            Log ("等待捆绑 Python 落盘... 已 {0} 秒 | 引导进程: {1} | MSI 进程: {2} | 试运行探测: 未通过" -f $elapsed, $(if ($instAlive) { "运行中" } else { "已退出" }), $(if ($msiAlive) { "运行中" } else { "无" }))
+            if ($failAfter -and ((Get-Date) -gt $failAfter)) { break }
             Start-Sleep -Seconds 5
         }
         if (-not $pyOk) {
-            $probe = (& $pyExeBundled -c "import sys,encodings,site;print(sys.prefix)" 2>&1 | Out-String).Trim()
-            Fail ("捆绑 Python 安装失败（安装程序 exit={0}，6 分钟内试运行探测未通过；探测输出：{1}；MSI 日志：{2}）" -f $pyExit, $probe.Substring(0, [Math]::Min(120, $probe.Length)), $pyInstallLog)
+            # 2026-10-30 远程机修复（P0 兜底）：静默安装未收敛（如 0xc00000fd MSI 栈溢出/1603 死循环），
+            # 绕开安装引擎，用 msiexec /a 纯解包自愈（repair-python-bundled.ps1，见同目录）
+            Log "捆绑 Python 静默安装未收敛，尝试 /a 纯解包自愈（repair-python-bundled.ps1）..."
+            try {
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'repair-python-bundled.ps1') -TargetDir $pyTarget
+            } catch {}
+            if (Test-PythonRunnable $pyExeBundled) {
+                $pyOk = $true
+                Log ("自愈成功（{0} 秒）：{1}" -f $elapsed, $pyTarget)
+            } else {
+                $probe = (& $pyExeBundled -c "import sys,encodings,site;print(sys.prefix)" 2>&1 | Out-String).Trim()
+                Fail ("捆绑 Python 安装失败（引导进程 exit={0}，{1} 秒后试运行探测仍未通过；自愈也未修复；探测输出：{2}；MSI 日志：{3}；常见原因：非管理员 shell / 安全软件拦截安装器 / 残留安装——删除 runtime\python 后重跑安装）" -f $pyExit, $elapsed, $probe.Substring(0, [Math]::Min(120, $probe.Length)), $pyInstallLog)
+            }
         }
-        Log "捆绑 Python 就绪（试运行通过）：$pyTarget（installer exit=$pyExit）"
+        Log ("捆绑 Python 就绪（试运行通过，耗时约 {0} 秒）：{1}（引导进程 exit={2}）" -f $elapsed, $pyTarget, $pyExit)
     }
     $pythonExe = $pyExeBundled
 }
@@ -310,6 +388,12 @@ $depsMarker = Join-Path $venvDir ".deps-installed"
 if (Test-Path $depsMarker) {
     Log "Python venv 与依赖已就绪，跳过：$venvDir"
 } else {
+    # 残留 venv 可运行才复用（试运行判据，与捆绑 Python 同口径）；不可运行则清空重建
+    # （2026-10-30 实锤：中断安装会留下"python.exe 在但标准库不全"的残缺 venv，旧逻辑直接复用必挂）
+    if ((Test-Path $venvPython) -and (-not (Test-PythonRunnable $venvPython))) {
+        Log "检测到无法运行的残留 venv（多为上次安装中断），清空重建：$venvDir"
+        Remove-Item $venvDir -Recurse -Force
+    }
     if (-not (Test-Path $venvPython)) {
         Log "创建 Python venv..."
         $env:PYTHONHOME = $null; $env:PYTHONPATH = $null   # 二次保险（见 Python 检测段说明）

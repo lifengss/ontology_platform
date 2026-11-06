@@ -94,10 +94,13 @@ function Wait-Neo4j([string]$dir, [int]$port, [string]$consoleLog, [int]$seconds
     Show-LogTail (Join-Path $dir "logs\debug.log")
     return $false
 }
-# 等待 Fuseki 就绪：端口 + 数据集真实探活（ping）。
+# 等待 Fuseki 就绪：端口 + 数据集真实探活（发真实 SPARQL ASK 查询）。
 # 真机事故（2026-10-29）：TDB 数据目录不可写（C:\Program Files\... 下 Users 仅读+执行）→
 # 数据集初始化失败但端口照常监听 → 旧逻辑 Wait-Port 判"就绪" → 后端探针报 jena unavailable。
-# 端口就绪 ≠ 服务可用：ping 返回 200 才算就绪；失败时做写权限诊断给出明确原因。
+# 端口就绪 ≠ 服务可用：query 返回 200 才算就绪；失败时做写权限诊断给出明确原因。
+# 2026-10-30 修复：旧探活用 /{ds}/ping——Fuseki（Jena 5.x）根本没有 ping 端点
+# （数据集只暴露 ttl 配置的 query/update/load/data 子路径），必 404 "No Fuseki dispatch"
+# → 探活恒超时 60s → 启动中止、后续服务全不起（实锤：控制台日志 29 次 404）。
 function Wait-Fuseki([int]$port, [string]$installDir, [string]$consoleLog, [string]$ttl) {
     # 数据集名从安装后的 ttl 读取（与后端 JENA_DATASET=ontology 保持一致）
     $ds = "ontology"
@@ -111,14 +114,16 @@ function Wait-Fuseki([int]$port, [string]$installDir, [string]$consoleLog, [stri
         Show-LogTail (Join-Path $installDir "logs\fuseki-console.err.log")
         return $false
     }
-    $pingUrl = "http://127.0.0.1:" + $port + "/" + $ds + "/ping"
-    Write-Host "  Fuseki 端口已监听，数据集 $ds 真实探活（$pingUrl）..."
+    # 探活 = 真实 SPARQL ASK 查询（与后端 jena_adapter 探针同口径）：
+    # 数据集真正可用才 200；TDB2 初始化失败会返回 5xx（端口在监听但数据层坏了照样能判出来）
+    $queryUrl = "http://127.0.0.1:" + $port + "/" + $ds + "/query?query=" + [Uri]::EscapeDataString("ASK { ?s ?p ?o }")
+    Write-Host "  Fuseki 端口已监听，数据集 $ds 真实探活（SPARQL ASK 查询）..."
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $lastTick = -1
     $lastStatus = 0
     while ($sw.Elapsed.TotalSeconds -lt 60) {
         try {
-            $req = [System.Net.HttpWebRequest]::Create($pingUrl)
+            $req = [System.Net.HttpWebRequest]::Create($queryUrl)
             $req.Method = "GET"
             $req.Timeout = 3000
             $req.ReadWriteTimeout = 3000
@@ -138,7 +143,7 @@ function Wait-Fuseki([int]$port, [string]$installDir, [string]$consoleLog, [stri
         }
         Start-Sleep -Seconds 2
     }
-    Write-Host ("Fuseki 数据集不可用（端口监听中，但 ping 状态={0}）——不判就绪" -f $lastStatus) -ForegroundColor Red
+    Write-Host ("Fuseki 数据集不可用（端口监听中，但 query 状态={0}）——不判就绪" -f $lastStatus) -ForegroundColor Red
     # 根因诊断：TDB 数据目录是否可写（真机事故根因）
     $tdb = Join-Path $installDir "backend\data\fuseki"
     $writable = $false
