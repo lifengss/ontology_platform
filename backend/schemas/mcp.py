@@ -1,7 +1,7 @@
 """MCP 连接配置 schema（与 API-INTERFACE-DOC §5.1 对齐；凭据仅存引用）。"""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -32,6 +32,12 @@ class ConnectionConfig(BaseModel):
     tool_allowlist: list[str] = Field(default_factory=list)
     maps_to_ontology: MapsToOntology
     read_schedule: str = "manual"
+    # V2-01：field_map 来源收敛（explicit=连接自带；dictionary=按数据字典生成，入库/查询同一数据源）
+    field_map_source: Literal["explicit", "dictionary"] = "explicit"
+    # V2-01：成本护栏——外部工具取数模式（paged=支持 limit 下推；full=仅全量拉取，须声明 fetch_limit）
+    fetch_mode: Literal["paged", "full"] = "paged"
+    fetch_limit: int = Field(0, ge=0, le=1_000_000)  # full 模式声明上限（0=未声明）
+    last_latency_ms: int = Field(0, ge=0)  # 实测时延（联邦查询回写，供成本估算）
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -45,6 +51,9 @@ class ConnectionCreate(BaseModel):
     tool_allowlist: list[str] = Field(default_factory=list)
     maps_to_ontology: MapsToOntology
     read_schedule: str = "manual"
+    field_map_source: Literal["explicit", "dictionary"] = "explicit"
+    fetch_mode: Literal["paged", "full"] = "paged"
+    fetch_limit: int = Field(0, ge=0, le=1_000_000)
 
 
 class ConnectionTestResult(BaseModel):

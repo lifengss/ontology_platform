@@ -4,6 +4,9 @@
 - ontology_query: 读本体 TBox，无副作用
 - inference_trace: 读推理链路，无副作用
 - instance_get: 读实例 ABox，无副作用（limit 默认 50 / 上限 200，offset 翻页，fields 投影）
+- term_lookup: 数据字典联邦查询（词条解析→多外部系统并行查询→语义归一合并），无副作用；
+  歧义/成本确认以结构化 JSON 返回（status=needs_disambiguation / cost_confirmation_required），
+  词条不存在或全部系统失败 raise ToolError（TERM_NOT_FOUND / FEDERATED_QUERY_FAILED）
 - action_invoke: 写外部系统，需确认令牌，有副作用
 
 MCP 接入层修复（2026-10-28，docs/平台修改建议-MCP接入层修复.md）：
@@ -59,6 +62,8 @@ ERR_AMBIGUOUS = "AMBIGUOUS"
 ERR_UNAUTHORIZED = "UNAUTHORIZED"
 ERR_INVALID_ARGUMENT = "INVALID_ARGUMENT"
 ERR_TOO_LARGE = "TOO_LARGE"
+ERR_TERM_NOT_FOUND = "TERM_NOT_FOUND"            # term_lookup：数据字典无匹配词条（不猜测）
+ERR_FEDERATED_FAILED = "FEDERATED_QUERY_FAILED"  # term_lookup：全部覆盖系统查询失败
 
 SESSION_ID_HEADER = "mcp-session-id"
 
@@ -83,6 +88,11 @@ TOOLS_CONTRACT = {
         "reads": ["Action定义", "目标外部系统"], "writes": ["外部系统", "本地执行日志"],
         "preconditions": ["Action 已定义", "本次执行已人工确认"],
         "postconditions": ["幂等键已写入", "执行结果已留痕"], "side_effect": True,
+    },
+    "term_lookup": {
+        "reads": ["数据字典", "外部系统（经已配置 MCP 连接并行只读查询）"], "writes": [],
+        "preconditions": ["数据字典存在可用词条（或同义词）"],
+        "postconditions": ["查询审计已留痕（term_lookup_audit）"], "side_effect": False,
     },
 }
 
@@ -546,6 +556,7 @@ class McpServer:
             "inference_trace": {"method": "tools/call", "params": {"name": "inference_trace", "arguments": {"ontology_id": "<ontology_id>"}}},
             "instance_get": {"method": "tools/call", "params": {"name": "instance_get", "arguments": {"ontology_id": "<ontology_id>", "object_type": "Activity"}}},
             "action_invoke": {"method": "tools/call", "params": {"name": "action_invoke", "arguments": {"action_id": "<action_id>", "confirmation_token": "<token>"}}},
+            "term_lookup": {"method": "tools/call", "params": {"name": "term_lookup", "arguments": {"term": "客户", "value": "C0001", "dry_run": True}}},
         }
         return examples.get(tool_name, {})
 
@@ -718,6 +729,37 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
             raise _err(ERR_NOT_FOUND, f"Action {action_id} 不存在")
         result = owner._action_engine.confirm(confirmation_token, {"action": rec})
         return json.dumps(result, ensure_ascii=False)
+
+    @m.tool()
+    def term_lookup(term: str, value: str = "", systems: str = "", limit: int = 50,
+                   dry_run: bool = False, confirm_cost: bool = False) -> str:
+        """数据字典联邦查询（M1-A / V2-01）。把输入词解析成标准词条（精确→同义词→确定性
+        语义近似，不猜测），再按各外部系统自己的字段名并行只读查询，语义归一后合并。
+
+        term 业务词或同义词（如"客户"）；value 待查键值（如客户编码）；
+        systems 可选，逗号分隔的连接 id 或连接显示名（缺省=全部覆盖系统）；
+        limit 每系统最多返回行数（默认 50 / 上限 500）；
+        dry_run=true 仅预览成本（cost_estimate），不发起外呼；
+        结果 status=cost_confirmation_required 时，确认后以 confirm_cost=true 重调（或放弃）；
+        结果 status=needs_disambiguation 时，从 candidates（含置信度）交人工选择，
+        确认后可将所选晋升为同义词再查（届时走精确匹配）。
+        同 key 值冲突并存并附来源标记，权威来源取权威值；未覆盖系统显式列入 uncovered；
+        全过程写入审计（term_lookup_audit）。
+        """
+        from dictionary import federated_lookup
+        res = federated_lookup(project_id, term, value=value, systems=systems,
+                               limit=limit, dry_run=dry_run, confirm_cost=confirm_cost,
+                               actor="mcp")
+        status = res.get("status")
+        if status == "term_not_found":
+            raise _err(ERR_TERM_NOT_FOUND,
+                       res.get("hint") or "数据字典中未找到匹配词条（显式未覆盖，不猜测）")
+        if status == "error":
+            per = res.get("per_system") or {}
+            detail = "；".join(f"{s}: {r.get('error') or r.get('status')}"
+                               for s, r in per.items()) or res.get("error") or "无已覆盖系统"
+            raise _err(ERR_FEDERATED_FAILED, f"全部覆盖系统查询失败：{detail}")
+        return json.dumps(res, ensure_ascii=False)
 
 
 def _run_inference(ontology: dict[str, Any]) -> list[dict[str, Any]]:

@@ -7,6 +7,15 @@ updated: 2026-11-09
 
 # 操作日志
 
+## [2026-11-09] feat | M1-A（V2-01 数据字典＋联邦查询）切片交付：垂直链路全链，验收 75/75，L5 回归 93/93
+- 后端：`backend/dictionary/`（词条 CRUD＋同义词晋升＋from-connections 导入＋解析链 精确→同义→确定性语义近似(0.6/0.1)→歧义候选＋联邦查询 asyncio.gather 并行/超时/未覆盖显式/冲突并存+来源标记/权威值/脏数据隔离/成本护栏 limit 下推+full 声明 fetch_limit+dry_run 预览+confirm/cancel＋审计 term_lookup_audit）；`api/router_dictionary.py` REST（list_payload 信封、DELETE 200 信封）；`schemas/dictionary.py`；连接 schema 加 field_map_source/fetch_mode/fetch_limit，`router_mcp` read_connection 走 `resolve_field_map` 收敛（explicit|dictionary 同一数据源）；`mcp_server` 注册 `term_lookup` 工具（5 工具）；mock 加 full_fetch_only 管理面。
+- 前端：`index.html` 数据字典 tab（词条表/编辑器/联邦查询面板/field_map 来源盘点/结果区/审计表）＋`app.js` 字典模块（loadDictionary/词条 CRUD/联邦查询+成本确认交互/审计，node --check 通过）。
+- 关键修复（本轮发现）：① 键值归一化禁 casefold（标识符大小写敏感，casefold 仅词条/字段名匹配）；② 排查中曾把 main.py 日志中间件改写为纯 ASGI 实现，导致 legacy SSE（mcp SDK sse_client）e2e 必现 ReadError——根因是 legacy SSE messages 端点 SDK 经原始 ASGI send 发 202 后 FastAPI 又补发隐式响应（双响应），旧 BaseHTTPMiddleware 的内部通道恰好掩盖、纯 ASGI 透传则暴露给 uvicorn 断连；**已还原 BaseHTTPMiddleware**（该缺陷为潜在 bug 另行登记，不阻塞本切片）。
+- 验收 `scripts/verify_m1a_dictionary.py`：**PASS=75/FAIL=0**（含 MCP SSE 真实 SDK 段：5 工具列表、ok 合并带来源、dry_run 成本预览、未命中 isError+TERM_NOT_FOUND）。
+- L5 回归（`backend/tests` 93 项）：**93 passed / 0 failed**（含 vs10 E2E 5/5）。
+- 登记：[[source-V2-测试用例]] 脚本区＋1 行；[[V2开发里程碑]] M1-A ✅；用户级 wiki raw 快照＋进展页同步。
+- 下一切片：M1-B（V2-04 首片，AST 求值引擎）或 M1-C（V2-03，1–2 人日）——待用户指示。
+
 ## [2026-11-09] feat | VS2-00 测试基建交付（3 可控 mock＋4 类数据集，验收 50/50）＋ L5 回归 93/93 全绿
 - 3 个可控 mock 外部 MCP Server（`backend/mocks/v2_external.py`＋`run_all`：crm:18101/plm:18102/reservoir:18103）：五能力——时延注入/schema 热变（version 递增）/权限切换（tok-full/even/odd/empty，未知 401）/断流与故障注入（outage 断连、fail_rate→503）/CDC 通道切换（none|binlog|mq|cursor，不支持 409）；管理面 X-Mock-Admin；事件日志单调 LSN、三通道同源可重放。
 - 4 类数据集（`scripts/generate_v2_datasets.py`，seed=42 → `data/datasets/v2/`）：2297 维保实例（17 对象 Excel＋本体 TTL）、脏数据批 200 行（缺键/重复/越枚举/越界/悬空＋SHACL）、双本体"供应商"对齐集（A 1200/B 1380/键重叠 1000：共同来源 150/值冲突 120/语义相似 40/干净 690）、基准规模图（54801 三元组＋100 SHACL）；口径与容差（六公式 P9 权威、L1 容差 0）见 `data/datasets/v2/README.md`。

@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api.router_actions import router as actions_router
+from api.router_dictionary import router as dictionary_router
 from api.router_graph import router as graph_router
 from api.router_ingest import router as ingest_router
 from api.router_llm import router as llm_router
@@ -97,6 +98,7 @@ app.include_router(ontologies_router)
 app.include_router(ingest_router)
 app.include_router(graph_router)
 app.include_router(mcp_router)
+app.include_router(dictionary_router)  # V2-01 数据字典与联邦查询（M1-A）
 app.include_router(namespaces_router)
 app.include_router(actions_router)
 app.include_router(templates_router)

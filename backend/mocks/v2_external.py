@@ -209,6 +209,7 @@ class ControllableMockSystem:
             "fail_rate": 0.0,
             "error_status": 500,
             "outage": False,
+            "full_fetch_only": False,   # True: /read 忽略 limit（仅支持全量拉取，V2-01 成本护栏用）
             "cdc_channel": cdc_channel,
             "subscribe_timeout_ms": 2000,
         }
@@ -432,10 +433,14 @@ class ControllableMockSystem:
                         continue
                     if k in {f["name"] for f in outer.fields}:
                         rows = [r for r in rows if r.get(k) == v]
+                full_only = bool(outer.config.get("full_fetch_only"))
                 limit = params.get("limit")
-                if isinstance(limit, int) and limit > 0:
+                if not full_only and isinstance(limit, int) and limit > 0:
                     rows = rows[:limit]
-                return {"records": rows, "count": len(rows)}
+                out: Dict[str, Any] = {"records": rows, "count": len(rows)}
+                if full_only:
+                    out["full_fetch_only"] = True  # 告知平台：本系统不支持 limit 下推
+                return out
 
             def _do_write(self, tok: str, scope: Dict[str, Any],
                           params: Dict[str, Any]) -> tuple:

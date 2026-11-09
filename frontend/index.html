@@ -114,6 +114,7 @@
     <div class="tab" data-tab="graph" onclick="switchTab('graph')">图谱</div>
     <div class="tab" data-tab="inference" onclick="switchTab('inference')">推理</div>
     <div class="tab" data-tab="action" onclick="switchTab('action')">业务动作</div>
+    <div class="tab" data-tab="dictionary" onclick="switchTab('dictionary')">数据字典</div>
     <div class="tab" data-tab="mcp" onclick="switchTab('mcp')">MCP</div>
     <div class="tab" data-tab="logs" onclick="switchTab('logs')">日志</div>
     <div class="tab" data-tab="settings" onclick="switchTab('settings')">设置</div>
@@ -489,6 +490,86 @@
             <span class="text-xs text-slate-500">公理推导：inverseOf 对称性 / subClassOf 传递 / 属性域值域继承（与具体实例无关）</span>
           </div>
           <div id="inferenceSteps" class="space-y-2 max-h-[400px] overflow-auto"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 数据字典页（M1-A / V2-01：词条管理 + 联邦查询 + 审计） -->
+    <section id="dictionary" class="tab-content hidden grid grid-cols-12 gap-4">
+      <div class="col-span-12 lg:col-span-7">
+        <div class="card p-4">
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <h3 class="font-medium mb-1">数据字典词条</h3>
+              <div class="text-xs text-slate-500">规范术语 = 跨系统统一语义：把同一业务含义绑定到各系统的键字段。查询解析顺序：精确 → 同义词 → 确定性语义近似（不猜测）；歧义时列候选+置信度交人工确认，确认后晋升为同义词即走精确匹配。</div>
+            </div>
+            <button class="btn" type="button" onclick="openDictTermEditor()">＋ 新建词条</button>
+          </div>
+          <div id="dictTermEditor" class="hidden mb-3 border border-slate-700/60 rounded-lg p-3 bg-slate-900/40"></div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs border-collapse">
+              <thead><tr class="text-slate-400">
+                <th class="border-b border-slate-700 p-1 text-left">规范术语</th>
+                <th class="border-b border-slate-700 p-1 text-left">对象 / 属性</th>
+                <th class="border-b border-slate-700 p-1 text-left">同义词</th>
+                <th class="border-b border-slate-700 p-1 text-left">系统绑定</th>
+                <th class="border-b border-slate-700 p-1 text-left">权威来源</th>
+                <th class="border-b border-slate-700 p-1 text-left w-28">操作</th>
+              </tr></thead>
+              <tbody id="dictTermsBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="col-span-12 lg:col-span-5">
+        <div class="card p-4">
+          <h3 class="font-medium mb-1">联邦查询</h3>
+          <div class="text-xs text-slate-500 mb-2">按各覆盖系统自己的字段名并行只读查询，语义归一后合并。成本护栏：可先 dry_run 预览成本；全量拉取系统超声明上限时，需确认后才执行（也可取消）。</div>
+          <div class="grid grid-cols-2 gap-2 text-sm">
+            <div class="col-span-2"><label class="text-xs text-slate-400">词条 / 同义词</label><input id="dictLookupTerm" class="w-full" placeholder="如：PN码 / PN号 / PN"></div>
+            <div><label class="text-xs text-slate-400">键值</label><input id="dictLookupValue" class="w-full font-mono text-xs" placeholder="如：PN-100001"></div>
+            <div><label class="text-xs text-slate-400">limit（每系统）</label><input id="dictLookupLimit" type="number" class="w-full" value="50" min="1" max="500"></div>
+            <div class="col-span-2"><label class="text-xs text-slate-400">限定系统（逗号分隔；连接 id 或显示名；留空 = 全部覆盖系统）</label><input id="dictLookupSystems" class="w-full font-mono text-xs" placeholder="如：conn-crm, PLM系统"></div>
+          </div>
+          <div class="flex items-center gap-2 mt-3">
+            <button class="btn" type="button" onclick="dictLookup(false)">查询</button>
+            <button class="btn secondary" type="button" onclick="dictLookup(true)">成本预览 (dry_run)</button>
+            <button id="dictConfirmBtn" class="btn hidden" type="button" onclick="dictLookup(false, true)">确认执行</button>
+          </div>
+        </div>
+        <div class="card p-4 mt-4">
+          <h3 class="font-medium mb-1">field_map 来源盘点</h3>
+          <div class="text-xs text-slate-500 mb-2">explicit = 连接显式配置；dictionary = 由字典词条绑定生成。同一数据源，入库与查询行为一致；改字典即同时改两个方向。</div>
+          <div id="dictFmSources" class="text-xs text-slate-300 space-y-1">加载中…</div>
+        </div>
+      </div>
+      <div class="col-span-12">
+        <div class="card p-4">
+          <h3 class="font-medium mb-2">查询结果</h3>
+          <div id="dictResult" class="text-xs text-slate-500">执行一次联邦查询后在此展示（状态 / 成本 / 各系统明细 / 合并结果 / 未覆盖系统）。</div>
+        </div>
+      </div>
+      <div class="col-span-12">
+        <div class="card p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-medium mb-0">查询审计（term_lookup_audit）</h3>
+            <button class="btn secondary" type="button" onclick="loadDictAudit()">刷新</button>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs border-collapse">
+              <thead><tr class="text-slate-400">
+                <th class="border-b border-slate-700 p-1 text-left">时间</th>
+                <th class="border-b border-slate-700 p-1 text-left">输入词</th>
+                <th class="border-b border-slate-700 p-1 text-left">键值</th>
+                <th class="border-b border-slate-700 p-1 text-left">解析</th>
+                <th class="border-b border-slate-700 p-1 text-left">状态</th>
+                <th class="border-b border-slate-700 p-1 text-left">各系统行数</th>
+                <th class="border-b border-slate-700 p-1 text-right">耗时(ms)</th>
+                <th class="border-b border-slate-700 p-1 text-left">调用方</th>
+              </tr></thead>
+              <tbody id="dictAuditBody"></tbody>
+            </table>
+          </div>
         </div>
       </div>
     </section>

@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from api.dependencies import project_id_param
 from core.responses import ApiError, list_payload, parse_pagination, success
 from core.storage import JsonStore
+from dictionary import resolve_field_map
 from ingestion import apply_field_map
 from logging_setup import get_logger
 from mcp_client import McpClient
@@ -145,11 +146,15 @@ def read_connection(
         raise ApiError("NOT_FOUND", "关联本体不存在", http_status=404)
 
     object_type = maps.get("object_type")
-    field_map: dict[str, str] = maps.get("field_map") or {}
+    # V2-01：field_map 单一解析点（explicit=连接自带；dictionary=按数据字典生成，与联邦查询同一数据源）
+    field_map, field_map_source = resolve_field_map(project_id, rec)
     if not object_type or not field_map:
-        raise ApiError("VALIDATION_ERROR", "连接缺少 maps_to_ontology.object_type 或 field_map", http_status=422)
+        hint = "（field_map_source=dictionary：请先创建绑定该连接与本体属性的数据字典词条）" \
+            if field_map_source == "dictionary" else ""
+        raise ApiError("VALIDATION_ERROR", f"连接缺少 maps_to_ontology.object_type 或 field_map{hint}", http_status=422)
+    eff_rec = {**rec, "maps_to_ontology": {**maps, "field_map": field_map}}
 
-    raw = _client.read(rec, tool or "read", params or {})
+    raw = _client.read(eff_rec, tool or "read", params or {})
     records = raw.get("records", [])
 
     obj = next((o for o in ontology.get("objects", []) if o["id"] == object_type), None)
@@ -165,7 +170,7 @@ def read_connection(
         "source_ref": connection_id,
         "instances": instances,
         "status": "pending",
-        "mapping": {"field_map": field_map},
+        "mapping": {"field_map": field_map, "field_map_source": field_map_source},
         "created_at": _now(),
         "updated_at": _now(),
     }

@@ -445,3 +445,28 @@
 2. 本轮改动 git 提交（待用户指示或里程碑收口时统一提交）。
 3. 前置冻结项（后续）：golden dataset＋四类指标阈值（M3-F 前）；性能基线目标值（各基准用例前）；M4 前 D3 存量迁移方案单独评审。
 4. 每切片脚本继续在 wiki `source-V2-测试用例` 登记区登记；每次交互结束追加本文件 checkpoint。
+
+---
+
+## 22. 2026-11-09：M1-A（V2-01 数据字典＋联邦查询）切片交付（验收 75/75；L5 回归 93/93）
+
+### 22.1 本次交互交付
+- **后端**：`backend/dictionary/__init__.py`（~450 行）——词条 CRUD＋同义词晋升＋`import-from-connections`（created/merged 返回 id 列表）＋解析链（精确→同义词→确定性语义近似 SEMANTIC_THRESHOLD=0.6/AMBIGUITY_GAP=0.1→歧义候选 needs_disambiguation 附 candidates）＋`federated_lookup`（asyncio.gather 并行＋超时＋uncovered 未覆盖显式＋同 key 冲突并存带来源标记＋authoritative_source 权威值＋脏数据行隔离＋全失败显式报错带各系统 detail）＋成本护栏（limit 下推、full 须声明 fetch_limit 超限截断、dry_run cost_estimate 预览、confirm_cost 确认后才执行——确认前零外呼经 mock read_calls 断言）＋审计 term_lookup_audit；`api/router_dictionary.py`（list_payload 信封、DELETE 200 信封）；`schemas/dictionary.py`；`schemas/mcp.py` 连接加 field_map_source/fetch_mode/fetch_limit；`api/router_mcp.py` read_connection 走 `resolve_field_map`（explicit|dictionary 同一数据源）；`mcp_server` 注册 **term_lookup 工具**（TOOLS_CONTRACT 5 工具，非 ok 转 ToolError）；`mocks/v2_external.py` 加 full_fetch_only 管理面。
+- **前端**：`index.html` 导航＋「数据字典」section（词条表/行内编辑器含系统绑定动态行/联邦查询面板 查询+成本预览+确认执行/field_map 来源盘点/结果区/审计表）；`app.js` switchTab 挂 dictionary 钩子＋末尾字典模块（loadDictionary/openDictTermEditor/saveDictTerm/deleteDictTerm/dictLookup/renderDictResult/renderDictFmSources/loadDictAudit）；`node --check` 通过、read_lints 零错误。
+- **验收** `scripts/verify_m1a_dictionary.py`（~700 行）：**PASS=75/FAIL=0**——3 mock（port=0）＋3 连接＋主词条「PN码」；TC-01-01~09＋TCE 关键链路＋REST 冒烟＋MCP SSE 真实 SDK 段（5 工具含 term_lookup、ok 合并带来源、dry_run 预览、未命中 isError+TERM_NOT_FOUND）。
+- **L5 回归**：`backend/tests` 93 项 **93 passed / 0 failed**（vs10 E2E 5/5）。
+- **关键坑**：
+  1. 键值归一化禁 casefold（标识符大小写敏感；误用致与 mock 精确过滤不匹配），casefold 仅词条/字段名匹配。
+  2. **中间件回退**：本轮排查中曾把 main.py 日志中间件从 BaseHTTPMiddleware 改写为纯 ASGI 透传——M1-A 验收（streamable HTTP）全绿但 L5 `test_vs10_e2e::test_02`（legacy sse_client）必现 ReadError；git stash 隔离验证定位为 **legacy SSE messages 端点双响应**（SDK `handle_post_message` 经原始 ASGI send 发 202 后 FastAPI 又补发隐式响应；旧 BaseHTTPMiddleware 内部通道恰好掩盖、纯 ASGI 暴露给 uvicorn "http.response.start after response already completed" CRITICAL→断连）。已还原 BaseHTTPMiddleware（保留 M1-A 字典路由注册）；双响应为潜在 ASGI 违规，登记待办不阻塞。
+- **文档/登记**：`docs/V2-开发里程碑.md`（状态行＋M1-A ✅）、项目 wiki（`V2开发里程碑.md` M1-A ✅/`source-V2-测试用例.md` 脚本登记＋1 行/`log.md` 条目/`index.md` 状态行）、用户级 wiki（raw 快照 `2026-11-09-M1-A-字典与联邦查询交付.md`＋`进展与测试.md` M1-A 节＋实体页 V2 现状/导航＋`log.md`）。
+
+### 22.2 当前进展
+- M1-A ✅ 完成（退出标准满足：TP-01-01~09/EP-01-01~06 验收全绿＋L5 回归 93/93）。
+- git：本轮改动已提交（见 22.3）。
+- 临时产物：`data/tmp_*.log`（验收/L5 日志）可清理。
+
+### 22.3 未完成 / 下一步
+1. **M1 剩余切片**（启动需用户明确指示）：M1-B（V2-04 首片：能力 UI→AST 求值引擎，8–12 人日，前置冻结项"2297 Excel 参照口径与容差"已定稿于 `data/datasets/v2/README.md`）；M1-C（V2-03 主键编辑，1–2 人日，无依赖可插空）。
+2. 待办（登记不阻塞）：legacy SSE 双响应修复（`mcp_server.handle_messages`/`handle_sse` 端点单响应化——SDK 经原始 ASGI send 已发响应后 FastAPI 不再补发）。
+3. 后续冻结项：golden dataset＋四类指标阈值（M3-F 前）；性能基线目标值；M4 前 D3 存量迁移方案单独评审。
+4. 每切片脚本继续在 wiki `source-V2-测试用例` 登记区登记；每次交互结束追加本文件 checkpoint。

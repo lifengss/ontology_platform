@@ -775,6 +775,7 @@ function switchTab(name) {
   if (name === 'graph') { loadOntologies().then(() => { renderOntologySelects(); loadGraph(); }); }
   if (name === 'inference') { loadOntologies().then(() => { renderOntologySelects(); loadInference(); }); }
   if (name === 'action') { loadActions(); }
+  if (name === 'dictionary') { loadDictionary(); }
   if (name === 'mcp') { loadMcpOntologies(1); loadMcpTools(); loadMcpToken(); }
   if (name === 'logs') { loadServerLogs(); }
   if (name === 'settings') { loadLLMSettings(); }
@@ -4285,6 +4286,304 @@ window.addEventListener('unhandledrejection', e => {
   switchTab('home');
   setInterval(checkHealth, 10000);
 })();
+
+// ===================== 数据字典（M1-A / V2-01：词条 + 联邦查询 + 审计） =====================
+let dictTerms = [];
+let dictFmSrc = [];
+let dictEditingId = null;
+
+async function loadDictionary() {
+  try { await loadConnections(); } catch (e) { /* 连接下拉可留空 */ }
+  try {
+    const [termsJ, fmJ] = await Promise.all([
+      api('/api/dictionary/terms'),
+      api('/api/dictionary/field-map-sources').catch(() => ({ data: { items: [] } }))
+    ]);
+    dictTerms = termsJ.data.items || [];
+    dictFmSrc = fmJ.data.items || [];
+    renderDictTerms();
+    renderDictFmSources();
+    loadDictAudit();
+  } catch (e) { console.warn('loadDictionary', e); }
+}
+
+function dictConnOpts(selectedId) {
+  const conns = (typeof connList !== 'undefined' && connList.length)
+    ? connList
+    : [];
+  return '<option value="">-- 不指定 --</option>' + conns.map(c =>
+    '<option value="' + esc(c.connection_id) + '"' + (c.connection_id === selectedId ? ' selected' : '') + '>' +
+    esc(c.display_name) + '（' + esc((c.connection_id || '').slice(0, 10)) + '）</option>'
+  ).join('');
+}
+
+function renderDictTerms() {
+  const tb = $('dictTermsBody');
+  if (!tb) return;
+  if (!dictTerms.length) {
+    tb.innerHTML = '<tr><td colspan="6" class="p-3 text-center text-slate-500">暂无词条。点右上「＋ 新建词条」，或到「MCP」页建好连接后在词条表单里绑定各系统字段。</td></tr>';
+    return;
+  }
+  tb.innerHTML = dictTerms.map(t => {
+    const bindings = Object.entries(t.system_bindings || {})
+      .map(([cid, f]) => '<div>' + esc(dictConnName(cid)) + '：<span class="font-mono">' + esc(f) + '</span></div>').join('')
+      || '<span class="text-slate-600">未绑定</span>';
+    return '<tr class="border-b border-slate-700/40 hover:bg-slate-800/30 align-top">' +
+      '<td class="p-1.5 font-medium">' + esc(t.canonical) + '</td>' +
+      '<td class="p-1.5">' + esc(t.object_type || '-') + ' / <span class="font-mono text-slate-400">' + esc(t.property_id || '-') + '</span></td>' +
+      '<td class="p-1.5">' + (((t.synonyms || []).map(s => '<span class="badge text-slate-400 mr-1">' + esc(s) + '</span>').join('')) || '<span class="text-slate-600">-</span>') + '</td>' +
+      '<td class="p-1.5">' + bindings + '</td>' +
+      '<td class="p-1.5">' + (t.authoritative_source ? esc(dictConnName(t.authoritative_source)) : '<span class="text-slate-600">-</span>') + '</td>' +
+      '<td class="p-1.5 whitespace-nowrap">' +
+        '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="openDictTermEditor(\'' + t.id + '\')">编辑</button> ' +
+        '<button class="btn danger" style="padding:2px 8px;font-size:12px" onclick="deleteDictTerm(\'' + t.id + '\')">删除</button>' +
+      '</td></tr>';
+  }).join('');
+}
+
+function dictConnName(cid) {
+  const c = (typeof connList !== 'undefined' ? connList : []).find(x => x.connection_id === cid);
+  return (c && c.display_name) || cid;
+}
+
+async function openDictTermEditor(id) {
+  dictEditingId = id || null;
+  try { await loadConnections(); } catch (e) { /* 连接下拉可留空 */ }
+  const t = dictTerms.find(x => x.id === id) || null;
+  const box = $('dictTermEditor');
+  box.classList.remove('hidden');
+  const bindings = (t && t.system_bindings) || {};
+  box.innerHTML =
+    '<div class="grid grid-cols-12 gap-2 text-sm">' +
+      '<div class="col-span-3"><label class="text-xs text-slate-400">规范术语 *</label><input id="dictTCan" class="w-full" value="' + esc((t && t.canonical) || '') + '" placeholder="如：PN码"></div>' +
+      '<div class="col-span-3"><label class="text-xs text-slate-400">对应对象</label><input id="dictTObj" class="w-full" value="' + esc((t && t.object_type) || '') + '" placeholder="如：Product"></div>' +
+      '<div class="col-span-3"><label class="text-xs text-slate-400">对应属性</label><input id="dictTProp" class="w-full font-mono text-xs" value="' + esc((t && t.property_id) || '') + '" placeholder="如：pn"></div>' +
+      '<div class="col-span-3"><label class="text-xs text-slate-400">同义词（逗号分隔）</label><input id="dictTSyn" class="w-full" value="' + esc(((t && t.synonyms) || []).join(', ')) + '" placeholder="如：PN号, PN"></div>' +
+      '<div class="col-span-12">' +
+        '<label class="text-xs text-slate-400">系统绑定（系统 → 该系统里的键字段名）</label>' +
+        '<div id="dictTBindings" class="space-y-1"></div>' +
+        '<button class="btn secondary mt-1" style="padding:2px 8px;font-size:12px" type="button" onclick="addDictBindingRow()">＋ 绑定一个系统</button>' +
+      '</div>' +
+      '<div class="col-span-6"><label class="text-xs text-slate-400">权威来源（冲突时取该系统的值）</label><select id="dictTAuth" class="w-full">' + dictConnOpts((t && t.authoritative_source) || '') + '</select></div>' +
+      '<div class="col-span-6 flex items-end gap-2">' +
+        '<button class="btn" type="button" onclick="saveDictTerm()">保存</button>' +
+        '<button class="btn secondary" type="button" onclick="closeDictTermEditor()">取消</button>' +
+      '</div>' +
+    '</div>';
+  const bindBox = $('dictTBindings');
+  if (!Object.keys(bindings).length) {
+    bindBox.innerHTML = '<div class="text-xs text-slate-500">尚未绑定任何系统（未绑定的系统查询时会显式列入未覆盖）。</div>';
+  } else {
+    Object.entries(bindings).forEach(([cid, f]) => addDictBindingRow(cid, f));
+  }
+}
+
+function addDictBindingRow(cid, field) {
+  const box = $('dictTBindings');
+  if (!box) return;
+  const note = box.querySelector('.text-slate-500');
+  if (note) note.remove();
+  const row = document.createElement('div');
+  row.className = 'dict-bind-row grid grid-cols-12 gap-2 items-center';
+  row.innerHTML =
+    '<select class="col-span-7 dict-bind-conn w-full">' + dictConnOpts(cid || '') + '</select>' +
+    '<input class="col-span-4 dict-bind-field w-full font-mono text-xs" value="' + esc(field || '') + '" placeholder="该系统中的键字段名，如 PN / PN码 / PN_Num">' +
+    '<button class="col-span-1 btn danger" style="padding:2px 6px;font-size:12px" type="button" onclick="this.closest(\'.dict-bind-row\').remove()">×</button>';
+  box.appendChild(row);
+}
+
+function closeDictTermEditor() {
+  dictEditingId = null;
+  $('dictTermEditor').classList.add('hidden');
+  $('dictTermEditor').innerHTML = '';
+}
+
+async function saveDictTerm() {
+  const bindings = {};
+  document.querySelectorAll('.dict-bind-row').forEach(r => {
+    const cid = r.querySelector('.dict-bind-conn').value;
+    const f = (r.querySelector('.dict-bind-field').value || '').trim();
+    if (cid && f) bindings[cid] = f;
+  });
+  const body = {
+    canonical: ($('dictTCan').value || '').trim(),
+    object_type: ($('dictTObj').value || '').trim(),
+    property_id: ($('dictTProp').value || '').trim(),
+    synonyms: ($('dictTSyn').value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean),
+    system_bindings: bindings,
+    authoritative_source: $('dictTAuth').value || null
+  };
+  if (!body.canonical) return toast('规范术语不能为空', 'err');
+  try {
+    if (dictEditingId) {
+      await api('/api/dictionary/terms/' + dictEditingId, { method: 'PUT', body: JSON.stringify(body) });
+    } else {
+      await api('/api/dictionary/terms', { method: 'POST', body: JSON.stringify(body) });
+    }
+    closeDictTermEditor();
+    toast('词条已保存', 'ok');
+    loadDictionary();
+  } catch (e) { toast('保存失败: ' + e.message, 'err'); }
+}
+
+async function deleteDictTerm(id) {
+  if (!confirm('确认删除该词条？')) return;
+  try {
+    await api('/api/dictionary/terms/' + id, { method: 'DELETE' });
+    toast('已删除', 'ok');
+    loadDictionary();
+  } catch (e) { toast('删除失败: ' + e.message, 'err'); }
+}
+
+// ---- 联邦查询 ----
+async function dictLookup(dryRun, confirmCost) {
+  const term = ($('dictLookupTerm').value || '').trim();
+  if (!term) return toast('请输入词条或同义词', 'err');
+  const body = {
+    term,
+    value: ($('dictLookupValue').value || '').trim(),
+    systems: ($('dictLookupSystems').value || '').trim(),
+    limit: parseInt($('dictLookupLimit').value || '50', 10) || 50,
+    dry_run: !!dryRun,
+    confirm_cost: !!confirmCost
+  };
+  const box = $('dictResult');
+  box.innerHTML = '<div class="text-xs text-slate-400">查询中…</div>';
+  $('dictConfirmBtn').classList.add('hidden');
+  try {
+    const j = await api('/api/dictionary/term-lookup', { method: 'POST', body: JSON.stringify(body) });
+    renderDictResult(j.data || {});
+  } catch (e) {
+    box.innerHTML = '<div class="text-xs text-rose-400">查询失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderDictResult(res) {
+  const box = $('dictResult');
+  const statusLabel = {
+    ok: '成功', preview: '成本预览（未执行）', needs_disambiguation: '歧义待确认',
+    term_not_found: '词条未匹配', cost_confirmation_required: '成本待确认', error: '失败'
+  }[res.status] || res.status;
+  const statusCls = { ok: 'ok', preview: 'text-amber-300', needs_disambiguation: 'text-amber-300',
+    cost_confirmation_required: 'text-amber-300', term_not_found: 'text-rose-400', error: 'text-rose-400' }[res.status] || 'text-slate-400';
+  let html = '<div class="flex items-center gap-2 mb-2">' +
+    '<span class="badge ' + statusCls + '">' + esc(statusLabel) + '（' + esc(res.status) + '）</span>' +
+    (res.cost_ms != null ? '<span class="text-xs text-slate-500">耗时 ' + res.cost_ms + ' ms</span>' : '') +
+    '</div>';
+  if (res.hint) html += '<div class="text-xs text-amber-300 mb-2">' + esc(res.hint) + '</div>';
+  if (res.error) html += '<div class="text-xs text-rose-400 mb-2 whitespace-pre-wrap">' + esc(res.error) + '</div>';
+
+  // 歧义候选
+  if (res.status === 'needs_disambiguation' && (res.candidates || []).length) {
+    html += '<div class="mb-3"><div class="text-xs text-slate-400 mb-1">候选词条（人工选择，可将所选晋升为同义词后再查）：</div>' +
+      res.candidates.map(c =>
+        '<div class="mb-1 border border-slate-700/60 rounded px-2 py-1 text-xs">' +
+        '<span class="font-medium">' + esc(c.canonical) + '</span> ' +
+        '<span class="text-slate-500">置信度 ' + (c.confidence == null ? '-' : c.confidence.toFixed(3)) + '</span>' +
+        (c.synonyms && c.synonyms.length ? ' <span class="text-slate-500">同义词: ' + c.synonyms.map(esc).join(', ') + '</span>' : '') +
+        '</div>').join('') + '</div>';
+  }
+
+  // 成本预览/确认
+  if (res.cost_estimate) {
+    const ce = res.cost_estimate;
+    html += '<div class="mb-3"><div class="text-xs text-slate-400 mb-1">成本估算（needs_confirm=' + (ce.needs_confirm ? '是' : '否') + '）</div>' +
+      '<table class="w-full text-xs border-collapse mb-1"><thead><tr class="text-slate-500">' +
+      '<th class="border-b border-slate-700 p-1 text-left">系统</th><th class="border-b border-slate-700 p-1 text-left">拉取模式</th><th class="border-b border-slate-700 p-1 text-right">预估行数</th></tr></thead><tbody>' +
+      Object.entries(ce.systems || {}).map(([sid, s]) =>
+        '<tr class="border-b border-slate-700/40"><td class="p-1">' + esc(dictConnName(sid)) + '</td>' +
+        '<td class="p-1">' + esc(s.fetch_mode || 'paged') + (s.fetch_limit ? '（上限 ' + s.fetch_limit + '）' : '') + '</td>' +
+        '<td class="p-1 text-right">' + (s.est_rows != null ? s.est_rows : '-') + '</td></tr>').join('') +
+      '</tbody></table>' +
+      (ce.total_est_rows != null ? '<div class="text-xs text-slate-500">合计预估 ' + ce.total_est_rows + ' 行</div>' : '') +
+      '</div>';
+    if (res.status === 'cost_confirmation_required') $('dictConfirmBtn').classList.remove('hidden');
+  }
+
+  // 未覆盖系统
+  if ((res.uncovered || []).length) {
+    html += '<div class="text-xs text-amber-300 mb-2">未覆盖系统（显式列出，不隐藏）：' +
+      res.uncovered.map(sid => esc(dictConnName(sid))).join('、') + '</div>';
+  }
+
+  // 各系统明细
+  if (res.per_system && Object.keys(res.per_system).length) {
+    html += '<div class="mb-3"><div class="text-xs text-slate-400 mb-1">各系统明细</div>' +
+      '<table class="w-full text-xs border-collapse"><thead><tr class="text-slate-500">' +
+      '<th class="border-b border-slate-700 p-1 text-left">系统</th><th class="border-b border-slate-700 p-1 text-left">状态</th>' +
+      '<th class="border-b border-slate-700 p-1 text-right">行数</th><th class="border-b border-slate-700 p-1 text-left">模式</th>' +
+      '<th class="border-b border-slate-700 p-1 text-right">耗时(ms)</th><th class="border-b border-slate-700 p-1 text-left">错误</th></tr></thead><tbody>' +
+      Object.entries(res.per_system).map(([sid, s]) =>
+        '<tr class="border-b border-slate-700/40"><td class="p-1">' + esc(dictConnName(sid)) + '</td>' +
+        '<td class="p-1 ' + (s.status === 'ok' ? 'text-emerald-400' : 'text-rose-400') + '">' + esc(s.status) + (s.code ? '（' + esc(s.code) + '）' : '') + '</td>' +
+        '<td class="p-1 text-right">' + (s.row_count != null ? s.row_count : '-') + '</td>' +
+        '<td class="p-1">' + esc(s.fetch_mode || '-') + (s.truncated ? '（截断）' : '') + '</td>' +
+        '<td class="p-1 text-right">' + (s.latency_ms != null ? s.latency_ms : '-') + '</td>' +
+        '<td class="p-1 text-rose-400 break-all">' + esc(s.error || '') + '</td></tr>').join('') +
+      '</tbody></table></div>';
+  }
+
+  // 合并结果
+  if ((res.merged || []).length) {
+    html += '<div class="mb-1"><div class="text-xs text-slate-400 mb-1">合并结果（' + res.merged.length + ' 条；同 key 值冲突并存并带来源标记，权威来源取权威值）</div>' +
+      '<div class="overflow-x-auto"><table class="w-full text-xs border-collapse"><thead><tr class="text-slate-500">' +
+      '<th class="border-b border-slate-700 p-1 text-left">属性</th><th class="border-b border-slate-700 p-1 text-left">值</th>' +
+      '<th class="border-b border-slate-700 p-1 text-left">冲突</th><th class="border-b border-slate-700 p-1 text-left">来源</th></tr></thead><tbody>' +
+      res.merged.map(m => Object.entries(m.fields || {}).map(([prop, f]) =>
+        '<tr class="border-b border-slate-700/40 align-top"><td class="p-1 font-mono">' + esc(prop) + '</td>' +
+        '<td class="p-1">' + (f.conflict ? '-' : esc(f.value == null ? '（空）' : String(f.value))) + (f.authoritative ? ' <span class="text-emerald-400 text-[11px]">[权威]</span>' : '') + '</td>' +
+        '<td class="p-1 ' + (f.conflict ? 'text-amber-300' : 'text-slate-600') + '">' + (f.conflict ? '是' : '') + '</td>' +
+        '<td class="p-1 text-slate-400">' + Object.entries(f.sources || {}).map(([src, v]) =>
+          esc(src) + '=' + esc(v == null ? '（空）' : String(v))).join('<br>') + '</td></tr>').join('')).join('') +
+      '</tbody></table></div></div>';
+  }
+  if (!res.per_system && !res.cost_estimate && !res.candidates) {
+    html += '<div class="text-xs text-slate-500">（无更多明细）</div>';
+  }
+  box.innerHTML = html;
+}
+
+function renderDictFmSources() {
+  const box = $('dictFmSources');
+  if (!box) return;
+  if (!dictFmSrc.length) { box.innerHTML = '<div class="text-slate-600">暂无连接。</div>'; return; }
+  box.innerHTML = dictFmSrc.map(s =>
+    '<div class="flex items-center gap-2">' +
+    '<span class="w-32 truncate">' + esc(dictConnName(s.connection_id)) + '</span>' +
+    '<span class="badge ' + (s.field_map_source === 'dictionary' ? 'ok' : 'text-slate-400') + '">' + esc(s.field_map_source) + '</span>' +
+    '<span class="text-slate-500">' + s.field_map_size + ' 字段映射</span>' +
+    '</div>').join('');
+}
+
+async function loadDictAudit() {
+  const tb = $('dictAuditBody');
+  if (!tb) return;
+  try {
+    const j = await api('/api/dictionary/term-lookup-audit?page=1&pageSize=20');
+    const items = j.data.items || [];
+    if (!items.length) {
+      tb.innerHTML = '<tr><td colspan="8" class="p-3 text-center text-slate-500">暂无审计记录。</td></tr>';
+      return;
+    }
+    tb.innerHTML = items.map(a => {
+      const r = a.resolution || {};
+      const ps = a.per_system || {};
+      const psText = Object.entries(ps).map(([sid, s]) =>
+        dictConnName(sid) + ':' + (s.status === 'ok' ? (s.row_count != null ? s.row_count : 'ok') : s.status)).join(', ');
+      return '<tr class="border-b border-slate-700/40 align-top">' +
+        '<td class="p-1.5 whitespace-nowrap text-slate-400">' + esc((a.created_at || '').replace('T', ' ').slice(0, 19)) + '</td>' +
+        '<td class="p-1.5">' + esc(a.input_term || '') + '</td>' +
+        '<td class="p-1.5 font-mono">' + esc(a.value || '') + '</td>' +
+        '<td class="p-1.5">' + (r.canonical ? esc(r.canonical) + ' <span class="text-slate-500">(' + esc(r.match || '-') + (r.confidence != null ? ', ' + r.confidence.toFixed(2) : '') + ')</span>' : '-') + '</td>' +
+        '<td class="p-1.5 ' + (a.status === 'ok' ? 'text-emerald-400' : 'text-amber-300') + '">' + esc(a.status) + '</td>' +
+        '<td class="p-1.5 text-slate-400">' + esc(psText) + '</td>' +
+        '<td class="p-1.5 text-right">' + (a.cost_ms != null ? a.cost_ms : '-') + '</td>' +
+        '<td class="p-1.5">' + esc(a.actor || '') + '</td></tr>';
+    }).join('');
+  } catch (e) {
+    tb.innerHTML = '<tr><td colspan="8" class="p-3 text-center text-rose-400">加载失败: ' + esc(e.message) + '</td></tr>';
+  }
+}
 
 /* ================= 使用教程（frontend/tutorial/） =================
    数据结构（版本化规则参考 knowledgeOS）：

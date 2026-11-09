@@ -56,6 +56,7 @@ tags: [源文档, V2, 测试用例]
 | VS2-00 验收（mock 五能力＋4 类数据集完整性，A0–A6/B1–B4 共 50 断言） | `scripts/verify_vs2_00_mock.py` | ✅ 通过 PASS=50/FAIL=0（2026-11-09） |
 | VS2-00 mock 运行入口（crm:18101 / plm:18102 / reservoir:18103） | `python -m backend.mocks.run_all [--base-port 18101]` | ✅ 可用（A0–A6 覆盖） |
 | VS2-00 数据集生成（2297 实例/脏批次 200 行/对齐集 1200·1380/基准图 54801 三元组） | `scripts/generate_v2_datasets.py`（seed=42，产出 `data/datasets/v2/`） | ✅ 通过（B1–B4，2026-11-09） |
+| M1-A 验收（TC-01-01~09：词条 CRUD/导入/解析链/联邦查询/语义近似/成本护栏/未覆盖显式/脏数据隔离/审计＋TCE-01-01~06 关键链路；REST 冒烟＋MCP SSE term_lookup 5 工具真实客户端段） | `scripts/verify_m1a_dictionary.py`（`--no-mcp` 可跳过 MCP 段） | ✅ 通过 PASS=75/FAIL=0（2026-11-09） |
 
 ## See Also
 - [[source-V2-测试大纲]]、[[source-V2-功能需求描述]]、[[V2开发里程碑]]
