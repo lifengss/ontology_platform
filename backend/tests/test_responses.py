@@ -16,5 +16,5 @@ def test_parse_pagination_clamps():
     assert parse_pagination(None, None) == (1, 20)
     # 越界修正
     assert parse_pagination(0, 0) == (1, 20)
-    # 上限封顶
-    assert parse_pagination(2, 9999) == (2, 100)
+    # 上限封顶（MAX_PAGE_SIZE=200，与路由 le=200、前端 pageSize=200 对齐）
+    assert parse_pagination(2, 9999) == (2, 200)

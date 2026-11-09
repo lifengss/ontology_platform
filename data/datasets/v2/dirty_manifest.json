@@ -1,0 +1,67 @@
+{
+  "rows": 200,
+  "dirt_row_numbers": {
+    "missing_key": [
+      10,
+      30,
+      50,
+      70,
+      90,
+      110,
+      130,
+      150,
+      170,
+      190
+    ],
+    "duplicate_key": [
+      181,
+      182,
+      183,
+      184,
+      185,
+      186,
+      187,
+      188
+    ],
+    "enum_violation": [
+      161,
+      162,
+      163,
+      164,
+      165,
+      166,
+      167,
+      168,
+      169,
+      170
+    ],
+    "out_of_range": [
+      141,
+      142,
+      143,
+      144,
+      145,
+      146,
+      147,
+      148,
+      149,
+      150
+    ],
+    "dangling_relation": [
+      111,
+      112,
+      113,
+      114,
+      115
+    ]
+  },
+  "dirt_counts": {
+    "missing_key": 10,
+    "duplicate_key": 8,
+    "enum_violation": 10,
+    "out_of_range": 10,
+    "dangling_relation": 5
+  },
+  "clean_rows": 157,
+  "parent_ref_rule": "parent_code 指向同对象 item_code；悬空=指向不存在编码"
+}

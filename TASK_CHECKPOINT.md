@@ -396,3 +396,52 @@
 | §6.4 stdio transport | ⚠️ 部分（http 已满足验收「stdio 或 http」，stdio 占位 501） | `_stdio_invoke` |
 | §6.5 外部连接 超时/重试/401 阻断 | ✅ 已实现 | mcp_client `_with_retry`/`_invoke` |
 | §6.5 schema 漂移停自动入库 | ⚠️ 未实现（P1，可延后，docstring 仅声明） | — |
+
+---
+
+## 20. 2026-11-06：V2 里程碑基线定稿（规划完成，开发未启动）
+
+### 20.1 本次交互交付
+- `docs/V2-开发里程碑.md`：V2 垂直切片里程碑计划（VS2-00＋M1–M4，合计 ≈129–205 人日）；含开发范式（与 MVP VS0–VS10 一致的按需求垂直验证）、切片明细（垂直链路/验收测试点/依赖/人日）、INV-1~6 验证排期、前置冻结项、偏差决策 D1–D5、风险、21 需求↔切片↔测试点映射表。
+- 项目 wiki 并入：`proj_wiki/wiki-knowledge/raw/` 新增 3 份不可变源（V2-功能需求描述/V2-测试大纲/V2-测试用例）；wiki 新建 4 页（`source-V2-功能需求描述`、`source-V2-测试大纲`、`source-V2-测试用例`（含"测试脚本链接登记"区）、`V2开发里程碑`）；index/log/范围与版本规划 同步更新。
+- **用户已确认偏差决策**：D1 身份联邦前移 M2-B（确认）、D2 V2-04 源连接渠道随 M4-A（同意）、D3 V2-02 存量迁移建议稿（同意，M4 启动前单独评审）、D4 V2-10 旁路日志排 M4（同意）；D5（V2-21 扩展维度随 M4-A）未提异议，按 D2 同逻辑记录为同意。
+- 里程碑计划状态：**评审通过，基线已定**（docs 与 wiki 页均已更新）。
+- 用户新约定（跨会话生效）：开发过程中**每完成一次交互**都在本文件追加 checkpoint（当前进展/已完成/未完成/下一步）；未获明确指示不开始开发。
+
+### 20.2 当前进展
+- V2 规划四件套齐备：需求基线（21 需求＋6 不变式）✅、测试大纲 ✅、测试用例（226 条＝TC 162＋TCE 64）✅、开发里程碑计划 ✅ 基线定稿。
+- 回归基线：MVP v1.0.2，L5 回归 34 项全绿（2026-10-23）。
+- **V2 开发尚未启动**（用户明确"完成本次交互即可，不要开始开发"）。
+
+### 20.3 未完成 / 下一步（按启动顺序）
+1. **VS2-00 测试基建**（首个切片，4–6 人日）：3 个可控 mock MCP Server（CRM/PLM/水库；五能力：时延注入/schema 热变/权限切换/断流/通道切换）＋数据集（2297 实例、脏数据批次、双本体"供应商"对齐集、基准规模推理/校验集）。
+2. 前置冻结项（各自对应切片启动前完成）：2297 Excel 参照口径与容差（M1-B 前）；golden dataset＋四类指标阈值（M3-F 测试前）；性能基线目标值（各基准用例前）。
+3. M4 启动前：D3 存量迁移方案单独评审。
+4. 终验（M4-I）：TCE2E-08/09 外部 AI 平台接入"待人工测试"项由负责人执行并登记。
+5. 每切片开发测试脚本后：在 wiki `source-V2-测试用例` 页"测试脚本链接登记"区登记 用例编号→脚本链接＋执行结果。
+
+---
+
+## 21. 2026-11-09：VS2-00 测试基建交付（mock 五能力＋4 类数据集，验收 50/50；L5 回归 93/93 全绿）
+
+### 21.1 本次交互交付
+- **3 个可控 mock 外部 MCP Server**（`backend/mocks/v2_external.py`＋`__init__.py` 导出＋`run_all.py`，crm:18101/plm:18102/reservoir:18103）：五能力全实现——①时延注入 ②schema 热变（version 单调递增）③权限切换（tok-full/tok-even/tok-odd/tok-empty，未知 401）④断流与故障（outage 断连、fail_rate→503）⑤CDC 通道切换（none|binlog|mq|cursor，不支持 409 CDC_NOT_SUPPORTED）；管理面 `X-Mock-Admin: mock-admin-2026`；调用形态对齐平台 `mcp_client`（`POST {"tool","params"}→{"records":[...]}`）；CDC 事件日志单调 LSN、三通道同源可重放、游标幂等。三系统种子 seed=42：600 PN 键（400 三系统共有/100 恰好两系统/50 单系统）＋50 键跨系统值冲突，字段名各异（PN/PN码/PN_Num）。
+- **4 类数据集**（`scripts/generate_v2_datasets.py`，seed=42 确定性 → `data/datasets/v2/`）：①2297 维保实例（17 sheet Excel＋本体 TTL，运行期 JSONL 提取，中文完好）②脏数据批 200 行（缺键 10/重复 8/越枚举 10/越界 10/悬空 5＋SHACL＋manifest）③双本体"供应商"对齐集（A 1200/B 1380/键重叠 1000；重叠区：共同来源 150/值冲突 120/语义相似 40/干净 690；键显式三段分配）④基准规模图（2000 类层级/6000 属性/8000 实例/100 SHACL，实测 54801 三元组）。README 定稿口径：六成本公式（P9 权威）、L1（VERIFIED）87 项容差 0、L2 MOCK 8 行不参与。
+- **验收脚本** `scripts/verify_vs2_00_mock.py`：A0–A6＋B1–B4 共 50 断言，**PASS=50/FAIL=0，EXIT=0**。
+- **L5 回归排查与修复**（真实 L5＝`backend/` 下 `python -m pytest tests/ -q`；此前"L5 exit 2"真相是 `scripts/l5_regression_test.py` 不存在且 `2>$null` 吞了 stderr）：
+  - 修复 2 个历史遗留陈旧测试（2026-10-29 快照已记载"待用户定夺"）：`test_responses.py::test_parse_pagination_clamps`（分页上限 100→200，对齐 `core/responses.py` MAX_PAGE_SIZE=200 的有意变更）；`test_vs10_e2e.py::test_02`（补 P0-2 token 鉴权：`POST /api/mcp/server/token` 取 token＋`sse_client` 带 Bearer 头）。
+  - 修复真实生产 bug：`mcp_server/__init__.py::_evict` 在同步路由（线程池、无运行中事件循环）下 `asyncio.create_task(ep.stop())` → `RuntimeError: no running event loop`＋协程不 await（unpublish 带内存端点必 500）；改上下文感知——同步上下文直接 `task.cancel()`（线程安全）。
+  - 最终 **93 passed / 0 failed**（vs10 E2E 5/5，无 unawaited 协程警告）。
+- **wiki 登记**：项目 wiki `source-V2-测试用例.md` 测试脚本链接登记区 3 条（验收脚本/run_all/数据集生成器＋50/50 结果）、`log.md` 条目、`V2开发里程碑.md` VS2-00 状态与前置冻结项更新；用户级 wiki raw 快照 `2026-11-09-VS2-00测试基建交付与L5回归.md`＋`进展与测试.md`＋`log.md` 同步。
+- 清理：`tmp_vs200_scan.py` 已删除。
+
+### 21.2 当前进展
+- VS2-00 ✅ 完成（退出标准"mock 五能力可用"满足；V2 里程碑前置冻结项"mock 五能力与注入点"关闭、"2297 Excel 参照口径与容差"定稿于 `data/datasets/v2/README.md`）。
+- L5 回归基线刷新：backend/tests 93 项全绿（2026-11-09）。
+- 未提交 git（本轮改动：`backend/mocks/`、`scripts/generate_v2_datasets.py`、`scripts/verify_vs2_00_mock.py`、`data/datasets/v2/`、2 个测试文件、`mcp_server/__init__.py`、wiki/checkpoint 文档）。
+
+### 21.3 未完成 / 下一步
+1. **M1-A（V2-01 字典与联邦查询，8–12 人日）**——下一切片：字典 UI→term_lookup→多系统并行/超时/来源标记→语义归一→成本护栏→field_map 收敛；验收 TP-01-01~09/EP-01-01~06；依赖 VS2-00（已满足）。**启动需用户明确指示**。
+2. 本轮改动 git 提交（待用户指示或里程碑收口时统一提交）。
+3. 前置冻结项（后续）：golden dataset＋四类指标阈值（M3-F 前）；性能基线目标值（各基准用例前）；M4 前 D3 存量迁移方案单独评审。
+4. 每切片脚本继续在 wiki `source-V2-测试用例` 登记区登记；每次交互结束追加本文件 checkpoint。

@@ -1,0 +1,47 @@
+@prefix ont: <http://ontology.local/dirty/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ont:obj_test_item a owl:Class ;
+    rdfs:label "测试物料" ;
+    rdfs:comment "V2-21 数据健康度脏数据批测试对象" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:attr_item_code a owl:DatatypeProperty ;
+    rdfs:label "物料编码" ;
+    rdfs:domain ont:obj_test_item ;
+    rdfs:range xsd:string .
+
+ont:attr_item_name a owl:DatatypeProperty ;
+    rdfs:label "物料名称" ;
+    rdfs:domain ont:obj_test_item ;
+    rdfs:range xsd:string .
+
+ont:attr_category a owl:DatatypeProperty ;
+    rdfs:label "分类" ;
+    rdfs:domain ont:obj_test_item ;
+    rdfs:range xsd:string .
+
+ont:attr_quantity a owl:DatatypeProperty ;
+    rdfs:label "数量" ;
+    rdfs:domain ont:obj_test_item ;
+    rdfs:range xsd:integer .
+
+ont:attr_unit_price a owl:DatatypeProperty ;
+    rdfs:label "单价" ;
+    rdfs:domain ont:obj_test_item ;
+    rdfs:range xsd:float .
+
+ont:attr_parent_code a owl:DatatypeProperty ;
+    rdfs:label "父项编码" ;
+    rdfs:domain ont:obj_test_item ;
+    rdfs:range xsd:string .
+
+ont:shape_test_item a sh:NodeShape ;
+    sh:targetClass ont:obj_test_item ;
+    sh:property [ sh:path ont:attr_item_code ; sh:minCount 1 ; sh:pattern "^ITM-\\d{5}$" ] ;
+    sh:property [ sh:path ont:attr_category ; sh:in ( "A" "B" "C" ) ] ;
+    sh:property [ sh:path ont:attr_quantity ; sh:min 0 ; sh:max 1000000 ] ;
+    sh:property [ sh:path ont:attr_unit_price ; sh:min 0 ] .

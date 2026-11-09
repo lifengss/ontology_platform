@@ -1,0 +1,39 @@
+@prefix ont: <http://ontology.local/alignb/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ont:sales_supplier a owl:Class ;
+    rdfs:label "销售供应商" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:attr_sup_code a owl:DatatypeProperty ;
+    rdfs:label "供应商编码" ;
+    rdfs:domain ont:sales_supplier ;
+    rdfs:range xsd:string .
+
+ont:attr_sup_name a owl:DatatypeProperty ;
+    rdfs:label "供应商名称" ;
+    rdfs:domain ont:sales_supplier ;
+    rdfs:range xsd:string .
+
+ont:attr_reg_capital a owl:DatatypeProperty ;
+    rdfs:label "注册资本" ;
+    rdfs:domain ont:sales_supplier ;
+    rdfs:range xsd:float .
+
+ont:attr_city a owl:DatatypeProperty ;
+    rdfs:label "城市" ;
+    rdfs:domain ont:sales_supplier ;
+    rdfs:range xsd:string .
+
+ont:attr_source_ref a owl:DatatypeProperty ;
+    rdfs:label "来源系统" ;
+    rdfs:domain ont:sales_supplier ;
+    rdfs:range xsd:string .
+
+ont:attr_sales_region a owl:DatatypeProperty ;
+    rdfs:label "销售区域" ;
+    rdfs:domain ont:sales_supplier ;
+    rdfs:range xsd:string .
+

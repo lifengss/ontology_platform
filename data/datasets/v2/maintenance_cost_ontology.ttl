@@ -1,0 +1,1173 @@
+@prefix ont: <http://ontology.local/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ont:inst_obj_customer_09eaf2c243f045798657ed8f01bda5d5 a ont:obj_customer ;
+    rdfs:label "字节" ;
+    ont:attr_customer_name "字节" .
+
+ont:inst_obj_customer_2d38914c941f4d3ca874b3d91ccd41e3 a ont:obj_customer ;
+    rdfs:label "阿里" ;
+    ont:attr_customer_name "阿里" .
+
+ont:inst_obj_customer_71b88e3b3086426d8044207ee563e7fa a ont:obj_customer ;
+    rdfs:label "腾讯" ;
+    ont:attr_customer_name "腾讯" .
+
+ont:inst_obj_customer_c10a17a5f3ed41d4a2acc77462924b19 a ont:obj_customer ;
+    rdfs:label "百度" ;
+    ont:attr_customer_name "百度" .
+
+ont:inst_obj_customer_c4661c46a7ef4cf99632c643a047af4f a ont:obj_customer ;
+    rdfs:label "其他" ;
+    ont:attr_customer_name "其他" .
+
+ont:inst_obj_customer_e51def706c2f4c478675e83b09b753f9 a ont:obj_customer ;
+    rdfs:label "非BATZ" ;
+    ont:attr_customer_name "非BATZ" .
+
+ont:inst_obj_exchange_rate_2020063a21dc4d8f8da7256534f11dfe a ont:obj_exchange_rate ;
+    rdfs:label "日元" ;
+    ont:attr_currency_type "日元" ;
+    ont:attr_rate "0.068"^^xsd:float .
+
+ont:inst_obj_exchange_rate_4c10d9b24a804370aa11d724388d617f a ont:obj_exchange_rate ;
+    rdfs:label "印度卢比" ;
+    ont:attr_currency_type "印度卢比" ;
+    ont:attr_rate "0.1"^^xsd:float .
+
+ont:inst_obj_exchange_rate_5dc515bcbbe141489bcbd5a917a98d6a a ont:obj_exchange_rate ;
+    rdfs:label "欧元" ;
+    ont:attr_currency_type "欧元" ;
+    ont:attr_rate "7.8"^^xsd:float .
+
+ont:inst_obj_exchange_rate_5f1062b06ce1493c8106f6527e462b48 a ont:obj_exchange_rate ;
+    rdfs:label "美元" ;
+    ont:attr_currency_type "美元" ;
+    ont:attr_rate "7.0"^^xsd:float .
+
+ont:inst_obj_exchange_rate_94fcc3fe0b444b9aa6202b20040381f4 a ont:obj_exchange_rate ;
+    rdfs:label "韩元" ;
+    ont:attr_currency_type "韩元" ;
+    ont:attr_rate "0.005"^^xsd:float .
+
+ont:inst_obj_region_be981451221f4391b8e475672f7c7c84 a ont:obj_region ;
+    rdfs:label "国内" ;
+    ont:attr_region_name "国内" .
+
+ont:inst_obj_region_c3b9fced9a3c451fa34061887d36994f a ont:obj_region ;
+    rdfs:label "欧洲（德国）" ;
+    ont:attr_region_name "欧洲（德国）" .
+
+ont:inst_obj_sla_coefficient_baseline_36c6752ef28548b99f017a65ec0cb371 a ont:obj_sla_coefficient_baseline ;
+    rdfs:label "5*8*3BD" ;
+    ont:attr_coefficient "0.92"^^xsd:float ;
+    ont:attr_response_level "5*8*3BD" .
+
+ont:inst_obj_sla_coefficient_baseline_6fce291de29241faa5f6d71aa81bceea a ont:obj_sla_coefficient_baseline ;
+    rdfs:label "ARMA" ;
+    ont:attr_coefficient "1.0"^^xsd:float ;
+    ont:attr_response_level "ARMA" .
+
+ont:inst_obj_sla_coefficient_baseline_9cb9090e3e7546c79156d1d297332dd7 a ont:obj_sla_coefficient_baseline ;
+    rdfs:label "5*8*NBD" ;
+    ont:attr_coefficient "1.0"^^xsd:float ;
+    ont:attr_response_level "5*8*NBD" .
+
+ont:inst_obj_sla_coefficient_baseline_9e1906ec0c1149e3981cbfffe64b7bcd a ont:obj_sla_coefficient_baseline ;
+    rdfs:label "RMA" ;
+    ont:attr_coefficient "1.0"^^xsd:float ;
+    ont:attr_response_level "RMA" .
+
+ont:inst_obj_sla_coefficient_baseline_eaf79fd4162a498580a9c19e7c2d3e8c a ont:obj_sla_coefficient_baseline ;
+    rdfs:label "7*24*4H" ;
+    ont:attr_coefficient "1.15"^^xsd:float ;
+    ont:attr_response_level "7*24*4H" .
+
+ont:inst_obj_sla_coefficient_baseline_f11a890ffb2d4ec28d4b46b9decbcccd a ont:obj_sla_coefficient_baseline ;
+    rdfs:label "5*8*4BD" ;
+    ont:attr_coefficient "0.85"^^xsd:float ;
+    ont:attr_response_level "5*8*4BD" .
+
+ont:inst_obj_sla_coefficient_baseline_f272eada8b1d40ae9208b4c75bb6621a a ont:obj_sla_coefficient_baseline ;
+    rdfs:label "7*24*ND" ;
+    ont:attr_coefficient "1.1"^^xsd:float ;
+    ont:attr_response_level "7*24*ND" .
+
+ont:obj_aftersales_labor_baselineShape a sh:NodeShape ;
+    sh:property ont:obj_aftersales_labor_baseline_attr_baseline_codePS,
+        ont:obj_aftersales_labor_baseline_attr_baseline_valuePS,
+        ont:obj_aftersales_labor_baseline_attr_customerPS,
+        ont:obj_aftersales_labor_baseline_attr_domesticPS,
+        ont:obj_aftersales_labor_baseline_attr_product_categoryPS,
+        ont:obj_aftersales_labor_baseline_attr_regionPS,
+        ont:obj_aftersales_labor_baseline_attr_response_levelPS,
+        ont:obj_aftersales_labor_baseline_attr_u_bandPS ;
+    sh:targetClass ont:obj_aftersales_labor_baseline ;
+    sh:uniqueKey ( ont:attr_baseline_code ) .
+
+ont:obj_customerShape a sh:NodeShape ;
+    sh:property ont:obj_customer_attr_customer_namePS ;
+    sh:targetClass ont:obj_customer ;
+    sh:uniqueKey ( ont:attr_customer_name ) .
+
+ont:obj_exchange_rateShape a sh:NodeShape ;
+    sh:property ont:obj_exchange_rate_attr_currency_typePS,
+        ont:obj_exchange_rate_attr_ratePS ;
+    sh:targetClass ont:obj_exchange_rate ;
+    sh:uniqueKey ( ont:attr_currency_type ) .
+
+ont:obj_impl_labor_baselineShape a sh:NodeShape ;
+    sh:property ont:obj_impl_labor_baseline_attr_baseline_codePS,
+        ont:obj_impl_labor_baseline_attr_baseline_valuePS,
+        ont:obj_impl_labor_baseline_attr_customerPS,
+        ont:obj_impl_labor_baseline_attr_domesticPS,
+        ont:obj_impl_labor_baseline_attr_impl_typePS,
+        ont:obj_impl_labor_baseline_attr_modelPS,
+        ont:obj_impl_labor_baseline_attr_regionPS,
+        ont:obj_impl_labor_baseline_attr_u_bandPS ;
+    sh:targetClass ont:obj_impl_labor_baseline ;
+    sh:uniqueKey ( ont:attr_baseline_code ) .
+
+ont:obj_machine_modelShape a sh:NodeShape ;
+    sh:property ont:obj_machine_model_attr_external_modelPS,
+        ont:obj_machine_model_attr_model_codePS,
+        ont:obj_machine_model_attr_u_heightPS ;
+    sh:targetClass ont:obj_machine_model ;
+    sh:uniqueKey ( ont:attr_model_code ) .
+
+ont:obj_maintenance_productShape a sh:NodeShape ;
+    sh:property ont:obj_maintenance_product_attr_bundlePS,
+        ont:obj_maintenance_product_attr_cost_ratioPS,
+        ont:obj_maintenance_product_attr_labor_costPS,
+        ont:obj_maintenance_product_attr_machine_costPS,
+        ont:obj_maintenance_product_attr_mgmt_costPS,
+        ont:obj_maintenance_product_attr_product_codePS,
+        ont:obj_maintenance_product_attr_service_termPS,
+        ont:obj_maintenance_product_attr_spare_aux_costPS,
+        ont:obj_maintenance_product_attr_spare_direct_costPS,
+        ont:obj_maintenance_product_attr_total_costPS,
+        ont:obj_maintenance_product_attr_upsellPS,
+        ont:obj_maintenance_product_rel_product_materialPS,
+        ont:obj_maintenance_product_rel_product_regionPS ;
+    sh:targetClass ont:obj_maintenance_product ;
+    sh:uniqueKey ( ont:attr_product_code ) .
+
+ont:obj_materialShape a sh:NodeShape ;
+    sh:property ont:obj_material_attr_factoryPS,
+        ont:obj_material_attr_material_codePS,
+        ont:obj_material_attr_material_descPS,
+        ont:obj_material_attr_pnPS,
+        ont:obj_material_attr_unit_pricePS ;
+    sh:targetClass ont:obj_material ;
+    sh:uniqueKey ( ont:attr_pn ) .
+
+ont:obj_mgmt_cost_baselineShape a sh:NodeShape ;
+    sh:property ont:obj_mgmt_cost_baseline_attr_baseline_codePS,
+        ont:obj_mgmt_cost_baseline_attr_baseline_valuePS,
+        ont:obj_mgmt_cost_baseline_attr_business_stagePS,
+        ont:obj_mgmt_cost_baseline_attr_customerPS,
+        ont:obj_mgmt_cost_baseline_attr_domesticPS ;
+    sh:targetClass ont:obj_mgmt_cost_baseline ;
+    sh:uniqueKey ( ont:attr_baseline_code ) .
+
+ont:obj_onsite_rate_baselineShape a sh:NodeShape ;
+    sh:property ont:obj_onsite_rate_baseline_attr_baseline_codePS,
+        ont:obj_onsite_rate_baseline_attr_customer_segmentPS,
+        ont:obj_onsite_rate_baseline_attr_domesticPS,
+        ont:obj_onsite_rate_baseline_attr_onsite_ratePS,
+        ont:obj_onsite_rate_baseline_attr_product_linePS ;
+    sh:targetClass ont:obj_onsite_rate_baseline ;
+    sh:uniqueKey ( ont:attr_baseline_code ) .
+
+ont:obj_part_failure_baselineShape a sh:NodeShape ;
+    sh:property ont:obj_part_failure_baseline_attr_baseline_codePS,
+        ont:obj_part_failure_baseline_attr_customer_segmentPS,
+        ont:obj_part_failure_baseline_attr_failure_ratePS,
+        ont:obj_part_failure_baseline_attr_part_typePS,
+        ont:obj_part_failure_baseline_attr_product_typePS ;
+    sh:targetClass ont:obj_part_failure_baseline ;
+    sh:uniqueKey ( ont:attr_baseline_code ) .
+
+ont:obj_person_day_baselineShape a sh:NodeShape ;
+    sh:property ont:obj_person_day_baseline_attr_baseline_codePS,
+        ont:obj_person_day_baseline_attr_countryPS,
+        ont:obj_person_day_baseline_attr_person_day_costPS,
+        ont:obj_person_day_baseline_attr_product_line_groupPS,
+        ont:obj_person_day_baseline_attr_provider_typePS ;
+    sh:targetClass ont:obj_person_day_baseline ;
+    sh:uniqueKey ( ont:attr_baseline_code ) .
+
+ont:obj_product_lineShape a sh:NodeShape ;
+    sh:property ont:obj_product_line_attr_line_namePS ;
+    sh:targetClass ont:obj_product_line ;
+    sh:uniqueKey ( ont:attr_line_name ) .
+
+ont:obj_regionShape a sh:NodeShape ;
+    sh:property ont:obj_region_attr_region_namePS ;
+    sh:targetClass ont:obj_region ;
+    sh:uniqueKey ( ont:attr_region_name ) .
+
+ont:obj_resident_cost_baselineShape a sh:NodeShape ;
+    sh:property ont:obj_resident_cost_baseline_attr_baseline_codePS,
+        ont:obj_resident_cost_baseline_attr_engineer_levelPS,
+        ont:obj_resident_cost_baseline_attr_monthly_costPS,
+        ont:obj_resident_cost_baseline_attr_product_linePS,
+        ont:obj_resident_cost_baseline_attr_service_regionPS ;
+    sh:targetClass ont:obj_resident_cost_baseline ;
+    sh:uniqueKey ( ont:attr_baseline_code ) .
+
+ont:obj_sla_coefficient_baselineShape a sh:NodeShape ;
+    sh:property ont:obj_sla_coefficient_baseline_attr_coefficientPS,
+        ont:obj_sla_coefficient_baseline_attr_response_levelPS ;
+    sh:targetClass ont:obj_sla_coefficient_baseline ;
+    sh:uniqueKey ( ont:attr_response_level ) .
+
+ont:obj_spare_aux_baselineShape a sh:NodeShape ;
+    sh:property ont:obj_spare_aux_baseline_attr_area_categoryPS,
+        ont:obj_spare_aux_baseline_attr_arma_feePS,
+        ont:obj_spare_aux_baseline_attr_baseline_codePS,
+        ont:obj_spare_aux_baseline_attr_countryPS,
+        ont:obj_spare_aux_baseline_attr_delivery_4hPS,
+        ont:obj_spare_aux_baseline_attr_delivery_ndPS,
+        ont:obj_spare_aux_baseline_attr_forward_logisticsPS,
+        ont:obj_spare_aux_baseline_attr_machine_4hPS,
+        ont:obj_spare_aux_baseline_attr_machine_armaPS,
+        ont:obj_spare_aux_baseline_attr_machine_ndPS,
+        ont:obj_spare_aux_baseline_attr_machine_rmaPS,
+        ont:obj_spare_aux_baseline_attr_reverse_logisticsPS,
+        ont:obj_spare_aux_baseline_attr_tax_ratePS,
+        ont:obj_spare_aux_baseline_attr_third_partyPS,
+        ont:obj_spare_aux_baseline_attr_unit_4hPS,
+        ont:obj_spare_aux_baseline_attr_unit_ndPS,
+        ont:obj_spare_aux_baseline_attr_warehousePS ;
+    sh:targetClass ont:obj_spare_aux_baseline ;
+    sh:uniqueKey ( ont:attr_baseline_code ) .
+
+ont:obj_travel_cost_baselineShape a sh:NodeShape ;
+    sh:property ont:obj_travel_cost_baseline_attr_airfarePS,
+        ont:obj_travel_cost_baseline_attr_countryPS,
+        ont:obj_travel_cost_baseline_attr_hotelPS,
+        ont:obj_travel_cost_baseline_attr_mealPS,
+        ont:obj_travel_cost_baseline_attr_miscPS ;
+    sh:targetClass ont:obj_travel_cost_baseline ;
+    sh:uniqueKey ( ont:attr_country ) .
+
+ont:attr_airfare a owl:DatatypeProperty ;
+    rdfs:label "机票（元/次）" ;
+    rdfs:domain ont:obj_travel_cost_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_area_category a owl:DatatypeProperty ;
+    rdfs:label "地区分类" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_arma_fee a owl:DatatypeProperty ;
+    rdfs:label "ARMA费用" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_bundle a owl:DatatypeProperty ;
+    rdfs:label "Bundle" ;
+    rdfs:domain ont:obj_maintenance_product ;
+    rdfs:range xsd:float .
+
+ont:attr_business_stage a owl:DatatypeProperty ;
+    rdfs:label "业务环节" ;
+    rdfs:domain ont:obj_mgmt_cost_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_coefficient a owl:DatatypeProperty ;
+    rdfs:label "服务水平系数" ;
+    rdfs:domain ont:obj_sla_coefficient_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_cost_ratio a owl:DatatypeProperty ;
+    rdfs:label "维保占比" ;
+    rdfs:domain ont:obj_maintenance_product ;
+    rdfs:range xsd:float .
+
+ont:attr_delivery_4h a owl:DatatypeProperty ;
+    rdfs:label "配送（4H）" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_delivery_nd a owl:DatatypeProperty ;
+    rdfs:label "配送（ND）" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_engineer_level a owl:DatatypeProperty ;
+    rdfs:label "工程师等级" ;
+    rdfs:domain ont:obj_resident_cost_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_external_model a owl:DatatypeProperty ;
+    rdfs:label "对外型号" ;
+    rdfs:domain ont:obj_machine_model ;
+    rdfs:range xsd:string .
+
+ont:attr_factory a owl:DatatypeProperty ;
+    rdfs:label "工厂" ;
+    rdfs:domain ont:obj_material ;
+    rdfs:range xsd:string .
+
+ont:attr_failure_rate a owl:DatatypeProperty ;
+    rdfs:label "故障率" ;
+    rdfs:domain ont:obj_part_failure_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_forward_logistics a owl:DatatypeProperty ;
+    rdfs:label "正向物流" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_hotel a owl:DatatypeProperty ;
+    rdfs:label "住宿（元/天）" ;
+    rdfs:domain ont:obj_travel_cost_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_impl_type a owl:DatatypeProperty ;
+    rdfs:label "实施类型" ;
+    rdfs:domain ont:obj_impl_labor_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_labor_cost a owl:DatatypeProperty ;
+    rdfs:label "人工成本" ;
+    rdfs:domain ont:obj_maintenance_product ;
+    rdfs:range xsd:float .
+
+ont:attr_machine_4h a owl:DatatypeProperty ;
+    rdfs:label "单台（4H）" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_machine_arma a owl:DatatypeProperty ;
+    rdfs:label "单台（ARMA）" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_machine_cost a owl:DatatypeProperty ;
+    rdfs:label "整机成本" ;
+    rdfs:domain ont:obj_maintenance_product ;
+    rdfs:range xsd:float .
+
+ont:attr_machine_nd a owl:DatatypeProperty ;
+    rdfs:label "单台（ND）" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_machine_rma a owl:DatatypeProperty ;
+    rdfs:label "单台（RMA）" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_material_code a owl:DatatypeProperty ;
+    rdfs:label "物料编码" ;
+    rdfs:domain ont:obj_material ;
+    rdfs:range xsd:string .
+
+ont:attr_material_desc a owl:DatatypeProperty ;
+    rdfs:label "物料描述" ;
+    rdfs:domain ont:obj_material ;
+    rdfs:range xsd:string .
+
+ont:attr_meal a owl:DatatypeProperty ;
+    rdfs:label "伙食费（元/天）" ;
+    rdfs:domain ont:obj_travel_cost_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_mgmt_cost a owl:DatatypeProperty ;
+    rdfs:label "管理成本" ;
+    rdfs:domain ont:obj_maintenance_product ;
+    rdfs:range xsd:float .
+
+ont:attr_misc a owl:DatatypeProperty ;
+    rdfs:label "公杂费（元/天）" ;
+    rdfs:domain ont:obj_travel_cost_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_model a owl:DatatypeProperty ;
+    rdfs:label "机型" ;
+    rdfs:domain ont:obj_impl_labor_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_monthly_cost a owl:DatatypeProperty ;
+    rdfs:label "月成本（人月）" ;
+    rdfs:domain ont:obj_resident_cost_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_onsite_rate a owl:DatatypeProperty ;
+    rdfs:label "现场服务率" ;
+    rdfs:domain ont:obj_onsite_rate_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_part_type a owl:DatatypeProperty ;
+    rdfs:label "部件类型" ;
+    rdfs:domain ont:obj_part_failure_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_person_day_cost a owl:DatatypeProperty ;
+    rdfs:label "人天成本" ;
+    rdfs:domain ont:obj_person_day_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_product_category a owl:DatatypeProperty ;
+    rdfs:label "产品类别" ;
+    rdfs:domain ont:obj_aftersales_labor_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_product_line_group a owl:DatatypeProperty ;
+    rdfs:label "产品线" ;
+    rdfs:domain ont:obj_person_day_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_product_type a owl:DatatypeProperty ;
+    rdfs:label "适用产品" ;
+    rdfs:domain ont:obj_part_failure_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_provider_type a owl:DatatypeProperty ;
+    rdfs:label "实施主体" ;
+    rdfs:domain ont:obj_person_day_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_rate a owl:DatatypeProperty ;
+    rdfs:label "汇率" ;
+    rdfs:domain ont:obj_exchange_rate ;
+    rdfs:range xsd:float .
+
+ont:attr_reverse_logistics a owl:DatatypeProperty ;
+    rdfs:label "逆向物流" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_service_region a owl:DatatypeProperty ;
+    rdfs:label "服务商区域" ;
+    rdfs:domain ont:obj_resident_cost_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_service_term a owl:DatatypeProperty ;
+    rdfs:label "服务类型" ;
+    rdfs:domain ont:obj_maintenance_product ;
+    rdfs:range xsd:string .
+
+ont:attr_spare_aux_cost a owl:DatatypeProperty ;
+    rdfs:label "备件辅助成本" ;
+    rdfs:domain ont:obj_maintenance_product ;
+    rdfs:range xsd:float .
+
+ont:attr_spare_direct_cost a owl:DatatypeProperty ;
+    rdfs:label "备件直接成本" ;
+    rdfs:domain ont:obj_maintenance_product ;
+    rdfs:range xsd:float .
+
+ont:attr_tax_rate a owl:DatatypeProperty ;
+    rdfs:label "税率" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_third_party a owl:DatatypeProperty ;
+    rdfs:label "第三方" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_total_cost a owl:DatatypeProperty ;
+    rdfs:label "成本合计" ;
+    rdfs:domain ont:obj_maintenance_product ;
+    rdfs:range xsd:float .
+
+ont:attr_u_height a owl:DatatypeProperty ;
+    rdfs:label "U数" ;
+    rdfs:domain ont:obj_machine_model ;
+    rdfs:range xsd:string .
+
+ont:attr_unit_4h a owl:DatatypeProperty ;
+    rdfs:label "单件（4H）" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_unit_nd a owl:DatatypeProperty ;
+    rdfs:label "单件（ND）" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_unit_price a owl:DatatypeProperty ;
+    rdfs:label "单价" ;
+    rdfs:domain ont:obj_material ;
+    rdfs:range xsd:float .
+
+ont:attr_upsell a owl:DatatypeProperty ;
+    rdfs:label "Upsell" ;
+    rdfs:domain ont:obj_maintenance_product ;
+    rdfs:range xsd:float .
+
+ont:attr_warehouse a owl:DatatypeProperty ;
+    rdfs:label "仓储管理" ;
+    rdfs:domain ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:float .
+
+ont:obj_aftersales_labor_baseline_attr_baseline_codePS sh:datatype xsd:string ;
+    sh:maxLength 64 ;
+    sh:minCount 1 ;
+    sh:minLength 4 ;
+    sh:path ont:attr_baseline_code ;
+    sh:pattern "^[A-Za-z0-9_\\-]+$" .
+
+ont:obj_aftersales_labor_baseline_attr_baseline_valuePS sh:datatype xsd:float ;
+    sh:minCount 1 ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_baseline_value .
+
+ont:obj_aftersales_labor_baseline_attr_customerPS sh:datatype xsd:string ;
+    sh:in ( "阿里" "百度" "腾讯" "字节" "其他" ) ;
+    sh:path ont:attr_customer .
+
+ont:obj_aftersales_labor_baseline_attr_domesticPS sh:datatype xsd:string ;
+    sh:in ( "国内" "海外" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_domestic .
+
+ont:obj_aftersales_labor_baseline_attr_product_categoryPS sh:datatype xsd:string ;
+    sh:in ( "通用服务器" "AI服务器-PCIE卡" "AI服务器-模组" "白盒交换机" "STR" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_product_category .
+
+ont:obj_aftersales_labor_baseline_attr_regionPS sh:datatype xsd:string ;
+    sh:maxLength 64 ;
+    sh:path ont:attr_region .
+
+ont:obj_aftersales_labor_baseline_attr_response_levelPS sh:datatype xsd:string ;
+    sh:in ( "NBD" "ND" "4H" "2H" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_response_level .
+
+ont:obj_aftersales_labor_baseline_attr_u_bandPS sh:datatype xsd:string ;
+    sh:in ( "1U/2U" "3U/4U" "5U及以上" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_u_band .
+
+ont:obj_customer_attr_customer_namePS sh:datatype xsd:string ;
+    sh:in ( "阿里" "百度" "腾讯" "字节" "其他" "非BATZ" ) ;
+    sh:maxLength 32 ;
+    sh:minCount 1 ;
+    sh:minLength 2 ;
+    sh:path ont:attr_customer_name .
+
+ont:obj_exchange_rate_attr_currency_typePS sh:datatype xsd:string ;
+    sh:in ( "美元" "欧元" "日元" "韩元" "印度卢比" ) ;
+    sh:maxLength 16 ;
+    sh:minCount 1 ;
+    sh:minLength 2 ;
+    sh:path ont:attr_currency_type .
+
+ont:obj_exchange_rate_attr_ratePS sh:datatype xsd:float ;
+    sh:minCount 1 ;
+    sh:minInclusive 1e-06 ;
+    sh:path ont:attr_rate .
+
+ont:obj_impl_labor_baseline_attr_baseline_codePS sh:datatype xsd:string ;
+    sh:maxLength 64 ;
+    sh:minCount 1 ;
+    sh:minLength 4 ;
+    sh:path ont:attr_baseline_code ;
+    sh:pattern "^[A-Za-z0-9_\\-]+$" .
+
+ont:obj_impl_labor_baseline_attr_baseline_valuePS sh:datatype xsd:float ;
+    sh:minCount 1 ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_baseline_value .
+
+ont:obj_impl_labor_baseline_attr_customerPS sh:datatype xsd:string ;
+    sh:in ( "阿里" "百度" "腾讯" "字节" "其他" ) ;
+    sh:path ont:attr_customer .
+
+ont:obj_impl_labor_baseline_attr_domesticPS sh:datatype xsd:string ;
+    sh:in ( "国内" "海外" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_domestic .
+
+ont:obj_impl_labor_baseline_attr_impl_typePS sh:datatype xsd:string ;
+    sh:in ( "基础硬件安装" "集成化交付" "改扩配" "系统安装" ) ;
+    sh:path ont:attr_impl_type .
+
+ont:obj_impl_labor_baseline_attr_modelPS sh:datatype xsd:string ;
+    sh:maxLength 32 ;
+    sh:path ont:attr_model .
+
+ont:obj_impl_labor_baseline_attr_regionPS sh:datatype xsd:string ;
+    sh:maxLength 64 ;
+    sh:path ont:attr_region .
+
+ont:obj_impl_labor_baseline_attr_u_bandPS sh:datatype xsd:string ;
+    sh:in ( "2U及以下" "2U高密度及3U4U5U" "4U高密度6U" "8U" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_u_band .
+
+ont:obj_machine_model_attr_external_modelPS sh:datatype xsd:string ;
+    sh:maxLength 32 ;
+    sh:path ont:attr_external_model .
+
+ont:obj_machine_model_attr_model_codePS sh:datatype xsd:string ;
+    sh:maxLength 32 ;
+    sh:minCount 1 ;
+    sh:minLength 4 ;
+    sh:path ont:attr_model_code ;
+    sh:pattern "^[A-Za-z0-9\\-]+$" .
+
+ont:obj_machine_model_attr_u_heightPS sh:datatype xsd:string ;
+    sh:in ( "1U" "2U" "4U" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_u_height .
+
+ont:obj_maintenance_product_attr_bundlePS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_bundle .
+
+ont:obj_maintenance_product_attr_cost_ratioPS sh:datatype xsd:float ;
+    sh:maxInclusive 1e+00 ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_cost_ratio .
+
+ont:obj_maintenance_product_attr_labor_costPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_labor_cost .
+
+ont:obj_maintenance_product_attr_machine_costPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_machine_cost .
+
+ont:obj_maintenance_product_attr_mgmt_costPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_mgmt_cost .
+
+ont:obj_maintenance_product_attr_product_codePS sh:datatype xsd:string ;
+    sh:maxLength 64 ;
+    sh:minCount 1 ;
+    sh:minLength 4 ;
+    sh:path ont:attr_product_code ;
+    sh:pattern "^[A-Za-z0-9_\\-]+$" .
+
+ont:obj_maintenance_product_attr_service_termPS sh:datatype xsd:string ;
+    sh:in ( "三年5×10×NBD" "四年5×10×NBD" "五年5×10×NBD" "三年7×24×4H" "四年7×24×4H" "五年7×24×4H" "三年7×24×2H" "四年7×24×2H" "五年7×24×2H" "三年5×9×NBD现场" "四年5×9×NBD现场" "五年5×9×NBD现场" "三年7×24×4H现场" "四年7×24×4H现场" "五年7×24×4H现场" "三年硬盘介质保留服务" "四年硬盘介质保留服务" "五年硬盘介质保留服务" "三年数据介质保留服务" "四年数据介质保留服务" "五年数据介质保留服务" "一年ARMA+二年RMA基础维保服务" "一年ARMA+三年RMA维保服务" "一年ARMA+四年RMA维保服务" "三年ARMA维保服务" "四年ARMA维保服务" "五年ARMA维保服务" ) ;
+    sh:maxLength 64 ;
+    sh:minCount 1 ;
+    sh:path ont:attr_service_term .
+
+ont:obj_maintenance_product_attr_spare_aux_costPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_spare_aux_cost .
+
+ont:obj_maintenance_product_attr_spare_direct_costPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_spare_direct_cost .
+
+ont:obj_maintenance_product_attr_total_costPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_total_cost .
+
+ont:obj_maintenance_product_attr_upsellPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_upsell .
+
+ont:obj_maintenance_product_rel_product_materialPS sh:or ( [ sh:class ont:obj_material ] [ sh:datatype xsd:string ] ) ;
+    sh:path ont:rel_product_material .
+
+ont:obj_maintenance_product_rel_product_regionPS sh:or ( [ sh:class ont:obj_region ] [ sh:datatype xsd:string ] ) ;
+    sh:path ont:rel_product_region .
+
+ont:obj_material_attr_factoryPS sh:datatype xsd:string ;
+    sh:in ( "1100" "1600" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_factory .
+
+ont:obj_material_attr_material_codePS sh:datatype xsd:string ;
+    sh:maxLength 64 ;
+    sh:minCount 1 ;
+    sh:minLength 4 ;
+    sh:path ont:attr_material_code ;
+    sh:pattern "^[A-Za-z0-9\\-]+$" .
+
+ont:obj_material_attr_material_descPS sh:datatype xsd:string ;
+    sh:maxLength 200 ;
+    sh:path ont:attr_material_desc .
+
+ont:obj_material_attr_pnPS sh:datatype xsd:string ;
+    sh:maxLength 32 ;
+    sh:minCount 1 ;
+    sh:minLength 8 ;
+    sh:path ont:attr_pn ;
+    sh:pattern "^[A-Za-z0-9]+$" .
+
+ont:obj_material_attr_unit_pricePS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_unit_price .
+
+ont:obj_mgmt_cost_baseline_attr_baseline_codePS sh:datatype xsd:string ;
+    sh:maxLength 64 ;
+    sh:minCount 1 ;
+    sh:minLength 4 ;
+    sh:path ont:attr_baseline_code ;
+    sh:pattern "^[A-Za-z0-9_\\-]+$" .
+
+ont:obj_mgmt_cost_baseline_attr_baseline_valuePS sh:datatype xsd:float ;
+    sh:minCount 1 ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_baseline_value .
+
+ont:obj_mgmt_cost_baseline_attr_business_stagePS sh:datatype xsd:string ;
+    sh:in ( "实施" "售后" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_business_stage .
+
+ont:obj_mgmt_cost_baseline_attr_customerPS sh:datatype xsd:string ;
+    sh:in ( "阿里" "百度" "腾讯" "字节" "其他" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_customer .
+
+ont:obj_mgmt_cost_baseline_attr_domesticPS sh:datatype xsd:string ;
+    sh:in ( "国内" "海外" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_domestic .
+
+ont:obj_onsite_rate_baseline_attr_baseline_codePS sh:datatype xsd:string ;
+    sh:maxLength 63 ;
+    sh:minCount 1 ;
+    sh:minLength 4 ;
+    sh:path ont:attr_baseline_code ;
+    sh:pattern "^[A-Za-z0-9_\\-]+$" .
+
+ont:obj_onsite_rate_baseline_attr_customer_segmentPS sh:datatype xsd:string ;
+    sh:in ( "阿里" "百度" "腾讯" "字节" "非BATZ" "主机柜+扩展柜" "光纤交换机" "模组类" "非模组类" "边缘服务器" "边缘盒子" "硬件" "软件" "硬+软" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_customer_segment .
+
+ont:obj_onsite_rate_baseline_attr_domesticPS sh:datatype xsd:string ;
+    sh:in ( "国内" "海外" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_domestic .
+
+ont:obj_onsite_rate_baseline_attr_onsite_ratePS sh:datatype xsd:float ;
+    sh:minCount 1 ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_onsite_rate .
+
+ont:obj_onsite_rate_baseline_attr_product_linePS sh:datatype xsd:string ;
+    sh:in ( "SV" "统一存储" "AI" "边缘计算" "交换机" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_product_line .
+
+ont:obj_part_failure_baseline_attr_baseline_codePS sh:datatype xsd:string ;
+    sh:maxLength 64 ;
+    sh:minCount 1 ;
+    sh:minLength 4 ;
+    sh:path ont:attr_baseline_code ;
+    sh:pattern "^[A-Za-z0-9_\\-]+$" .
+
+ont:obj_part_failure_baseline_attr_customer_segmentPS sh:datatype xsd:string ;
+    sh:in ( "全体" "阿里" "百度" "腾讯" "头条" "其他" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_customer_segment .
+
+ont:obj_part_failure_baseline_attr_failure_ratePS sh:datatype xsd:float ;
+    sh:maxInclusive 1e+00 ;
+    sh:minCount 1 ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_failure_rate .
+
+ont:obj_part_failure_baseline_attr_part_typePS sh:datatype xsd:string ;
+    sh:maxLength 32 ;
+    sh:minCount 1 ;
+    sh:path ont:attr_part_type .
+
+ont:obj_part_failure_baseline_attr_product_typePS sh:datatype xsd:string ;
+    sh:in ( "通用SV" "AI服务器" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_product_type .
+
+ont:obj_person_day_baseline_attr_baseline_codePS sh:datatype xsd:string ;
+    sh:maxLength 64 ;
+    sh:minCount 1 ;
+    sh:minLength 4 ;
+    sh:path ont:attr_baseline_code ;
+    sh:pattern "^[A-Za-z0-9_\\-]+$" .
+
+ont:obj_person_day_baseline_attr_countryPS sh:datatype xsd:string ;
+    sh:maxLength 32 ;
+    sh:minCount 1 ;
+    sh:minLength 2 ;
+    sh:path ont:attr_country .
+
+ont:obj_person_day_baseline_attr_person_day_costPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_person_day_cost .
+
+ont:obj_person_day_baseline_attr_product_line_groupPS sh:datatype xsd:string ;
+    sh:in ( "服务器（SV、AI、边缘）" "STR/数据中心" "HPC/高端（交换机、方案产品）" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_product_line_group .
+
+ont:obj_person_day_baseline_attr_provider_typePS sh:datatype xsd:string ;
+    sh:in ( "服务商" "自有人员" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_provider_type .
+
+ont:obj_product_line_attr_line_namePS sh:datatype xsd:string ;
+    sh:in ( "SV" "AI" "STR" "统一存储" "边缘计算" "交换机" ) ;
+    sh:maxLength 32 ;
+    sh:minCount 1 ;
+    sh:minLength 2 ;
+    sh:path ont:attr_line_name .
+
+ont:obj_region_attr_region_namePS sh:datatype xsd:string ;
+    sh:in ( "国内" "欧洲（德国）" ) ;
+    sh:maxLength 64 ;
+    sh:minCount 1 ;
+    sh:minLength 2 ;
+    sh:path ont:attr_region_name .
+
+ont:obj_resident_cost_baseline_attr_baseline_codePS sh:datatype xsd:string ;
+    sh:maxLength 64 ;
+    sh:minCount 1 ;
+    sh:minLength 4 ;
+    sh:path ont:attr_baseline_code ;
+    sh:pattern "^[A-Za-z0-9_\\-]+$" .
+
+ont:obj_resident_cost_baseline_attr_engineer_levelPS sh:datatype xsd:string ;
+    sh:in ( "初级（1级）" "中级（2级）" "高级（3级）" "资深级（4级）" "专家级（5级）" "驻场主管1级" "驻场主管2级" "驻场经理" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_engineer_level .
+
+ont:obj_resident_cost_baseline_attr_monthly_costPS sh:datatype xsd:float ;
+    sh:minCount 1 ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_monthly_cost .
+
+ont:obj_resident_cost_baseline_attr_product_linePS sh:datatype xsd:string ;
+    sh:in ( "SV" "STR" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_product_line .
+
+ont:obj_resident_cost_baseline_attr_service_regionPS sh:datatype xsd:string ;
+    sh:in ( "华夏（北京）" "华夏（天津、山东、河北）" "博辉（上海、江苏、浙江、江西）" "永信（湖北、安徽、陕西、河南、山西）" "中铁信（甘肃、宁夏、青海、新疆、四川、重庆、云南、西藏）" "柯隆（福建、海南）" "神州（内蒙、辽宁、吉林）" "脉山龙（广东1）" "脉山龙（广西1、湖南1）" "青东（广东2）" "青东（广西2）" "青东（湖南2）" ) ;
+    sh:maxLength 64 ;
+    sh:minCount 1 ;
+    sh:path ont:attr_service_region .
+
+ont:obj_sla_coefficient_baseline_attr_coefficientPS sh:datatype xsd:float ;
+    sh:maxInclusive 2e+00 ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_coefficient .
+
+ont:obj_sla_coefficient_baseline_attr_response_levelPS sh:datatype xsd:string ;
+    sh:in ( "5*8*4BD" "5*8*3BD" "5*8*NBD" "7*24*ND" "7*24*4H" "RMA" "ARMA" ) ;
+    sh:maxLength 32 ;
+    sh:minCount 1 ;
+    sh:minLength 2 ;
+    sh:path ont:attr_response_level .
+
+ont:obj_spare_aux_baseline_attr_area_categoryPS sh:datatype xsd:string ;
+    sh:in ( "国内" "仓配一体" "东亚" "东南亚" "南亚" "中东" "欧洲" "大洋洲" "拉丁美洲" ) ;
+    sh:minCount 1 ;
+    sh:path ont:attr_area_category .
+
+ont:obj_spare_aux_baseline_attr_arma_feePS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_arma_fee .
+
+ont:obj_spare_aux_baseline_attr_baseline_codePS sh:datatype xsd:string ;
+    sh:maxLength 64 ;
+    sh:minCount 1 ;
+    sh:minLength 4 ;
+    sh:path ont:attr_baseline_code ;
+    sh:pattern "^[A-Za-z0-9_\\-]+$" .
+
+ont:obj_spare_aux_baseline_attr_countryPS sh:datatype xsd:string ;
+    sh:maxLength 64 ;
+    sh:minCount 1 ;
+    sh:minLength 2 ;
+    sh:path ont:attr_country .
+
+ont:obj_spare_aux_baseline_attr_delivery_4hPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_delivery_4h .
+
+ont:obj_spare_aux_baseline_attr_delivery_ndPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_delivery_nd .
+
+ont:obj_spare_aux_baseline_attr_forward_logisticsPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_forward_logistics .
+
+ont:obj_spare_aux_baseline_attr_machine_4hPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_machine_4h .
+
+ont:obj_spare_aux_baseline_attr_machine_armaPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_machine_arma .
+
+ont:obj_spare_aux_baseline_attr_machine_ndPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_machine_nd .
+
+ont:obj_spare_aux_baseline_attr_machine_rmaPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_machine_rma .
+
+ont:obj_spare_aux_baseline_attr_reverse_logisticsPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_reverse_logistics .
+
+ont:obj_spare_aux_baseline_attr_tax_ratePS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_tax_rate .
+
+ont:obj_spare_aux_baseline_attr_third_partyPS sh:datatype xsd:string ;
+    sh:in ( "服务商" "迈创" "UPS" "诚泰" ) ;
+    sh:path ont:attr_third_party .
+
+ont:obj_spare_aux_baseline_attr_unit_4hPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_unit_4h .
+
+ont:obj_spare_aux_baseline_attr_unit_ndPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_unit_nd .
+
+ont:obj_spare_aux_baseline_attr_warehousePS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_warehouse .
+
+ont:obj_travel_cost_baseline_attr_airfarePS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_airfare .
+
+ont:obj_travel_cost_baseline_attr_countryPS sh:datatype xsd:string ;
+    sh:in ( "美国" "香港" "日本" "韩国" "德国" "芬兰" "挪威" "阿联酋" "新加坡" "印尼" "马来西亚" "泰国" "土耳其" "越南" ) ;
+    sh:maxLength 32 ;
+    sh:minCount 1 ;
+    sh:minLength 2 ;
+    sh:path ont:attr_country .
+
+ont:obj_travel_cost_baseline_attr_hotelPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_hotel .
+
+ont:obj_travel_cost_baseline_attr_mealPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_meal .
+
+ont:obj_travel_cost_baseline_attr_miscPS sh:datatype xsd:float ;
+    sh:minInclusive 0e+00 ;
+    sh:path ont:attr_misc .
+
+ont:rel_product_material a owl:ObjectProperty ;
+    rdfs:label "配置部件" ;
+    rdfs:domain ont:obj_maintenance_product ;
+    rdfs:range ont:obj_material .
+
+ont:rel_product_region a owl:ObjectProperty ;
+    rdfs:label "适用区域" ;
+    rdfs:domain ont:obj_maintenance_product ;
+    rdfs:range ont:obj_region .
+
+ont:attr_currency_type a owl:DatatypeProperty ;
+    rdfs:label "外币类型" ;
+    rdfs:domain ont:obj_exchange_rate ;
+    rdfs:range xsd:string .
+
+ont:attr_customer_name a owl:DatatypeProperty ;
+    rdfs:label "客户名称" ;
+    rdfs:domain ont:obj_customer ;
+    rdfs:range xsd:string .
+
+ont:attr_customer_segment a owl:DatatypeProperty ;
+    rdfs:label "客户或细分",
+        "客户细分" ;
+    rdfs:domain ont:obj_onsite_rate_baseline,
+        ont:obj_part_failure_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_line_name a owl:DatatypeProperty ;
+    rdfs:label "产线名称" ;
+    rdfs:domain ont:obj_product_line ;
+    rdfs:range xsd:string .
+
+ont:attr_model_code a owl:DatatypeProperty ;
+    rdfs:label "机型编号" ;
+    rdfs:domain ont:obj_machine_model ;
+    rdfs:range xsd:string .
+
+ont:attr_pn a owl:DatatypeProperty ;
+    rdfs:label "物料PN" ;
+    rdfs:domain ont:obj_material ;
+    rdfs:range xsd:string .
+
+ont:attr_product_code a owl:DatatypeProperty ;
+    rdfs:label "维保产品编码" ;
+    rdfs:domain ont:obj_maintenance_product ;
+    rdfs:range xsd:string .
+
+ont:attr_product_line a owl:DatatypeProperty ;
+    rdfs:label "产线",
+        "产线名称" ;
+    rdfs:domain ont:obj_onsite_rate_baseline,
+        ont:obj_resident_cost_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_region a owl:DatatypeProperty ;
+    rdfs:label "区域/国家" ;
+    rdfs:domain ont:obj_aftersales_labor_baseline,
+        ont:obj_impl_labor_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_region_name a owl:DatatypeProperty ;
+    rdfs:label "区域名称" ;
+    rdfs:domain ont:obj_region ;
+    rdfs:range xsd:string .
+
+ont:attr_u_band a owl:DatatypeProperty ;
+    rdfs:label "U数档" ;
+    rdfs:domain ont:obj_aftersales_labor_baseline,
+        ont:obj_impl_labor_baseline ;
+    rdfs:range xsd:string .
+
+ont:obj_product_line a owl:Class ;
+    rdfs:label "产线" ;
+    rdfs:comment "维保成本的产线维度，取值来自现场服务率基线与人员驻场成本表的产线列。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:attr_baseline_value a owl:DatatypeProperty ;
+    rdfs:label "基线值" ;
+    rdfs:domain ont:obj_aftersales_labor_baseline,
+        ont:obj_impl_labor_baseline,
+        ont:obj_mgmt_cost_baseline ;
+    rdfs:range xsd:float .
+
+ont:attr_customer a owl:DatatypeProperty ;
+    rdfs:label "客户" ;
+    rdfs:domain ont:obj_aftersales_labor_baseline,
+        ont:obj_impl_labor_baseline,
+        ont:obj_mgmt_cost_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_response_level a owl:DatatypeProperty ;
+    rdfs:label "响应级别" ;
+    rdfs:domain ont:obj_aftersales_labor_baseline,
+        ont:obj_sla_coefficient_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_country a owl:DatatypeProperty ;
+    rdfs:label "出差国家",
+        "国家/地区" ;
+    rdfs:domain ont:obj_person_day_baseline,
+        ont:obj_spare_aux_baseline,
+        ont:obj_travel_cost_baseline ;
+    rdfs:range xsd:string .
+
+ont:attr_domestic a owl:DatatypeProperty ;
+    rdfs:label "境内外" ;
+    rdfs:domain ont:obj_aftersales_labor_baseline,
+        ont:obj_impl_labor_baseline,
+        ont:obj_mgmt_cost_baseline,
+        ont:obj_onsite_rate_baseline ;
+    rdfs:range xsd:string .
+
+ont:obj_machine_model a owl:Class ;
+    rdfs:label "机型" ;
+    rdfs:comment "服务产品列表中的服务器机型，含对外型号与 U 数规格。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_mgmt_cost_baseline a owl:Class ;
+    rdfs:label "管理成本基线" ;
+    rdfs:comment "单台管理成本基线，按客户、业务环节与境内外切分。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_onsite_rate_baseline a owl:Class ;
+    rdfs:label "现场服务率基线" ;
+    rdfs:comment "按产线、客户或产品细分、境内外切分的现场服务率，是人工/辅助/管理成本的共同乘数。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_part_failure_baseline a owl:Class ;
+    rdfs:label "部件故障率基线" ;
+    rdfs:comment "各部件在不同适用产品与客户细分下的故障率基线，用于推导备件直接成本。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_person_day_baseline a owl:Class ;
+    rdfs:label "人天成本基线" ;
+    rdfs:comment "服务商或自有人员在不同国家与产品线下的人天成本基线。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_region a owl:Class ;
+    rdfs:label "区域" ;
+    rdfs:comment "维保产品所属区域，取值来自成本核算主表的区域列。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_resident_cost_baseline a owl:Class ;
+    rdfs:label "人员驻场成本基线" ;
+    rdfs:comment "各产线、工程师等级与服务商区域组合下的工程师人月驻场成本。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_travel_cost_baseline a owl:Class ;
+    rdfs:label "差旅成本基线" ;
+    rdfs:comment "出差到不同国家/地区的单次机票与日均住宿、伙食、公杂费用标准。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_customer a owl:Class ;
+    rdfs:label "客户" ;
+    rdfs:comment "维保成本基线中的客户维度，取值来自各基线表的客户列。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_exchange_rate a owl:Class ;
+    rdfs:label "汇率" ;
+    rdfs:comment "外币对人民币的固定核算汇率，用于海外成本折算。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_material a owl:Class ;
+    rdfs:label "物料/备件" ;
+    rdfs:comment "备件成本表中的可替换部件，含物料编码、描述、单价与来源工厂。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_aftersales_labor_baseline a owl:Class ;
+    rdfs:label "售后人工成本基线" ;
+    rdfs:comment "单台售后人工成本基线，按 U 数档、客户、产品类别与响应级别切分。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_impl_labor_baseline a owl:Class ;
+    rdfs:label "实施人工成本基线" ;
+    rdfs:comment "单台实施人工成本基线，按实施类型或机型、客户、U 数档与境内外切分。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_sla_coefficient_baseline a owl:Class ;
+    rdfs:label "服务水平系数基线" ;
+    rdfs:comment "不同响应级别对应的服务水平系数，用于按 SLA 折算成本。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:obj_maintenance_product a owl:Class ;
+    rdfs:label "维保服务产品" ;
+    rdfs:comment "单台服务器原厂维保服务的成本核算结果，是区域与服务条款组合下的单台成本。" ;
+    rdfs:subClassOf owl:Thing .
+
+ont:attr_baseline_code a owl:DatatypeProperty ;
+    rdfs:label "基线编码" ;
+    rdfs:domain ont:obj_aftersales_labor_baseline,
+        ont:obj_impl_labor_baseline,
+        ont:obj_mgmt_cost_baseline,
+        ont:obj_onsite_rate_baseline,
+        ont:obj_part_failure_baseline,
+        ont:obj_person_day_baseline,
+        ont:obj_resident_cost_baseline,
+        ont:obj_spare_aux_baseline ;
+    rdfs:range xsd:string .
+
+ont:obj_spare_aux_baseline a owl:Class ;
+    rdfs:label "备件辅助成本基线" ;
+    rdfs:comment "按地区与国家切分的备件辅助成本基线，覆盖仓储、配送、正逆向物流、ARMA 与税费。" ;
+    rdfs:subClassOf owl:Thing .
+

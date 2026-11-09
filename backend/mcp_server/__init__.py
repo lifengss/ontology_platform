@@ -315,6 +315,17 @@ class McpServer:
         ep = self._endpoints.pop(project_id, None)
         if ep is not None:
             logger.info("evict MCP endpoint project_id=%s", project_id)
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # 同步上下文（同步路由 handler 跑在线程池，无运行中事件循环）：
+                # task.cancel() 线程安全、取消在其所属循环上生效，
+                # 避免 create_task 抛 "no running event loop"、stop 协程永不 await。
+                task, ep._task = ep._task, None
+                if task is not None and not task.done():
+                    task.cancel()
+                ep.started = False
+                return
             asyncio.create_task(ep.stop())
 
     def start_sweeper(self) -> None:

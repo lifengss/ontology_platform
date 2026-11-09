@@ -67,14 +67,15 @@ def live_server():
     thread.join(timeout=5)
 
 
-def _mcp_sse_query(base_url: str, ontology_id: str) -> dict[str, Any]:
-    """真实 MCP SDK 客户端经 SSE 连接 /mcp/{PID}，调用三个只读工具。"""
+def _mcp_sse_query(base_url: str, ontology_id: str, token: str) -> dict[str, Any]:
+    """真实 MCP SDK 客户端经 SSE 连接 /mcp/{PID}（Bearer token 鉴权），调用三个只读工具。"""
     from mcp import ClientSession
     from mcp.client.sse import sse_client
 
     async def _run() -> dict[str, Any]:
         results: dict[str, Any] = {}
-        async with sse_client(f"{base_url}/mcp/{PID}") as (read, write):
+        async with sse_client(f"{base_url}/mcp/{PID}",
+                              headers={"Authorization": f"Bearer {token}"}) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await session.list_tools()
@@ -179,8 +180,14 @@ def test_02_mcp_publish_and_sse_query(live_server):
     assert r2.json()["data"]["published"] is True
     assert any(o["ontology_id"] == oid for o in r2.json()["data"]["published_ontologies"])
 
+    # P0-2：/mcp/{pid} 需 Bearer token 鉴权——先生成 token 再查询
+    rt = c.post("/api/mcp/server/token", params=P)
+    assert rt.status_code == 201, rt.text
+    token = rt.json()["data"]["token"]
+    assert token
+
     # PRD §9.1-1：外部 Agent（MCP SDK 客户端）经 SSE 成功查询
-    res = _mcp_sse_query(live_server, oid)
+    res = _mcp_sse_query(live_server, oid, token)
     assert {"ontology_query", "inference_trace", "instance_get", "action_invoke"} <= set(res["tools"])
     assert {o["id"] for o in res["ontology_query"]["objects"]} == {"Customer", "Order"}
     assert "steps" in res["inference_trace"]

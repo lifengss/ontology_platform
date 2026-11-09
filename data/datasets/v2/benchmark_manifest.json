@@ -1,0 +1,15 @@
+{
+  "classes": 2000,
+  "class_hierarchy": {
+    "root": 1,
+    "l1": 20,
+    "l2": 100,
+    "l3": 1879
+  },
+  "datatype_properties": 6000,
+  "instances": 8000,
+  "instance_triples": 32000,
+  "shacl_shapes": 100,
+  "total_triples_approx": 40300,
+  "purpose": "V2-16 远程推理 / V2-17 批量 SHACL 校验 性能基准（数千类/属性、数万实例三元组）"
+}
