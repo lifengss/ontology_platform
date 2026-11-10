@@ -549,8 +549,33 @@ def get_candidate(candidate_id: str, project_id: str = Depends(project_id_param)
     return success(rec)
 
 
+def _stable_key_for(ontology: dict, object_type: str) -> str | None:
+    """V2-03：取对象当前（可能已显式指定）的业务主键属性 id。"""
+    obj = next((o for o in (ontology or {}).get("objects", []) if o.get("id") == object_type), None)
+    return (obj or {}).get("stable_key")
+
+
+def _match_by_stable_key(instance_store, ontology_id: str, object_type: str,
+                         key: str, value: Any) -> dict | None:
+    """按 (本体, 对象类型, 主键字段, 主键值) 命中已有实例；无该元数据的存量实例不参与。"""
+    for r in instance_store.find(object_type=object_type, limit=None):
+        if (r.get("ontology_id") or ontology_id) != ontology_id:
+            continue
+        if r.get("stable_key") != key:
+            continue
+        if str(r.get("stable_key_value")) != str(value):
+            continue
+        return r
+    return None
+
+
 def _approve_one(rec: dict, candidate_id: str, project_id: str) -> dict:
-    """单个候选批准：校验 + 落库 + 状态回写（供单条/批量批准复用）。"""
+    """单个候选批准：校验 + 按业务主键匹配/去重落库 + 状态回写（供单条/批量批准复用）。
+
+    V2-03 / TP-03-04：新入库实例写入 stable_key / stable_key_value 元数据；
+    同主键已存在时更新该实例（保留原 id、合并字段）而非追加，批次内重复同样收敛。
+    无主键元数据的存量实例不被静默改写，也不参与匹配。
+    """
     store = _store_for(project_id)
     ontology = _load_ontology(rec["ontology_id"], project_id)
     result = approve_candidate_logic(rec, ontology, project_id=project_id)
@@ -558,7 +583,9 @@ def _approve_one(rec: dict, candidate_id: str, project_id: str) -> dict:
     if result["imported"] > 0:
         rec["status"] = "imported"
         instance_store = _instance_store_for(project_id)
-        for i, inst in enumerate(rec.get("instances", [])):
+        key = _stable_key_for(ontology, rec.get("object_type"))
+        n_inserted = n_deduped = 0
+        for inst in rec.get("instances", []):
             instance_record = {
                 "id": inst.get("id") or f"{rec['object_type']}_{uuid.uuid4().hex}",
                 "project_id": project_id,
@@ -569,12 +596,36 @@ def _approve_one(rec: dict, candidate_id: str, project_id: str) -> dict:
                 "imported_at": _now(),
                 "tx_id": result.get("neo_tx_id"),
             }
+            key_value = inst.get(key) if key else None
+            if key and key_value is not None and key_value != "":
+                instance_record["stable_key"] = key
+                instance_record["stable_key_value"] = key_value
+                matched = _match_by_stable_key(instance_store, rec.get("ontology_id"),
+                                               rec.get("object_type"), key, key_value)
+                if matched:
+                    merged = dict(matched.get("instance") or {})
+                    merged.update(inst)
+                    instance_store.update(matched["id"], {
+                        "instance": merged,
+                        "stable_key": key,
+                        "stable_key_value": key_value,
+                        "candidate_id": candidate_id,
+                        "imported_at": _now(),
+                        "tx_id": result.get("neo_tx_id"),
+                    })
+                    n_deduped += 1
+                    continue
             instance_store.insert(instance_record)
+            n_inserted += 1
+        result["inserted"] = n_inserted
+        result["dedup_updated"] = n_deduped
+        result["stable_key"] = key
         _sync_rdf(project_id, rec.get("ontology_id"))
     rec["approve_result"] = result
     store.update(candidate_id, rec)
-    logger.info("approve candidate_id=%s project_id=%s imported=%d violations=%d",
-                candidate_id, project_id, result["imported"], len(result["violations"]))
+    logger.info("approve candidate_id=%s project_id=%s imported=%d inserted=%d dedup=%d violations=%d",
+                candidate_id, project_id, result["imported"], result.get("inserted", 0),
+                result.get("dedup_updated", 0), len(result["violations"]))
     return result
 
 

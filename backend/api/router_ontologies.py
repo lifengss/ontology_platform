@@ -7,11 +7,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, UploadFile
 from rdflib import Graph
 
 from ai_helper import call_llm, extract_json, generate_ontology_from_document, generate_ontology_from_text
 from api.dependencies import namespace_param, project_id_param
+from core.instance_store import get_instance_store
 from core.project_store import ProjectStore
 from core.responses import (
     ApiError,
@@ -40,6 +41,7 @@ from schemas.ontology import (
     OntologyFromDocResponse,
     OntologyFromTextRequest,
     OntologyObjectPatch,
+    PrimaryKeyMigrationRequest,
     ValidateRequest,
     ValidateResult,
 )
@@ -96,6 +98,7 @@ def _backfill_object_fields(obj: dict, namespace: str) -> None:
             candidates = attrs
         if candidates:
             obj["stable_key"] = candidates[0]["id"]
+            obj["stable_key_explicit"] = False  # 自动推断；用户显式指定时由 PATCH/PUT 置 True
 
 
 @router.post("", status_code=201)
@@ -165,6 +168,7 @@ def update_ontology(
     existing = store.get(ontology_id)
     if not existing:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    old_stable_keys = {o.get("id"): o.get("stable_key") for o in existing.get("objects", [])}
     patch = payload.model_dump(exclude_unset=True)
     patch.pop("id", None)
     patch["updated_at"] = _now()
@@ -185,7 +189,38 @@ def update_ontology(
     updated = store.update(ontology_id, patch)
     _sync_rdf(project_id, ontology_id)
     logger.info("update_ontology id=%s project_id=%s", ontology_id, project_id)
+    # V2-03 EP-03-01：前端表单保存（PUT）走这条路，主键变更也要给出存量实例影响提示
+    if "objects" in patch:
+        for obj in patch["objects"]:
+            if old_stable_keys.get(obj.get("id")) != obj.get("stable_key"):
+                impact = _primary_key_impact(project_id, ontology_id, obj.get("id"),
+                                             old_stable_keys.get(obj.get("id")), obj.get("stable_key"))
+                return success({**updated, "primary_key_change": impact})
     return success(updated)
+
+
+def _instance_records(project_id: str, ontology_id: str, object_id: str) -> list[dict[str, Any]]:
+    """该本体下某对象类型的全部实例（无 ontology_id 的历史记录默认归属当前本体）。"""
+    return [r for r in get_instance_store(project_id=project_id).find(object_type=object_id, limit=None)
+            if (r.get("ontology_id") or ontology_id) == ontology_id]
+
+
+def _primary_key_impact(project_id: str, ontology_id: str, object_id: str,
+                        old_key: str | None, new_key: str | None) -> dict[str, Any]:
+    """V2-03 / EP-03-01：主键变更影响提示；存量实例 stable_key 不静默改写。"""
+    recs = _instance_records(project_id, ontology_id, object_id)
+    legacy = [r for r in recs if r.get("stable_key") != new_key]
+    return {
+        "object_id": object_id,
+        "previous_stable_key": old_key,
+        "current_stable_key": new_key,
+        "existing_instances": len(recs),
+        "legacy_instances": len(legacy),
+        "migration_required": bool(recs) and bool(legacy),
+        "hint": (f"已有 {len(recs)} 条实例；存量 stable_key 不随本次变更静默改写，"
+                 "新入库实例按新主键匹配/去重。如需迁移存量，请显式调用 "
+                 "primary-key/migrate 并 confirm=true（缺失新主键值的实例会跳过，不产生键断裂）。"),
+    }
 
 
 @router.patch("/{ontology_id}/objects/{object_id}")
@@ -195,30 +230,41 @@ def patch_ontology_object(
     payload: OntologyObjectPatch,
     project_id: str = Depends(project_id_param),
     namespace: str | None = Depends(namespace_param),
+    if_match: str | None = Header(default=None, alias="If-Match"),
 ):
-    """就地更新本体内单个对象（对象元数据/约束/父级编辑）。
+    """就地更新本体内单个对象（对象元数据/约束/父级/显式业务主键）。
 
-    仅当对象存在时更新；保留 id/namespace/stable_key/business_definition 等元数据，
-    用请求体覆盖 name/description/parent/attributes/relations（parent 不传保持旧值，
-    显式 null 清除）。更新后整体跑业务层校验（父存在/继承环等，与 PUT 路径一致），
-    失败 422 不落库；通过则重翻译 TTL 落盘。
+    V2-03：传 `stable_key` 字符串即显式指定（标记 stable_key_explicit=true，
+    校验属性存在且 data_type=string，失败 422）；显式传 null 回退自动推断；
+    不传保持旧值。变更主键时返回 `data.primary_key_change` 影响提示，不改写存量实例。
+    `If-Match` / 原子乐观锁保证并发两请求中后到者不会基于旧状态覆盖最新结果（409）。
     """
     store = _store_for(project_id)
     existing = store.get(ontology_id)
     if not existing:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    expected_updated_at = existing.get("updated_at")
+    if if_match and if_match != expected_updated_at:
+        raise ApiError("STALE_ONTOLOGY", "本体已被其它请求更新，请刷新后重试（后到者须基于最新状态提交）",
+                       http_status=409)
     objects = existing.get("objects", [])
     idx = next((i for i, o in enumerate(objects) if o.get("id") == object_id), None)
     if idx is None:
         raise ApiError("NOT_FOUND", "对象不存在", http_status=404)
+    old_key = objects[idx].get("stable_key")
 
     patch = payload.model_dump(exclude_unset=True)
     patch["id"] = object_id
+    pk_supplied = "stable_key" in patch
     # 局部更新语义：请求体未传的字段保持旧值（显式传 null 清除 parent），
     # 否则仅改 parent 会把 name/attributes 等冲掉，导致业务门误报 stable_key 不属于本对象
-    for key in ("name", "description", "namespace", "stable_key", "business_definition", "parent"):
+    for key in ("name", "description", "namespace", "stable_key", "stable_key_explicit",
+                "business_definition", "parent"):
         if key not in patch:
             patch[key] = objects[idx].get(key)
+    if pk_supplied:
+        patch["stable_key_explicit"] = bool(patch.get("stable_key"))
+    patch["stable_key_explicit"] = bool(patch.get("stable_key_explicit"))
     if "attributes" not in patch:
         patch["attributes"] = objects[idx].get("attributes") or []
     if "relations" not in patch:
@@ -229,7 +275,7 @@ def patch_ontology_object(
     # 补全属性/关系缺失的默认业务语义
     for attr in patch.get("attributes") or []:
         attr.setdefault("constraints", {})
-    # 刷新对象级稳定主键（若对象无 stable_key 且改为有 required 字符串属性）
+    # 刷新对象级稳定主键（未显式指定且无值时按三级回退自动推断）
     if not patch.get("stable_key"):
         attrs = patch.get("attributes") or []
         candidates = [a for a in attrs if a.get("required") and a.get("data_type", "string") == "string"]
@@ -237,21 +283,93 @@ def patch_ontology_object(
             candidates = [a for a in attrs if a.get("data_type", "string") == "string"]
         if candidates:
             patch["stable_key"] = candidates[0]["id"]
+        patch["stable_key_explicit"] = False
 
     objects[idx] = patch
     existing["objects"] = objects
     existing["updated_at"] = _now()
-    # 业务层校验（与 PUT 路径一致）：改父级后父存在/继承环等约束必须整体成立，失败不落库
+    # 业务层校验（与 PUT 路径一致）：主键须存在且显式值为 string、父存在/继承环等，失败不落库
     biz_errors = blocking_violations(existing)
     if biz_errors:
         raise ApiError("VALIDATION_ERROR", "业务层校验未通过", http_status=422,
                        details={"violations": biz_errors})
-    updated = store.update(ontology_id, {"objects": objects, "updated_at": existing["updated_at"]})
+    updated = store.update_if_unchanged(
+        ontology_id, expected_updated_at,
+        {"objects": objects, "updated_at": existing["updated_at"]},
+    )
     if updated is None:
-        raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+        raise ApiError("STALE_ONTOLOGY", "本体已被其它请求更新，请刷新后重试（并发主键变更未覆盖最新状态）",
+                       http_status=409)
     _sync_rdf(project_id, ontology_id)
-    logger.info("patch_object id=%s object_id=%s project_id=%s", ontology_id, object_id, project_id)
+    logger.info("patch_object id=%s object_id=%s project_id=%s stable_key=%s explicit=%s",
+                ontology_id, object_id, project_id, patch.get("stable_key"),
+                patch.get("stable_key_explicit"))
+    if old_key != patch.get("stable_key"):
+        impact = _primary_key_impact(project_id, ontology_id, object_id,
+                                     old_key, patch.get("stable_key"))
+        return success({**updated, "primary_key_change": impact})
     return success(updated)
+
+
+@router.get("/{ontology_id}/objects/{object_id}/primary-key/impact")
+def primary_key_impact(
+    ontology_id: str,
+    object_id: str,
+    stable_key: str | None = Query(default=None, description="拟设置的新主键；缺省用对象当前值"),
+    project_id: str = Depends(project_id_param),
+):
+    """V2-03 / TCE-03-01：主键变更影响提示（存量实例数 / 是否需显式迁移）。"""
+    rec = _store_for(project_id).get(ontology_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    obj = next((o for o in rec.get("objects", []) if o.get("id") == object_id), None)
+    if obj is None:
+        raise ApiError("NOT_FOUND", "对象不存在", http_status=404)
+    return success(_primary_key_impact(project_id, ontology_id, object_id,
+                                       obj.get("stable_key"), stable_key or obj.get("stable_key")))
+
+
+@router.post("/{ontology_id}/objects/{object_id}/primary-key/migrate")
+def migrate_primary_key(
+    ontology_id: str,
+    object_id: str,
+    payload: PrimaryKeyMigrationRequest,
+    project_id: str = Depends(project_id_param),
+):
+    """V2-03 / EP-03-01：存量实例主键元数据迁移（必须 confirm=true）。
+
+    只补写实例记录的 stable_key / stable_key_value 元数据，不改动 instance 内容；
+    新主键值为空的实例跳过，避免键断裂。默认调用（confirm=false）一律 422 拒绝。
+    """
+    if not payload.confirm:
+        raise ApiError("MIGRATION_NOT_CONFIRMED",
+                       "存量实例主键迁移须显式确认（confirm=true）；默认不改写任何存量实例",
+                       http_status=422)
+    rec = _store_for(project_id).get(ontology_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    obj = next((o for o in rec.get("objects", []) if o.get("id") == object_id), None)
+    if obj is None:
+        raise ApiError("NOT_FOUND", "对象不存在", http_status=404)
+    key = obj.get("stable_key")
+    if not key:
+        raise ApiError("VALIDATION_ERROR", "对象未声明业务主键，无法迁移", http_status=422)
+    store = get_instance_store(project_id=project_id)
+    recs = _instance_records(project_id, ontology_id, object_id)
+    n_updated = n_skipped = 0
+    for r in recs:
+        if r.get("stable_key") == key:
+            continue
+        value = (r.get("instance") or {}).get(key)
+        if value is None or value == "":
+            n_skipped += 1
+            continue
+        store.update(r["id"], {"stable_key": key, "stable_key_value": value,
+                               "key_migrated_at": _now()})
+        n_updated += 1
+    return success({"object_id": object_id, "stable_key": key, "total": len(recs),
+                    "updated": n_updated, "skipped": n_skipped,
+                    "hint": "存量实例未静默改写：仅在本次显式确认后补写主键元数据；缺失新主键值的实例已跳过。"})
 
 
 @router.delete("/{ontology_id}")

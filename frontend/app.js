@@ -940,9 +940,11 @@ function renderObjectForms() {
         '<div><label title="上级对象（父类）：编译为 RDFS.subClassOf；父对象必须在本表单内定义">上级对象（父类）</label>' + parentSelectHtml(idx, obj) + '</div>' +
       '</div>' +
       '<div class="mb-2"><label>描述</label><input class="w-full obj-desc" data-idx="' + idx + '" value="' + esc(obj.description || '') + '" /></div>' +
-      '<div class="mb-2 text-xs text-slate-400">业务主键（只读）：<span class="pk-value font-mono text-sky-300" data-pkval="' + idx + '">—</span></div>' +
+      '<div class="mb-2 flex items-center gap-2 text-xs text-slate-400"><label class="shrink-0" title="V2-03：可显式指定业务主键，选项仅为本对象的 string 属性">业务主键</label>' +
+        '<select class="pk-select w-64" data-pkselect="' + idx + '" data-pkvalue="' + esc(obj.stable_key || '') + '" data-pkmanual="' + (obj.stable_key_explicit ? '1' : '0') + '" title="显式指定业务主键（仅 string 属性可选）"></select>' +
+        '<span class="pk-origin text-[10px] text-slate-500" data-pkorigin="' + idx + '"></span></div>' +
       '<div class="form-section-title"><span>属性</span><button class="btn" onclick="addAttr(' + idx + ')">+ 属性</button></div>' +
-      '<div class="pk-rule text-[10px] text-slate-500 mb-1">主键规则：第一个「必填 + string」属性将自动设为业务主键（stable_key），属性顺序有意义，可用行内 ↑↓ 调整。<span class="pk-hint" data-pkhint="' + idx + '"></span></div>' +
+      '<div class="pk-rule text-[10px] text-slate-500 mb-1">主键规则：未显式指定时，第一个「必填 + string」属性将自动设为业务主键（stable_key），属性顺序有意义，可用行内 ↑↓ 调整；也可在上方下拉显式指定（仅 string 属性可选）。<span class="pk-hint" data-pkhint="' + idx + '"></span></div>' +
       // 属性较多时列表底部也有新增入口（与对象列表底部「+ 添加对象」风格一致），无需回滚到区标题
       '<div class="space-y-2 mb-3">' + attrHtml + (attrs.length ? '<button class="btn secondary w-full" onclick="addAttr(' + idx + ')">+ 添加属性</button>' : '') + '</div>' +
       '<div class="form-section-title"><span>关系</span><button class="btn" onclick="addRel(' + idx + ')">+ 关系</button></div>' +
@@ -975,27 +977,49 @@ function pkAttrsFromDom(card) {
   }));
 }
 
-// 增量更新单卡片的 🔑 徽标 / 提示行 / 只读回显（不整卡重渲染，避免输入焦点丢失）
+// 增量更新单卡片的 🔑 徽标 / 提示行 / 业务主键下拉（不整卡重渲染，避免输入焦点丢失）
+// V2-03：下拉选项只列本对象的 string 属性；未手动选择时按 pkHitIndex 自动规则回显。
 function updatePkBadges(idx) {
   const card = document.querySelector('#objectForms .object-card[data-oidx="' + idx + '"]');
   if (!card) return;
   const attrs = pkAttrsFromDom(card);
-  const hit = pkHitIndex(attrs);
+  const autoHit = pkHitIndex(attrs);
+  const stringAttrs = attrs.filter(a => (a.data_type || 'string') === 'string' && a.id);
+  const sel = card.querySelector('.pk-select');
+  let chosen = '';
+  if (sel) {
+    const manual = sel.dataset.pkmanual === '1';
+    const prev = sel.value || sel.dataset.pkvalue || '';
+    sel.innerHTML = ['<option value="">（按自动规则）</option>'].concat(
+      stringAttrs.map(a => '<option value="' + esc(a.id) + '">' + esc(a.id) + '</option>')
+    ).join('');
+    const autoValue = autoHit >= 0 && attrs[autoHit].data_type === 'string' ? (attrs[autoHit].id || '') : '';
+    const wanted = prev || (manual ? '' : autoValue);
+    if (wanted && stringAttrs.some(a => a.id === wanted)) chosen = wanted;
+    else if (!manual) chosen = autoValue;
+    sel.value = chosen;
+    sel.dataset.pkvalue = chosen;
+    sel.dataset.pkmanual = manual && chosen ? '1' : '0';
+    sel.disabled = !stringAttrs.length;
+  }
+  const manual = sel ? sel.dataset.pkmanual === '1' : false;
+  const chosenIdx = chosen ? attrs.findIndex(a => a.id === chosen) : autoHit;
   card.querySelectorAll('.pk-badge').forEach(b => {
     const aidx = parseInt(String(b.dataset.pkbadge).split(':')[1], 10);
-    const on = aidx === hit;
-    b.style.display = on ? 'inline-block' : 'none';
+    b.style.display = aidx === chosenIdx && chosenIdx >= 0 ? 'inline-block' : 'none';
+    b.title = manual ? '用户显式指定的业务主键 stable_key' : '按自动规则推断的业务主键 stable_key';
   });
   const hint = card.querySelector('.pk-hint');
   if (hint) {
-    const name = hit >= 0 ? (attrs[hit].id || '（未填 ID）') : '';
+    const name = chosenIdx >= 0 ? (attrs[chosenIdx].id || '（未填 ID）') : '';
     if (!attrs.length) hint.textContent = '｜当前无属性，保存时无法生成业务主键';
-    else if (attrs[hit].required && attrs[hit].data_type === 'string') hint.textContent = '｜当前主键 → ' + name;
-    else if (attrs[hit].data_type === 'string') hint.textContent = '｜无「必填 + string」属性，退化为第一个 string 属性 → ' + name;
-    else hint.textContent = '｜无 string 属性，退化为第一个属性 → ' + name + '，建议补一个字符串主键属性';
+    else if (manual && chosen) hint.textContent = '｜显式指定主键 → ' + name;
+    else if (attrs[chosenIdx] && attrs[chosenIdx].required && attrs[chosenIdx].data_type === 'string') hint.textContent = '｜当前自动主键 → ' + name;
+    else if (attrs[chosenIdx] && attrs[chosenIdx].data_type === 'string') hint.textContent = '｜无「必填 + string」属性，退化为第一个 string 属性 → ' + name;
+    else hint.textContent = '｜无 string 属性，建议补一个字符串主键属性';
   }
-  const val = card.querySelector('.pk-value');
-  if (val) val.textContent = !attrs.length ? '—（无属性）' : (attrs[hit].id || '（未填 ID，保存前请补）');
+  const origin = card.querySelector('.pk-origin');
+  if (origin) origin.textContent = manual && chosen ? '显式指定' : (stringAttrs.length ? '自动推断' : '无 string 属性');
 }
 
 function updatePkBadgesAll() {
@@ -1008,6 +1032,10 @@ function bindObjectFormsDelegation() {
   if (!of || of.dataset.pkBound) return;
   of.dataset.pkBound = '1';
   const handler = e => {
+    // V2-03：用户主动改动主键下拉即视为显式指定；选回空项则恢复自动规则
+    if (e.target && e.target.classList && e.target.classList.contains('pk-select')) {
+      e.target.dataset.pkmanual = e.target.value ? '1' : '0';
+    }
     const card = e.target && e.target.closest ? e.target.closest('.object-card') : null;
     if (card && card.dataset.oidx != null) updatePkBadges(parseInt(card.dataset.oidx, 10));
     refreshFieldDatalists();
@@ -1174,6 +1202,11 @@ function syncFormObjectsFromDOM() {
     obj.name = card.querySelector('.obj-name').value;
     obj.description = card.querySelector('.obj-desc').value;
     obj.parent = (card.querySelector('.obj-parent') || {}).value || null;
+    const pkSel = card.querySelector('.pk-select');
+    if (pkSel) {
+      obj.stable_key = pkSel.value || null;
+      obj.stable_key_explicit = pkSel.dataset.pkmanual === '1' && !!pkSel.value;
+    }
     const oldAttrs = obj.attributes || [];
     obj.attributes = [];
     card.querySelectorAll('.attr-id').forEach(el => {
@@ -1261,6 +1294,8 @@ function collectFormOntology() {
     objects: state.formObjects.map(o => ({
       id: o.id, name: o.name, description: o.description || '',
       parent: o.parent || null,
+      stable_key: o.stable_key || null,
+      stable_key_explicit: !!o.stable_key_explicit,
       attributes: o.attributes.map(a => ({ id: a.id, name: a.name, data_type: a.data_type, required: a.required, constraints: a.constraints || {} })),
       relations: o.relations.map(r => ({ id: r.id, name: r.name, target_object: r.target_object, cardinality: r.cardinality }))
     })),
@@ -1375,6 +1410,11 @@ async function saveOntology() {
       ? await api('/api/ontologies/' + state.editingId, { method: 'PUT', body: JSON.stringify(payload) })
       : await api('/api/ontologies', { method: 'POST', body: JSON.stringify(payload) });
     toast((isEdit ? '本体已更新: ' : '本体已保存: ') + j.data.name, 'ok');
+    // V2-03 / EP-03-01：主键变更时明确提示存量实例影响（不静默改写）
+    const pkImpact = j.data && j.data.primary_key_change;
+    if (pkImpact && pkImpact.existing_instances > 0) {
+      setTimeout(() => toast('主键变更影响：' + pkImpact.hint, 'info'), 400);
+    }
     state.editingId = null;
     closeEditor();
     await loadOntologies();
@@ -1476,6 +1516,7 @@ function editCurrentOntology() {
   $('formDesc').value = o.description || '';
   state.formObjects = (o.objects || []).map(x => ({
     id: x.id, name: x.name, description: x.description || '', parent: x.parent || null,
+    stable_key: x.stable_key || null, stable_key_explicit: !!x.stable_key_explicit,
     attributes: (x.attributes || []).map(a => ({ id: a.id, name: a.name, data_type: a.data_type, required: !!a.required, constraints: a.constraints || {} })),
     relations: (x.relations || []).map(r => ({ id: r.id, name: r.name, target_object: r.target_object, cardinality: r.cardinality }))
   }));

@@ -39,6 +39,7 @@ class OntologyObject(BaseModel):
     description: Optional[str] = None
     business_definition: Optional[str] = None  # 业务语义定义（一句话说明对象代表什么、边界在哪）
     stable_key: Optional[str] = None            # 业务主键字段 id（禁止用内部自增 id）
+    stable_key_explicit: bool = False           # V2-03：是否由用户显式指定（False=按自动规则推断）
     namespace: Optional[str] = None            # 部门/域命名空间；MVP 默认继承 project
     parent: Optional[str] = None
     attributes: list[ObjectAttribute] = Field(default_factory=list)
@@ -52,12 +53,25 @@ class OntologyObjectPatch(BaseModel):
     - 不传：保持旧父级（由端点回填原值）
     - 显式传 null：清除父级（变回根对象）
     - 传对象 id：改挂新父级；端点随后整体跑业务层校验（父存在/继承环），失败 422
+
+    V2-03 显式业务主键：
+    - 不传 stable_key：保持旧值（含旧显式标记）
+    - 传 string：显式指定该属性为主键，端点置 stable_key_explicit=true，校验其存在且 data_type=string
+    - 显式传 null：清除显式指定，回退到自动推断规则
     """
     name: Optional[str] = None
     description: Optional[str] = None
     parent: Optional[str] = None
+    stable_key: Optional[str] = None
+    stable_key_explicit: Optional[bool] = None
     attributes: Optional[list[ObjectAttribute]] = None
     relations: Optional[list[ObjectRelation]] = None
+
+
+class PrimaryKeyMigrationRequest(BaseModel):
+    """V2-03 EP-03-01：存量实例主键元数据迁移必须显式确认，禁止随主键变更静默改写。"""
+
+    confirm: bool = False
 
 
 class OntologyConstraint(BaseModel):

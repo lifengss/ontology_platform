@@ -103,6 +103,7 @@
       "description": "签约客户",
       "business_definition": "已达成交易或潜在交易意向的企业或个人主体（一句话业务边界）",
       "stable_key": "attr_name",
+      "stable_key_explicit": false,
       "namespace": null,
       "parent": null,
       "attributes": [
@@ -134,7 +135,7 @@
 ```
 - `modeling_type` 取值：`manual`(手工) / `reverse`(逆向) / `schema`(Schema 约束) / `hybrid`(混合)。
 - `business_definition`：必填，一句话说明该对象在业务中代表什么、边界在哪（≥5 字符）。
-- `stable_key`：必填，指向本对象的一个属性 id，作为实例写入 Neo4j 时的业务主键；**禁止**使用数据库自增 id。
+- `stable_key`：必填，指向本对象的一个属性 id，作为业务主键；**禁止**使用数据库自增 id。`stable_key_explicit=false`（默认）表示按自动规则推断，`true` 表示用户在对象卡片下拉显式指定（V2-03，见 §19），显式值必须是本对象存在的 **string** 属性，否则 422。
 - `namespace`：可选，部门/域命名空间；MVP 默认继承 project。创建/列表接口支持通过 `?namespace=` 参数切换，本体对象在创建时会默认继承本体的 namespace。
 - `data_type` 取值：`string` / `integer` / `float` / `boolean` / `date` / `datetime`。
 - 属性 `constraints` 约束键（均可选，缺省=无该约束）：
@@ -154,7 +155,9 @@
 | GET | `/api/ontologies` | 本体列表（分页） | query=`page`,`pageSize`,`keyword`(可选),`namespace`(可选，默认继承 project_id) |
 | GET | `/api/ontologies/{id}` | 读取业务层模型 | path=`id` |
 | PUT | `/api/ontologies/{id}` | 更新模型 | body=§2.1（可部分字段） |
-| PATCH | `/api/ontologies/{id}/objects/{object_id}` | 就地更新单个对象（元数据/约束/父类编辑） | body=§2.3 对象补丁（字段全可选，局部更新语义） |
+| PATCH | `/api/ontologies/{id}/objects/{object_id}` | 就地更新单个对象（元数据/约束/父类/**显式业务主键**编辑） | body=§2.3 对象补丁（字段全可选，局部更新语义）；可选 header `If-Match: {updated_at}` 做乐观并发控制 |
+| GET | `/api/ontologies/{id}/objects/{object_id}/primary-key/impact` | 主键变更影响提示（V2-03，§19） | query=`stable_key`(可选，拟设置的新主键) |
+| POST | `/api/ontologies/{id}/objects/{object_id}/primary-key/migrate` | 存量实例主键元数据迁移（须显式确认，§19） | body=`{ "confirm": true }` |
 | DELETE | `/api/ontologies/{id}` | 删除本体 | path=`id` |
 | POST | `/api/ontologies/{id}/validate` | SHACL 一致性校验（VS2 真实校验） | path=`id`；body=`{ "level": "full", "sample_instances": [ { "object_type": "obj_customer", "attr_name": "张三" } ] }`（两者皆可选，不传 sample_instances 则对模型自身做结构+空数据 SHACL） |
 | POST | `/api/ontologies/{id}/export` | 导出 OWL/TTL（标准层） | path=`id`；body=`{ "format": "turtle" }`（默认 turtle） |
@@ -163,10 +166,12 @@
 
 - `POST /api/ontologies` 响应：`data` = 完整模型（带回填 `id`/`created_at`/`updated_at`），HTTP 201。
 - **对象就地更新 `PATCH /api/ontologies/{id}/objects/{object_id}`（§2.3，局部更新语义）**：
-  - 请求体字段全可选：`name` / `description` / `parent` / `attributes` / `relations`；**未传字段保持旧值**（端点回填原值），`parent` **显式传 null** 表示清除父级（变回根对象）。
-  - 更新后整体跑业务层门（父存在/无继承环/stable_key 属本对象属性，与 PUT 同口径），失败返回 422 且**不落库**；通过则重翻译 TTL 落盘。
+  - 请求体字段全可选：`name` / `description` / `parent` / `stable_key` / `stable_key_explicit` / `attributes` / `relations`；**未传字段保持旧值**（端点回填原值），`parent` **显式传 null** 表示清除父级（变回根对象）。
+  - `stable_key` 三态（V2-03）：传字符串=显式指定（自动置 `stable_key_explicit=true`）；显式传 null=回退自动规则；不传=保持旧值。显式值必须是本对象存在的 string 属性，否则 422 `VALIDATION_ERROR` + `details.violations`。
+  - 更新后整体跑业务层门（父存在/无继承环/stable_key 属本对象属性且显式值为 string，与 PUT 同口径），失败返回 422 且**不落库**；通过则重翻译 TTL 落盘。
   - 对象无 `stable_key` 且改出 required string 属性时，自动取第一个此类属性为 stable_key。
-  - 响应 `data` = 更新后的完整本体模型。
+  - 并发：`If-Match` 不等于当前 `updated_at` 或提交时检测到状态已被其它请求更新 → 409 `STALE_ONTOLOGY`，后到者不覆盖最新状态。
+  - 响应 `data` = 更新后的完整本体模型；主键变更时额外含 `data.primary_key_change`（存量实例数/迁移要求/提示，见 §19）。
 
 ### 2.3 对象补丁（PATCH 请求体，字段全可选）
 ```json
@@ -174,11 +179,14 @@
   "name": "车辆",
   "description": "可选",
   "parent": "obj_vehicle",
+  "stable_key": "attr_vin",
+  "stable_key_explicit": true,
   "attributes": [ { "id": "attr_vin", "name": "VIN码", "data_type": "string", "required": true, "constraints": { "min_length": 17, "max_length": 17, "pattern": "^[A-HJ-NPR-Z0-9]{17}$" } } ],
   "relations": []
 }
 ```
 - `parent` 三态：不传=保持旧父级；`null`=清除父级；对象 id=改挂新父级（随后整体业务门校验）。
+- `stable_key` 三态见上文；`stable_key_explicit` 通常由端点按是否传入 `stable_key` 自动判定，可省略。
 - `attributes` / `relations` 一旦传入即为**整体替换**（非按 id 合并），约束键见 §2.1。
 - **创建前轻量校验门（P-01/P-03）**：`POST /api/ontologies` 在翻译为 OWL **之前**先跑业务层门（id 唯一、父级无环、data_type/基数合法、枚举定义合法、属性/关系名禁用敏感词如 `password/secret/token`），不通过返回 `VALIDATION_ERROR`（HTTP 422，`error.details.violations` 同结构）；通过才进入翻译 + Jena + SHACL，省一次推理调用。
 - `POST /api/ontologies/{id}/validate` 响应（VS2：业务层门 + pyshacl 真实 SHACL 校验；violations 含 `focus_node` 指向违规实例节点）：
@@ -219,7 +227,7 @@
 ```
 - `status`：`pending`(待审核) / `approved`(已通过) / `rejected`(已拒绝) / `imported`(已落库)。
 - 实例 `_source` 为结构化 `instance_source`：`{ kind, connection_id, fetched_at, raw_ref }`。`kind` 取值 `internal|doc|external_mcp|field_map|llm`。
-- 实例写入 Neo4j 时按 `stable_uri = urn:ontology:{project}:{object_type}:{stable_key_value}` 生成稳定主键节点；关系字段按 `relation.id` 作为属性键、目标业务主键值作为属性值，物化为 Neo4j 边。
+- 实例**本地入库**（`InstanceStore`，V2-03 §19）按 `(ontology_id, object_type, stable_key, stable_key_value)` 匹配去重：同主键命中即更新既有实例并保留原 `id`，批次内重复同样收敛；命中信息写入实例记录元数据 `stable_key` / `stable_key_value`。Neo4j 同步节点仍以 `node_id`（实例 id）为 `MERGE` 键（历史文案 `stable_uri = urn:...` 为设计稿口径，当前实现未采用）；关系字段按 `relation.id` 作为属性键、目标业务主键值作为属性值，物化为 Neo4j 边。
 
 ### 3.2 端点
 | 方法 | 路径 | 说明 |
@@ -578,6 +586,7 @@
 - 用户友好建模/逆向生成见 §14。
 - 待增强：Fuseki 远程推理开关、SHACL 在 Jena 侧执行、MCP stdio transport 完整 JSON-RPC。
 - Action 回写健壮性（指数退避重试 + 按端点熔断）已完成（2026-10-23，见 §6.2 与 TASK_CHECKPOINT §19；`test_action_resilience.py` 7/7）。
+- V2 切片进展：**VS2-00 ✅**、**M1-A（§17 字典/联邦查询）✅**、**M1-B（§18 能力层/公式引擎）✅**、**M1-C（§19 显式业务主键）✅**（均为 2026-11-09~10 交付，验收脚本见各章节）。
 
 ## 16. 项目管理（projects）
 
@@ -723,3 +732,55 @@
 ### 18.5 验收
 
 `scripts/verify_m1b_capabilities.py`（`--no-mcp` 跳过 SSE 段）：2297 实例 + 33 行 golden，L1 87 项容差 1e-9 零差异；REST/MCP 同口径；PASS=50/FAIL=0/SKIP=1（TP-04-06 源连接型渠道按偏差决策 D2 挂 M4-A）。
+
+---
+
+## 19. 显式业务主键（V2-03 / M1-C）
+
+对象卡片的「业务主键」下拉（选项 = 本对象 string 属性）可覆盖自动推断规则；后端持久化、校验、入库去重与变更影响治理形成闭环。前端建模页入口 `data-tab="modeling"` → `#objectForms` → `.pk-select`，自动规则说明 `.pk-rule` 保留。
+
+### 19.1 模型与校验
+
+| 项 | 语义 |
+|---|---|
+| `stable_key` | 业务主键属性 id；禁止内部自增 id |
+| `stable_key_explicit` | `false`（默认）= 自动推断（第一个 required string → 第一个 string → 第一个属性）；`true` = 用户显式指定 |
+| PATCH 传字符串 | 置 `stable_key_explicit=true`；必须是本对象**存在且 data_type=string** 的属性 |
+| PATCH 传 null | 清除显式指定，回退自动推断 |
+| PATCH 不传 | 保持旧值与旧标记（局部更新语义，兼容既有 PATCH 调用） |
+| 非法值 | 422 `VALIDATION_ERROR` + `error.details.violations[]`（悬空属性 / 非 string 属性分别提示原因），**不落库** |
+
+自动推断的历史模板（非 string 主键）仍按原口径可用；加严只作用于 `stable_key_explicit=true` 的对象，避免存量模型被误伤。
+
+### 19.2 端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| PATCH | `/api/ontologies/{id}/objects/{object_id}` | 显式指定/清除主键；主键变更时 `data.primary_key_change` 附影响提示 |
+| GET | `/api/ontologies/{id}/objects/{object_id}/primary-key/impact` | 影响提示；`?stable_key=` 可预览拟设置值 |
+| POST | `/api/ontologies/{id}/objects/{object_id}/primary-key/migrate` | 存量实例主键元数据迁移，body 必须 `{ "confirm": true }` |
+
+`primary_key_change` / impact 响应结构：
+`{ object_id, previous_stable_key, current_stable_key, existing_instances, legacy_instances, migration_required, hint }`。
+
+### 19.3 入库匹配 / 去重（TP-03-04）
+
+候选批准落库时，按对象**当前**主键取 `key_value = instance[stable_key]`，写入实例记录元数据 `stable_key` / `stable_key_value`；命中条件 = `(ontology_id, object_type, stable_key, stable_key_value)` 全等（主键值按字符串归一化）。
+
+- 命中 → `update` 既有实例：**保留原 id**、合并 `instance` 字段、刷新 `candidate_id/imported_at/tx_id`，不追加记录。
+- 未命中 → `insert` 新记录；同批次内重复主键同样收敛（顺序写入时第二条命中第一条）。
+- 主键值为空或对象无主键 → 正常插入，不产生键断裂。
+- 无该元数据的历史存量实例**不参与匹配、不被静默改写**。
+- 批准响应 `data` 额外含 `inserted` / `dedup_updated` / `stable_key`，便于核对去重效果。
+
+### 19.4 变更影响与显式迁移（EP-03-01）
+
+主键变更时返回影响提示：已有实例数、需迁移的存量数、`migration_required` 与文案；**存量实例 stable_key 不随变更自动改写**（不产生键断裂），新入库实例按新键生效。迁移默认一律 422 `MIGRATION_NOT_CONFIRMED`；`confirm=true` 后只补写实例记录的 `stable_key` / `stable_key_value` / `key_migrated_at` 元数据，不改 `instance` 内容，且缺失新主键值的实例跳过（返回 `updated` / `skipped`）。
+
+### 19.5 并发（EP-03-02）
+
+`JsonStore` 按文件路径共享锁（跨实例），`update_if_unchanged` 在锁内完成 read+compare+write；PATCH 支持 `If-Match: {updated_at}` 乐观头。两个并发请求基于同一旧状态时，先到者 200、后到者 409 `STALE_ONTOLOGY`，最终状态等于成功请求的值，无脏写。临时写文件使用唯一后缀，避免 Windows 同名 `.tmp` 的 `WinError 32`。
+
+### 19.6 验收
+
+`scripts/verify_m1c_primary_key.py`（`--no-ui` 跳过真实 Chromium DOM 段）：真实浏览器校验下拉选项/显式标记/徽标/保存载荷 + REST 全链路（422、PUT/PATCH/null 回退、去重、影响提示、迁移确认、并发 409）；**PASS=33/FAIL=0**。L5 回归 93/93，M1-A 75/75、M1-B 50/50 回归全绿。

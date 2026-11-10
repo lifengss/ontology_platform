@@ -400,6 +400,16 @@ def validate_business_layer(ontology: dict[str, Any]) -> list[dict[str, Any]]:
                 "path": f"{oid}/stable_key",
                 "message": f"stable_key '{stable_key}' 必须是本对象的一个属性 id",
             })
+        elif o.get("stable_key_explicit"):
+            # V2-03 TC-03-03：显式指定值必须是本对象的 string 属性（自动推断的历史模板不受影响）
+            dt = next((a.get("data_type", "string") for a in o.get("attributes", [])
+                       if a["id"] == stable_key), "string")
+            if dt != "string":
+                errors.append({
+                    "severity": "error",
+                    "path": f"{oid}/stable_key",
+                    "message": f"显式业务主键 '{stable_key}' 必须是 string 属性（当前 data_type={dt}），请改选一个字符串属性",
+                })
 
         rel_ids: set[str] = set()
         for rel in o.get("relations", []):

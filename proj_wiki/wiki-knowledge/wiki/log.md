@@ -7,6 +7,14 @@ updated: 2026-11-10
 
 # 操作日志
 
+## [2026-11-10] feat | M1-C（V2-03 显式指定业务主键）交付：验收 33/33，L5 回归 93/93，M1-A/M1-B 回归全绿
+- 后端：`schemas/ontology.py` 增加 `stable_key_explicit`（自动推断 vs 显式指定）与 `PrimaryKeyMigrationRequest`；`modeling_translator.validate_business_layer` O-01 对**显式**主键强制 string 类型（自动推断的历史模板不受影响，避免存量误伤）；`router_ontologies` PATCH 三态（字符串显式 / null 回退自动 / 不传保持旧值）、`GET primary-key/impact` 影响提示、`POST primary-key/migrate`（必须 `confirm=true`，只补元数据、缺失新主键值的实例跳过）、PUT 主键变更亦返回 `data.primary_key_change`；`If-Match` + `JsonStore.update_if_unchanged` 乐观锁（409 STALE_ONTOLOGY）。
+- 入库：`router_ingest._approve_one` 按 `(ontology_id, object_type, stable_key, stable_key_value)` 匹配去重，命中则更新既有实例并保留原 id、合并字段，批次内重复同样收敛；实例记录新增 `stable_key`/`stable_key_value` 元数据；**无元数据的存量实例不参与匹配、不被静默改写**。
+- 前端：对象卡片只读回显改为 `.pk-select` 下拉（选项仅本对象 string 属性），实时徽标/提示/显式标记；自动规则说明 `.pk-rule` 保留；`collectFormOntology()` 提交 `stable_key`/`stable_key_explicit`；编辑回显显式值；保存后对主键变更 toast 影响提示。
+- **本轮修复的真实问题**：① `JsonStore` 实例级 RLock 不跨请求实例，并发两个 PATCH 写同名 `ontologies.json.tmp` → Windows `WinError 32`；改为**按文件路径共享锁** + 每次写唯一临时后缀 + 初始化建空文件在锁内，`update_if_unchanged` 的 read+compare+write 在同一锁内原子。② 验收脚本浏览器段元素被隐藏导致 `select_option` 超时 → 递归解除祖先隐藏后真实交互。③ `docs/API-INTERFACE-DOC.md` §3.1 历史 `stable_uri` 描述与实际 Neo4j `node_id`/本地主键去重实现不一致 → 更正。
+- 验收 `scripts/verify_m1c_primary_key.py`：**PASS=33/FAIL=0**（真实 Chromium DOM 校验下拉/显式标记/徽标/保存载荷；REST 全链路 422、PUT/PATCH/null 回退、按主键去重、影响提示、迁移确认、并发 409）；L5 `backend/tests` **93/93**；M1-A **75/75**、M1-B **50/50**（SKIP=1）回归全绿；`node --check` / `compileall` / lint 0。
+- 登记：`docs/API-INTERFACE-DOC.md` §19（＋§2.1/§2.2/§2.3/§3.1/§15 同步）、`docs/V2-开发里程碑.md` M1-C ✅、[[source-V2-测试用例]]、[[V2开发里程碑]]、[[index]]、`TASK_CHECKPOINT.md` §25。
+
 ## [2026-11-10] feat | M1-B（V2-04 能力层＋公式引擎首片）交付：验收 50/50，L5 回归 93/93，M1-A 回归 75/75
 - 后端：`backend/capabilities/`（opl-expr/v1 词法/AST/定义期校验/白名单求值＋null 传播＋TraceCollector；CapabilityService 注册表 CRUD/版本化/引用治理/删除保护/单实例与批量执行/写回与四要素溯源）；`api/router_capabilities.py`（11 端点统一信封）；`schemas/capability.py`；`mcp_server` 注册 `capability_call`（6 工具，仅 active，draft 403）；前端「能力」页（列表/公式编辑/校验/发布/版本历史/依赖/单实例与批量执行＋trace 展示）。
 - 口径：六成本公式 E/K/N/O/S＋D 全部经 `lookup()` 从 2297 实例基线取值，33 产品行维度仅从成本清单「区域/服务期限/类型」推导注入，不窥答案列；L1（VERIFIED）87 项容差 1e-9 零差异，L2（MOCK）8 行按区域口径出数，golden "—" 项返回 null 不当 0。

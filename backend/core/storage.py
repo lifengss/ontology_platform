@@ -22,17 +22,31 @@ from config import get_settings
 
 
 class JsonStore:
-    """按集合名存一组记录（list[dict]）到 data_dir/projects/<project_id>/<collection>.json。"""
+    """按集合名存一组记录（list[dict]）到 data_dir/projects/<project_id>/<collection>.json。
+
+    锁按文件路径共享（而非每实例一把）：同一集合在并发请求中会创建多个 JsonStore
+    实例，实例级 RLock 无法保护跨实例的 read-modify-write（V2-03 并发主键变更场景）。
+    """
+
+    _locks_guard = threading.Lock()
+    _locks: dict[str, threading.RLock] = {}
+
+    @classmethod
+    def _path_lock(cls, path: pathlib.Path) -> threading.RLock:
+        key = str(path)
+        with cls._locks_guard:
+            return cls._locks.setdefault(key, threading.RLock())
 
     def __init__(self, collection: str, project_id: str | None = None) -> None:
         self._settings = get_settings()
         self._project_id = project_id or "default"
         self._dir = self._project_dir(self._settings.data_dir, self._project_id)
         self._path = self._dir / f"{collection}.json"
-        self._lock = threading.RLock()
+        self._lock = self._path_lock(self._path)
         self._dir.mkdir(parents=True, exist_ok=True)
-        if not self._path.exists():
-            self._write([])
+        with self._lock:
+            if not self._path.exists():
+                self._write([])
 
     @staticmethod
     def _project_dir(base: str, project_id: str) -> pathlib.Path:
@@ -47,10 +61,18 @@ class JsonStore:
 
     def _write(self, records: list[dict[str, Any]]) -> None:
         with self._lock:
-            tmp = str(self._path) + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(records, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, self._path)
+            # 每次写独立临时文件：并发/异常残留时不会互相踩同一 .tmp（Windows WinError 32）
+            tmp = f"{self._path}.{uuid.uuid4().hex}.tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(records, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, self._path)
+            finally:
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except OSError:
+                    pass
 
     def all(self) -> list[dict[str, Any]]:
         return self._read()
@@ -76,6 +98,25 @@ class JsonStore:
                 records[i] = r
                 self._write(records)
                 return r
+        return None
+
+    def update_if_unchanged(self, record_id: str, expected_updated_at: Any,
+                            patch: dict[str, Any]) -> dict[str, Any] | None:
+        """乐观锁更新（V2-03 EP-03-02）：仅当记录 updated_at 与请求开始时一致才写入。
+
+        read+compare+write 在同一把锁内完成，避免两个并发 PATCH 各自基于旧状态相互覆盖；
+        返回 None 表示记录不存在或已被其它请求更新（由调用方转 409/404）。
+        """
+        with self._lock:
+            records = self._read()
+            for i, r in enumerate(records):
+                if r.get("id") == record_id:
+                    if r.get("updated_at") != expected_updated_at:
+                        return None
+                    r.update({k: v for k, v in patch.items() if k != "id"})
+                    records[i] = r
+                    self._write(records)
+                    return r
         return None
 
     def delete(self, record_id: str) -> bool:

@@ -542,4 +542,39 @@
 2. TP-04-06 / EP-04-03 源连接型渠道（批量联邦读＋成本提示＋派生图"派生数据非权威"＋fetched_at 溯源）按 D2 随 **M4-A** 交付（依赖 V2-02 实例数据模型）。
 3. 后续冻结项：golden dataset＋四类指标阈值（M3-F 前）、性能基线目标值（各基准用例前）、M4 前 D3 存量迁移方案单独评审。
 4. 用户级 wiki：本轮未定位到跨会话用户级 wiki 目录（checkpoint §22/§23 提及的 raw 快照路径），本轮仅同步项目内 wiki；下次会话若提供路径再补登记。
-5. 每切片脚本继续在 wiki `source-V2-测试用例` 登记区登记；每次交互结束追加本文件 checkpoint。。
+5. 每切片脚本继续在 wiki `source-V2-测试用例` 登记区登记；每次交互结束追加本文件 checkpoint。
+
+---
+
+## 25. 2026-11-10：M1-C（V2-03 显式指定业务主键）切片交付（验收 33/33；L5 回归 93/93）
+
+> 本次交互用户指示「继续下一步」，按里程碑顺序启动 M1-C（M1-A/M1-B 已完成），完成后 M1 仅剩 M1-E 退出。
+
+### 25.1 交付
+- **后端**：`schemas/ontology.py` 增加 `stable_key_explicit`（自动推断 vs 显式指定）与 `PrimaryKeyMigrationRequest`；`modeling_translator.validate_business_layer` O-01 对**显式**主键强制 `data_type=string`（自动推断的历史模板不受影响，避免存量误伤）；`router_ontologies.py` PATCH 三态（字符串=显式 / null=回退自动 / 不传=保持旧值）＋ 422 `details.violations`，PUT 全量携带显式主键，`GET primary-key/impact` 影响提示端点，`POST primary-key/migrate`（`confirm=true` 才执行，只补元数据、缺新主键值的实例跳过），PUT/PATCH 主键变更均返回 `data.primary_key_change`；`If-Match` 头 + `JsonStore.update_if_unchanged` 乐观锁（409 `STALE_ONTOLOGY`）。
+- **入库去重**：`router_ingest._approve_one` 按 `(ontology_id, object_type, stable_key, stable_key_value)` 匹配（主键值字符串归一化），命中则 `update` 既有实例（保留原 id、合并 instance、刷新候选元数据）而非追加；批次内重复同样收敛；实例记录写入 `stable_key`/`stable_key_value` 元数据；批准响应新增 `inserted`/`dedup_updated`/`stable_key`。**无该元数据的存量实例不参与匹配、不被静默改写**。
+- **前端**：`frontend/app.js` 对象卡片只读主键回显改为 `.pk-select` 下拉（选项仅本对象 string 属性），`updatePkBadges()` 动态构建选项并同步 🔑 徽标/提示/「自动推断｜显式指定」标记；自动规则说明 `.pk-rule` 保留；`syncFormObjectsFromDOM()`/`collectFormOntology()`/`editListOntology()` 贯通保存与回显；`saveOntology()` 保存后对 `primary_key_change` toast 影响提示。
+- **验收脚本** `scripts/verify_m1c_primary_key.py`：FastAPI TestClient + 真实 Playwright Chromium DOM + 并发线程；临时 DATA_DIR 隔离（`tempfile.mkdtemp`），仓库 `data/` 无残留。
+
+### 25.2 本轮修复的真实问题
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | `JsonStore` 每实例一把 RLock，并发两个 PATCH 各建实例、写同名 `ontologies.json.tmp` → Windows `WinError 32`，且 read-modify-write 跨实例不原子 | 按**文件路径共享锁**（类级 `_locks`）、`update_if_unchanged` 在共享锁内原子 compare+write；`_write` 用唯一临时后缀；初始化建空文件也在锁内 |
+| 2 | 验收脚本浏览器段 `#objectForms` 被建模页/编辑器隐藏 → `page.select_option` 超时 | 递归解除元素祖先的 `hidden`/`display` 后再真实交互 |
+| 3 | `docs/API-INTERFACE-DOC.md` §3.1 声称 Neo4j 按 `stable_uri` 生成节点，与实现（`MERGE node_id` + 本地主键去重）不一致 | 更正为本地去重口径，并标注 `stable_uri` 为历史设计稿 |
+| 4 | 影响提示断言写成 `"不静默改写"`，实际文案为「不随本次变更静默改写」 | 修正断言为「静默改写 + primary-key/migrate」双条件（仅测试脚本，非产品缺陷） |
+
+### 25.3 验证结果（全绿）
+- `python scripts/verify_m1c_primary_key.py`：**PASS=33 / FAIL=0 / SKIP=0**。覆盖 TP-03-01（真实浏览器下拉选项仅 string 属性、显式标记/徽标/保存载荷）、TP-03-02（PATCH/PUT/null 回退/不传保持）、TP-03-03（悬空/非 string 422 且不落库、创建路径同口径）、TP-03-04（跨批次与批内去重、切换主键后按新键匹配）、TCE-03-01（影响提示、存量不静默改写、未确认迁移 422、确认后跳过缺值实例）、TCE-03-02（并发 200+409、最终状态=成功请求值、旧 If-Match 重试仍拒绝）。
+- L5 `backend/tests` **93 passed / 0 failed**（98s）；M1-A `verify_m1a_dictionary.py` **75/75**；M1-B `verify_m1b_capabilities.py` **50/50 / SKIP=1**；`node --check frontend/app.js`、`python -m compileall`、lint 均 0 错误。
+
+### 25.4 当前进展
+- **M1-A ✅、M1-B ✅、M1-C ✅**；M1 退出标准仅剩 M1-E（TCE2E-01 全链 + L5 + M1 新增用例全绿）。
+- 文档/登记：`docs/API-INTERFACE-DOC.md` §19（＋§2.1/§2.2/§2.3/§3.1/§15 同步）、`docs/V2-开发里程碑.md` M1-C ✅、项目 wiki（`V2开发里程碑`/`source-V2-测试用例`/`log`/`index`）、本 checkpoint。
+- 无临时文件需清理（脚本使用系统临时目录）；改动已随本轮 git 提交（提交号见 `git log -1`）。
+
+### 25.5 未完成 / 下一步
+1. **M1-E（里程碑退出）**：TCE2E-01 全链（term_lookup→公式求提前期→带溯源回答）＋ MVP L5 全量回归 ＋ M1 新增用例全绿；启动需用户明确指示。
+2. TP-04-06 / EP-04-03 源连接型渠道按偏差决策 D2 随 **M4-A** 交付（依赖 V2-02 实例数据模型）。
+3. 用户级跨会话 wiki 目录仍未定位（同 §24.5 第 4 条），本轮仅同步项目内 wiki。
+4. 每切片脚本继续在 wiki `source-V2-测试用例` 登记区登记；每次交互结束追加本文件 checkpoint。。
