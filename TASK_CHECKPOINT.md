@@ -578,3 +578,39 @@
 2. TP-04-06 / EP-04-03 源连接型渠道按偏差决策 D2 随 **M4-A** 交付（依赖 V2-02 实例数据模型）。
 3. 用户级跨会话 wiki 目录仍未定位（同 §24.5 第 4 条），本轮仅同步项目内 wiki。
 4. 每切片脚本继续在 wiki `source-V2-测试用例` 登记区登记；每次交互结束追加本文件 checkpoint。。
+
+---
+
+## 26. 2026-11-10：M1-E（TCE2E-01 全链 / M1 里程碑退出）交付（验收 26/26；L5 回归 93/93）
+
+> 本次交互用户指示「可以进行下一步」，按里程碑顺序启动 M1-E（M1-A/B/C 已完成），完成后 **M1 退出标准达成**。
+
+### 26.1 交付
+- **分工边界（INV-3）**：《V2-功能需求描述》附录 E2E 流规定外部 AI 平台（Agent）负责提问解析、工具编排与带溯源回答组装；平台只做工具提供方。因此**不新增** `/api/ask|qa|chat|answer` 编排端点，MCP 工具清单保持 6 个（无回答类工具）；`scripts/verify_m1e_e2e.py` 内的 `compose_answer()` 扮演外部 Agent，平台侧零运行时 LLM 决策。
+- **后端**：`schemas/capability.py` 的 `CapabilityExecute` 新增 `inputs: Optional[dict[str, Any]]`；`api/router_capabilities.py` execute 透传 `inputs=payload.inputs`；`mcp_server.capability_call` 新增 `inputs` 并在 TOOLS_CONTRACT 标注「联邦读临时输入，不落库」；`capabilities/__init__.py` 的 `execute(..., inputs=None)` 把覆盖值与本地实例字段合并为 `effective`，仅用于本次求值，写回仍基于原始实例；响应与 `__capability__` 元数据新增 `input_overrides`（覆盖属性原值）、`data_gaps`（null 键显式标注）、`input_source`、`inputs_persisted=false`。
+- **全链**：MCP SSE `term_lookup(term="PN码", value=...)` → `resolution`/`systems`/`merged[].fields.sources`/`present_in`/`uncovered` → 外部 Agent 取 `pn`/`stock_qty`/`stock_level` 组装 `inputs` → `capability_call(capability="cap_spare_lead_time", inputs=..., dry_run=true)` → 提前期天数＋四要素溯源（能力版本/输入实例/`trace.inputs`/`trace.lookups` 命中编码与原值）→ Agent 组装 `answer + citations[]`；事后经字典审计与能力版本历史核查口径。
+- **提前期能力**：`cap_spare_lead_time`（derive/expression，active v1.0.0）＝库存判断（现货出库天数 / 现货＋在途不足则采购＋运输天数）＋ `if(stock == null, null, ...)` null 显式守卫；`lookup('obj_spare_lead_time_baseline', {'attr_pn': this.pn}, attr_*)` 取上传型基线并写入 trace。三系统异构字段由 V2-01 field_map 收敛。
+- **降级（EP-E2E-01 / TCEE-01）**：水库系统注入 503 时 `term_lookup` 仍 `ok`，`per_system["conn-rsr"]` 显式 error、其余两系统保留；Agent 传 `stock_qty=null` → `value=null` + `data_gaps=["stock_qty"]`，回答显式说明缺失系统与数据缺口，不给出错误提前期、不用其它数值替代。
+- **验收脚本** `scripts/verify_m1e_e2e.py`：临时 DATA_DIR（系统临时目录，仓库 `data/` 无残留）＋3 mock＋字典/field_map＋6 成本公式＋提前期能力＋最小本体＋MCP 发布/token＋真实 MCP SSE `ClientSession`；REST 同口径、审计/版本核查、INV-3 负向断言。
+
+### 26.2 本轮修复的真实问题
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | 首轮 MCP `term_lookup` 三系统全部 401（验收脚本用了不存在的 mock token `tok-e2e`） | 改用 mock 默认全量 token `tok-full`；`systems` 断言容错避免 KeyError |
+| 2 | 降级演练注入 `delay_ms=2000` 时关闭阶段抛 `ConnectionAbortedError WinError 10053` 噪声 | 降级改为立即失败注入 `fail_rate=1.0, error_status=503` 并随后 `fail_rate=0.0` 恢复；删除 `data/tmp_m1e_run.log`，复跑无异常 |
+| 3 | 回归 `verify_m1c_primary_key.py` 时 Playwright 段因外部 CDN 阻塞 `Page.goto/wait_for_function` 超时，出现假 SKIP | 拦截所有外部 `http/https` 请求（本地 `file://` 继续），`domcontentloaded`＋等待全局函数；复跑 PASS=33/SKIP=0 |
+
+### 26.3 验证结果（全绿）
+- `python scripts/verify_m1e_e2e.py`：**PASS=26 / FAIL=0 / SKIP=0**。
+- M1 退出回归：L5 `backend/tests` **93 passed / 0 failed**（含 MVP 34 项基线）；M1-A `verify_m1a_dictionary.py` **75/75**；M1-B `verify_m1b_capabilities.py` **50/50 / SKIP=1**（SKIP=TP-04-06/EP-04-03 按 D2 挂 M4-A）；M1-C `verify_m1c_primary_key.py` **33/33**。
+
+### 26.4 当前进展
+- **VS2-00 ✅、M1-A ✅、M1-B ✅、M1-C ✅、M1-E ✅** → **M1（价值闭环）里程碑退出标准达成**（三需求 P0 全绿 + TCE2E-01 + L5）。
+- 文档/登记：`docs/API-INTERFACE-DOC.md` §20（＋§11.2/§11.4/§15/§18 同步）、`docs/V2-开发里程碑.md` M1-E ✅、项目 wiki（`V2开发里程碑`/`source-V2-测试用例`/`log`/`index`）、本 checkpoint。
+- 临时文件：M1-E 脚本使用系统临时目录，仓库 `data/` 无残留；`cost_baseline_kit/`、`hotfix/`、`docs/备份/`、`docs/成本硬基准-实体映射与算法.md` 为用户侧未跟踪内容，**不纳入本轮提交**。
+
+### 26.5 未完成 / 下一步
+1. **M2-A（V2-05 登录鉴权＋RBAC）**：M1 已退出，但按约定「未获用户明确指示不开始开发任务」，启动需用户明确指示；本轮不启动。
+2. TP-04-06 / EP-04-03 源连接型渠道（批量联邦读＋派生图＋fetched_at 溯源）按偏差决策 D2 随 **M4-A** 交付（依赖 V2-02 实例数据模型）。
+3. 用户级跨会话 wiki **已定位**：`C:\Users\lif_lc\.workbuddy\wiki-knowledge`（结构见 WIKI-SCHEMA.md），本轮起补登记 raw 快照与项目详情页；§24.5/§25.5 中「目录未定位」的记录至此关闭。
+4. 每切片脚本继续在 wiki `source-V2-测试用例` 登记区登记；每次交互结束追加本文件 checkpoint。

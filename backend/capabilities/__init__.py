@@ -534,7 +534,8 @@ class CapabilityService:
 
     def execute(self, cap_id: str, instance_id: str, channel: str = "api",
                 trigger_source: str = "manual", mcp_only: bool = False,
-                dry_run: bool = False) -> dict[str, Any]:
+                dry_run: bool = False,
+                inputs: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         rec = self._store.get(cap_id)
         if not rec:
             raise CapabilityApiError("NOT_FOUND", "能力不存在", 404)
@@ -549,7 +550,19 @@ class CapabilityService:
             raise CapabilityApiError("TYPE_MISMATCH",
                                      f"实例对象类型 {inst_record.get('object_type')} 与能力目标 {rec.get('object_type')} 不符",
                                      422)
-        res = self._execute_one(rec, inst_record, channel, {})
+        # M1-E / TCE2E-01：联邦读结果只作为本次计算的临时输入覆盖（不落地为实例内容），
+        # 写回仍基于原始 inst_record，只写 output_attribute 与 __capability__ 元数据。
+        effective = inst_record
+        if inputs is not None:
+            merged_instance = dict(inst_record.get("instance") or {})
+            merged_instance.update(inputs)
+            effective = {**inst_record, "instance": merged_instance}
+        res = self._execute_one(rec, effective, channel, {})
+        if inputs is not None:
+            res["input_overrides"] = {k: v for k, v in inputs.items()}
+            res["data_gaps"] = sorted(k for k, v in inputs.items() if v is None)
+            res["input_source"] = "federated_read_override"
+            res["inputs_persisted"] = False
         if not dry_run:
             self._write_back(rec, inst_record, res, channel, trigger_source)
         else:
@@ -643,5 +656,8 @@ class CapabilityService:
             "error_code": res.get("error_code"),
             "error_message": res.get("error_message"),
             "trace": res.get("trace"),
+            "input_overrides": res.get("input_overrides"),
+            "data_gaps": res.get("data_gaps"),
+            "inputs_persisted": res.get("inputs_persisted", False),
         }
         self._instances.update(inst_record.get("id"), {"instance": instance})

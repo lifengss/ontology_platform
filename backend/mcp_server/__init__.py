@@ -96,10 +96,11 @@ TOOLS_CONTRACT = {
         "postconditions": ["查询审计已留痕（term_lookup_audit）"], "side_effect": False,
     },
     "capability_call": {
-        "reads": ["能力注册表", "实例ABox"],
-        "writes": ["实例ABox（output_attribute + __capability__ 元数据，dry_run 时不写）"],
+        "reads": ["能力注册表", "实例ABox", "联邦读临时输入 inputs（仅本次计算，不落库）"],
+        "writes": ["实例ABox（output_attribute + __capability__ 元数据，dry_run 时不写；inputs 不写入）"],
         "preconditions": ["能力已发布(active)；实例存在且对象类型与能力目标一致"],
-        "postconditions": ["返回四要素溯源（能力版本+输入实例+lookup命中原始值+计算值）"],
+        "postconditions": ["返回四要素溯源（能力版本+输入实例+lookup命中原始值+计算值）",
+                           "inputs 覆盖值/数据缺口显式标注（input_overrides/data_gaps/inputs_persisted=false）"],
         "side_effect": True,
     },
 }
@@ -818,13 +819,17 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
         return json.dumps(res, ensure_ascii=False)
 
     @m.tool()
-    def capability_call(capability: str, instance_id: str = "", dry_run: bool = False) -> str:
+    def capability_call(capability: str, instance_id: str = "", dry_run: bool = False,
+                        inputs: dict | None = None) -> str:
         """执行已发布(active)能力（M1-B / V2-04 首片，派生型 expression 实现）。
         结果含四要素溯源：能力版本 + 输入实例 + lookup 命中（record_id/编码/原始值）+ 计算值。
 
         capability 能力 name 或 id；留空则返回本项目已发布能力清单（供先枚举再执行）。
         instance_id 目标实例 record_id（能力 object_type 下的实例）；
         dry_run=true 不写回实例（试算）。
+        inputs（M1-E / TCE2E-01）：本次联邦读结果（如 term_lookup 合并出的库存量/PN/需求量）
+        作为临时输入覆盖，仅参与本次计算、**不落库为实例内容**；返回 input_overrides /
+        data_gaps / inputs_persisted=false 供外部 Agent 组装带溯源回答。
         仅 active 能力可经 MCP 执行，draft 返回 FORBIDDEN_DRAFT 错误。
         """
         from capabilities import CapabilityApiError, CapabilityService
@@ -848,7 +853,8 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
             raise _err(ERR_NOT_FOUND, f"能力不存在: {name_or_id}")
         try:
             res = svc.execute(rec["id"], instance_id, channel="mcp",
-                              trigger_source="mcp", mcp_only=True, dry_run=dry_run)
+                              trigger_source="mcp", mcp_only=True, dry_run=dry_run,
+                              inputs=inputs)
         except CapabilityApiError as e:
             raise _err(ERR_CAPABILITY_FAILED,
                        f"{e.code}: {e.message} (http_status={e.http_status})")

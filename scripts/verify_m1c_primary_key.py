@@ -141,8 +141,12 @@ def ui_contract(no_ui: bool) -> None:
             with sync_playwright() as p:
                 b = p.chromium.launch(headless=True)
                 page = b.new_page()
+                # 页面通过 CDN 加载样式，离线/网络抖动会阻塞 DOM 解析；
+                # 拦截一切外部请求（本地 file:// 继续），保证 DOM 与本地 app.js 稳定就绪
+                page.route("**/*", lambda r: r.abort() if r.request.url.startswith(("http://", "https://"))
+                           else r.continue_())
                 page.goto("file:///" + index.replace("\\", "/"), wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_function("typeof renderObjectForms === 'function'", timeout=10000)
+                page.wait_for_function("typeof renderObjectForms === 'function'", timeout=15000)
                 page.evaluate("""() => {
                   // 建模页/编辑器默认隐藏，逐个祖先解除隐藏以便真实 select_option 交互
                   let el = document.getElementById('objectForms');

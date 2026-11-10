@@ -489,7 +489,7 @@
 | `instance_get` | `{ "ontology_id": "本体名称或 uuid", "object_type": "obj_x（可选）", "instance_id": "（可选）", "limit": 50, "offset": 0, "fields": "attr1,attr2"（可选，逗号分隔字符串或数组） }` | 实例读取（P1-4）：**limit 默认 50/上限 200**、offset 翻页、fields 属性白名单投影（**字符串优先**，与 stdio bridge 一致；数组仍兼容）；返回 `{ ontology_id, total, offset, limit, has_more, count, instances }`，截断且未过滤时附 `hint` |
 | `action_invoke`(VS8) | `{ "action_id": "uuid", "confirmation_token": "uuid" }` | 确认执行 Action（**side_effect=true**；令牌须先经 `POST /api/actions/{id}/execute` 获取） |
 | `term_lookup`(M1-A) | `{ "term": "词条/同义词", "value": "键值（可选）", "dry_run": false, "confirm_cost": false }` | 数据字典解析＋多系统联邦并行查询（来源标记/未覆盖显式/冲突并存）；`dry_run=true` 仅返回成本预估、确认前零外呼 |
-| `capability_call`(M1-B) | `{ "capability": "能力 name 或 id", "instance_id": "record_id", "dry_run": false }` | 执行**已发布(active)**能力并返回四要素溯源（能力版本＋输入实例＋输入属性原值＋lookup 命中 record_id/编码/原始值）；`capability` 留空返回已发布能力清单；`dry_run=true` 不写回；draft 调用 `FORBIDDEN_DRAFT`(403) |
+| `capability_call`(M1-B) | `{ "capability": "能力 name 或 id", "instance_id": "record_id", "dry_run": false, "inputs": {...} }` | 执行**已发布(active)**能力并返回四要素溯源（能力版本＋输入实例＋输入属性原值＋lookup 命中 record_id/编码/原始值）；`inputs`（M1-E）接收联邦读结果为临时输入覆盖，**不落库**，返回 `input_overrides/data_gaps/inputs_persisted=false`；`capability` 留空返回已发布能力清单；`dry_run=true` 不写回；draft 调用 `FORBIDDEN_DRAFT`(403) |
 
 > MCP 工具的输入/输出 schema 由本体自动生成，不在此 REST 文档约束范围内，但须与 `mcp_server` 模块实现一致。
 
@@ -528,7 +528,7 @@
 | `instance_get` | 实例ABox | — | false | 实例存在 |
 | `action_invoke`(VS8) | Action定义, 目标外部系统 | 外部系统, 本地执行日志 | **true** | Action 已定义 + 已人工确认 |
 | `term_lookup`(M1-A) | 数据字典, 外部系统（并行只读） | — | false | 字典存在可用词条 |
-| `capability_call`(M1-B) | 能力注册表, 实例ABox | 实例ABox（output_attribute + `__capability__` 元数据，dry_run 不写） | **true** | 能力 active + 实例存在且对象类型一致 |
+| `capability_call`(M1-B) | 能力注册表, 实例ABox, 联邦读临时输入 inputs（不落库） | 实例ABox（output_attribute + `__capability__` 元数据，dry_run 不写；inputs 不写入） | **true** | 能力 active + 实例存在且对象类型一致 |
 
 ---
 
@@ -586,7 +586,7 @@
 - 用户友好建模/逆向生成见 §14。
 - 待增强：Fuseki 远程推理开关、SHACL 在 Jena 侧执行、MCP stdio transport 完整 JSON-RPC。
 - Action 回写健壮性（指数退避重试 + 按端点熔断）已完成（2026-10-23，见 §6.2 与 TASK_CHECKPOINT §19；`test_action_resilience.py` 7/7）。
-- V2 切片进展：**VS2-00 ✅**、**M1-A（§17 字典/联邦查询）✅**、**M1-B（§18 能力层/公式引擎）✅**、**M1-C（§19 显式业务主键）✅**（均为 2026-11-09~10 交付，验收脚本见各章节）。
+- V2 切片进展：**VS2-00 ✅**、**M1-A（§17 字典/联邦查询）✅**、**M1-B（§18 能力层/公式引擎）✅**、**M1-C（§19 显式业务主键）✅**、**M1-E（§20 里程碑退出 / TCE2E-01 全链）✅**（均为 2026-11-09~10 交付，验收脚本见各章节）。
 
 ## 16. 项目管理（projects）
 
@@ -694,10 +694,17 @@
 | POST | `/api/capabilities/{cap_id}/publish` | 发布为 `active`，解析并锁定引用版本 |
 | GET | `/api/capabilities/{cap_id}/versions` | 版本历史（新版在前，含表达式快照与发布时间） |
 | GET | `/api/capabilities/{cap_id}/dependents` | 引用该能力的其他能力（含锁定版本） |
-| POST | `/api/capabilities/{cap_id}/execute` | 单实例执行；body `{instance_id, channel?, trigger_source?, dry_run?}` |
+| POST | `/api/capabilities/{cap_id}/execute` | 单实例执行；body `{instance_id, channel?, trigger_source?, dry_run?, inputs?}` |
 | POST | `/api/capabilities/{cap_id}/execute-batch` | 批量执行；body `{instance_ids?|limit/offset, channel?, trigger_source?, dry_run?}` |
 
-`dry_run=true` 只返回计算值，**不写回实例**；非 dry_run 写回 `output_attribute` 与 `__capability__` 元数据（`capability_id/name/version`、`executed_at`、`execution_channel`、`trigger_source`、`source_instance_id`、`execution_status`、`value`、`error_*`、`trace`），**源字段不覆盖**。
+`dry_run=true` 只返回计算值，**不写回实例**；非 dry_run 写回 `output_attribute` 与 `__capability__` 元数据（`capability_id/name/version`、`executed_at`、`execution_channel`、`trigger_source`、`source_instance_id`、`execution_status`、`value`、`error_*`、`trace`、`input_overrides`、`data_gaps`、`inputs_persisted`），**源字段不覆盖**。
+
+**`inputs`（M1-E / TCE2E-01，联邦读临时输入）**：外部 Agent 把 `term_lookup` 合并结果（如 PN/库存量/需求量）作为 `inputs` 传入，与本地实例字段合并后仅参与本次计算；**不落地为实例内容**（写回基于原始实例，只写结果属性与元数据）。响应附带：
+- `input_overrides`：本次覆盖的属性名与原值（溯源用）；
+- `data_gaps`：值为 `null` 的覆盖键（数据缺口显式标注，供降级回答）；
+- `input_source = "federated_read_override"`、`inputs_persisted = false`。
+
+公式可用 `if(this.stock_qty == null, null, ...)` 显式守卫，在外部系统缺失时返回 `null` 而非错误提前期。REST 与 MCP `capability_call` 同口径。
 
 ### 18.2 表达式（opl-expr/v1）
 
@@ -784,3 +791,42 @@
 ### 19.6 验收
 
 `scripts/verify_m1c_primary_key.py`（`--no-ui` 跳过真实 Chromium DOM 段）：真实浏览器校验下拉选项/显式标记/徽标/保存载荷 + REST 全链路（422、PUT/PATCH/null 回退、去重、影响提示、迁移确认、并发 409）；**PASS=33/FAIL=0**。L5 回归 93/93，M1-A 75/75、M1-B 50/50 回归全绿。
+
+---
+
+## 20. M1-E / TCE2E-01 全链（PN 码更换备件，组合 V2-01＋V2-04＋V2-15）
+
+### 20.1 分工边界（INV-3）
+
+需求《V2-功能需求描述》附录 E2E 流规定：**外部 AI 平台（Agent）**负责解析自然语言问题、依次调用平台工具、组装带溯源回答；平台**只做工具提供方**，运行时不参与工具选择/分支决策/参数填充。因此：
+
+| 角色 | 职责 |
+|---|---|
+| 平台 | `term_lookup`（V2-01 字典＋三系统联邦读）、`capability_call`（V2-04 公式求值）、REST/MCP 开放接口（V2-15）、审计与版本历史 |
+| 外部 Agent | 提问解析、把联邦读合并结果组装为 `inputs`、生成自然语言回答与 citations |
+
+平台**不提供** `/api/ask`、`/api/qa`、`/api/chat`、`/api/answer` 编排端点；MCP 工具清单保持 6 个，无回答类工具。验收脚本 `scripts/verify_m1e_e2e.py` 本身扮演外部 Agent 客户端。
+
+### 20.2 全链步骤
+
+1. 用户提问："给 xxx 客户更换一个 PN 码为 xxxxx 的备件，需要多久？"
+2. Agent 经 MCP SSE 调 `term_lookup(term="PN码", value="PN-…")` → `status=ok`，返回 `resolution`（输入词→规范术语、匹配方式、置信度）、`systems`（三系统各自字段名覆盖）、`merged[].fields`（每字段 `sources` 来源标记、`present_in`）、`uncovered`、`per_system`。
+3. Agent 从合并结果取 `stock_qty` / `pn` / `stock_level`，连同问题中的需求量组装 `inputs`，经 MCP 调 `capability_call(capability="cap_spare_lead_time", instance_id=..., inputs=..., dry_run=true)`。
+4. 计算工具返回天数＋四要素溯源（`capability_version`、`instance_id`、`trace.inputs`、`trace.lookups` 的 `matched_record_id`/`matched_code`/`value`）＋ `input_overrides`/`data_gaps`/`inputs_persisted=false`。
+5. Agent 组装回答：每个数字附溯源说明（术语解析路径、来源系统、能力版本、基线记录原值），`citations[]` 覆盖 V2-01 / V2-04 / V2-15。
+6. 事后经字典审计 `GET /api/dictionary/term-lookup-audit` 与能力版本历史 `GET /api/capabilities/{id}/versions` 核查引用口径。
+
+### 20.3 提前期能力与数据
+
+- 能力 `cap_spare_lead_time`（`kind=derive` / `expression`，active v1.0.0），表达式为**库存判断＋采购提前期公式**：有库存取现货出库天数；现货＋在途不足则取采购天数＋运输天数；`stock_qty` 为 null 时经 `if(..., null, ...)` 显式守卫返回 `null`。
+- 本地上传型基线 `obj_spare_lead_time_baseline` 经 `lookup(..., {'attr_pn': this.pn}, attr_*)` 取值（维度/数值列/命中编码写入 trace）。
+- 三系统 mock 的异构字段（`PN` / `PN码` / `PN_Num`、`capacity_mw` 等）由 V2-01 字典 field_map 映射为统一属性（`pn`、`stock_qty`、`stock_level`）；`stock_qty` 来源标记指向「水库系统」。
+- 联邦读结果只经 `inputs` 参与本次计算，**不落地为实例内容**（V2-08 口径：联邦读内容不持久化为实例血缘）；写回仅写 `output_attribute` 与 `__capability__` 元数据。
+
+### 20.4 降级（EP-E2E-01 / TCEE-01）
+
+水库系统不可用（注入 503）时，`term_lookup` 仍返回 `ok` 并在 `per_system["conn-rsr"]` 显式标 `error`、其余两系统结果保留；Agent 传入 `stock_qty=null` → 计算返回 `value=null` + `data_gaps=["stock_qty"]`。回答必须显式说明缺失系统与数据缺口，**不给出错误提前期**、不用其它数值替代。
+
+### 20.5 验收
+
+`scripts/verify_m1e_e2e.py`：3 mock + 临时 DATA_DIR + 真实 MCP SSE 客户端 + REST 同口径 + 事后审计/版本核查 + INV-3 负向；**PASS=26/FAIL=0**。M1 退出回归：L5 `backend/tests` **93/93**（含 MVP 34 项基线），M1-A **75/75**、M1-B **50/50**（SKIP=1 按 D2 挂 M4-A）、M1-C **33/33** 全绿。

@@ -2,7 +2,7 @@
 title: source-V2-测试用例
 type: source-summary
 created: 2026-11-06
-updated: 2026-11-09
+updated: 2026-11-10
 sources: [V2-测试用例.md]
 tags: [源文档, V2, 测试用例]
 ---
@@ -59,6 +59,7 @@ tags: [源文档, V2, 测试用例]
 | M1-A 验收（TC-01-01~09：词条 CRUD/导入/解析链/联邦查询/语义近似/成本护栏/未覆盖显式/脏数据隔离/审计＋TCE-01-01~06 关键链路；REST 冒烟＋MCP SSE term_lookup 5 工具真实客户端段） | `scripts/verify_m1a_dictionary.py`（`--no-mcp` 可跳过 MCP 段） | ✅ 通过 PASS=75/FAIL=0（2026-11-09） |
 | M1-B 验收（TC-04-01~05/07/08/09：六成本公式 33 行 golden L1 87 项零差异／四要素溯源／删除依赖 422＋draft MCP 403／版本锁不跟随／上传型写回／MCP 同口径／分工边界／性能基线；TCE-04-01/02/04 与 EP-04-01/02/04；REST 全端点＋MCP SSE `capability_call` 6 工具真实客户端段） | `scripts/verify_m1b_capabilities.py`（`--no-mcp` 可跳过 MCP 段） | ✅ 通过 PASS=50/FAIL=0/SKIP=1（2026-11-10；SKIP=TP-04-06/EP-04-03 按 D2 挂 M4-A） |
 | M1-C 验收（TP-03-01~04：真实 Chromium DOM 主键下拉/显式标记/徽标/保存载荷、PATCH/PUT/null 回退持久化、非法值 422、新入库按主键匹配去重；TCE-03-01/02 与 EP-03-01/02：变更影响提示/存量不静默改写/迁移须显式确认/并发 409 无脏写；REST 全链路＋TestClient 并发） | `scripts/verify_m1c_primary_key.py`（`--no-ui` 可跳过浏览器段） | ✅ 通过 PASS=33/FAIL=0（2026-11-10） |
+| M1-E 验收（TCE2E-01 全链：自然语言提问→MCP `term_lookup` 三系统合并/来源标记→外部 Agent 组装 `inputs`→`capability_call` 提前期公式＋四要素溯源→带 citations 回答；EP-E2E-01/TCEE-01 水库 503 降级显式 `data_gaps` 不误报天数；REST/MCP 同口径、字典审计/能力版本核查、INV-3 负向断言；L5 93/93＋M1-A/B/C 回归） | `scripts/verify_m1e_e2e.py`（3 mock＋临时 DATA_DIR＋真实 MCP SSE 客户端） | ✅ 通过 PASS=26/FAIL=0（2026-11-10） |
 
 ## See Also
 - [[source-V2-测试大纲]]、[[source-V2-功能需求描述]]、[[V2开发里程碑]]

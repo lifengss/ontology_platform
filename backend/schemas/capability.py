@@ -1,7 +1,7 @@
 """能力层（V2-04 首片）API 请求模型（snake_case，对齐 schema 命名规范）。"""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -33,6 +33,8 @@ class CapabilityExecute(BaseModel):
     channel: str = Field(default="api", pattern="^(ui|api|mcp)$")
     trigger_source: str = Field(default="manual", max_length=32)
     dry_run: bool = Field(default=False)
+    # M1-E / TCE2E-01：联邦读结果（term_lookup 合并值）作为本次临时输入覆盖，不落库
+    inputs: Optional[dict[str, Any]] = Field(default=None)
 
 
 class CapabilityExecuteBatch(BaseModel):

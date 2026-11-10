@@ -7,6 +7,15 @@ updated: 2026-11-10
 
 # 操作日志
 
+## [2026-11-10] feat | M1-E（TCE2E-01 全链 / M1 里程碑退出）交付：验收 26/26，L5 回归 93/93，M1 退出标准达成
+- 分工边界（INV-3）：平台只做工具提供方（`term_lookup`＋`capability_call`＋REST/MCP＋审计/版本），外部 Agent 负责提问解析、工具编排与带 citations 回答组装；平台**未新增** `/api/ask|qa|chat|answer`，MCP 工具清单仍为 6 个（无回答类工具）。
+- 后端：`CapabilityExecute` / `capability_call` / `CapabilityService.execute` 增加 `inputs`（联邦读结果临时输入覆盖，与本地实例字段合并后仅参与本次计算）；响应与 `__capability__` 写回元数据新增 `input_overrides`、`data_gaps`、`input_source`、`inputs_persisted=false`；写回仍基于原始实例，**联邦读内容不落库**（V2-08 口径）。
+- 验收脚本 `scripts/verify_m1e_e2e.py`：临时 DATA_DIR ＋ 3 mock ＋ 字典 field_map ＋ 成本公式基线 ＋ 提前期能力 `cap_spare_lead_time`（库存判断＋采购/运输提前期、`lookup()` 取基线、null 显式守卫）＋ 真实 MCP SSE `ClientSession`；REST 同口径、事后字典审计/能力版本核查、水库 503 降级显式 `data_gaps=["stock_qty"]` 不误报天数、INV-3 负向断言。
+- **本轮修复**：① 首轮三系统 401（mock token 用错）→ 改用全量 token；② 降级注入 `delay_ms=2000` 导致关闭阶段 `ConnectionAbortedError WinError 10053` 噪声 → 改为 `fail_rate=1.0/503` 立即失败并恢复；③ 回归时 `verify_m1c_primary_key.py` 浏览器段被外部 CDN 阻塞超时 → 拦截所有外部 http/https 请求，本地 `file://` 正常，33/33 恢复。
+- 验收：**PASS=26/FAIL=0**；退出回归 L5 `backend/tests` **93/93**（含 MVP 34 项）、M1-A **75/75**、M1-B **50/50**（SKIP=1 按 D2 挂 M4-A）、M1-C **33/33** 全绿。
+- 登记：`docs/API-INTERFACE-DOC.md` §20（＋§11.2/§11.4/§15/§18 同步）、`docs/V2-开发里程碑.md` M1-E ✅、[[source-V2-测试用例]]、[[V2开发里程碑]]、[[index]]、`TASK_CHECKPOINT.md` §26。
+- 下一步：M1 已退出；M2-A（V2-05 登录鉴权＋RBAC）启动需用户明确指示；TP-04-06/EP-04-03 按 D2 随 M4-A。
+
 ## [2026-11-10] feat | M1-C（V2-03 显式指定业务主键）交付：验收 33/33，L5 回归 93/93，M1-A/M1-B 回归全绿
 - 后端：`schemas/ontology.py` 增加 `stable_key_explicit`（自动推断 vs 显式指定）与 `PrimaryKeyMigrationRequest`；`modeling_translator.validate_business_layer` O-01 对**显式**主键强制 string 类型（自动推断的历史模板不受影响，避免存量误伤）；`router_ontologies` PATCH 三态（字符串显式 / null 回退自动 / 不传保持旧值）、`GET primary-key/impact` 影响提示、`POST primary-key/migrate`（必须 `confirm=true`，只补元数据、缺失新主键值的实例跳过）、PUT 主键变更亦返回 `data.primary_key_change`；`If-Match` + `JsonStore.update_if_unchanged` 乐观锁（409 STALE_ONTOLOGY）。
 - 入库：`router_ingest._approve_one` 按 `(ontology_id, object_type, stable_key, stable_key_value)` 匹配去重，命中则更新既有实例并保留原 id、合并字段，批次内重复同样收敛；实例记录新增 `stable_key`/`stable_key_value` 元数据；**无元数据的存量实例不参与匹配、不被静默改写**。

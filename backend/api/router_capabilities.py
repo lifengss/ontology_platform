@@ -145,6 +145,7 @@ def api_execute_capability(cap_id: str, payload: CapabilityExecute, project_id: 
         res = _svc(project_id).execute(
             cap_id, payload.instance_id, channel=payload.channel,
             trigger_source=payload.trigger_source, dry_run=payload.dry_run,
+            inputs=payload.inputs,
         )
     except CapabilityApiError as e:
         _raise_api(e)
