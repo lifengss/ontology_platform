@@ -64,6 +64,7 @@ ERR_INVALID_ARGUMENT = "INVALID_ARGUMENT"
 ERR_TOO_LARGE = "TOO_LARGE"
 ERR_TERM_NOT_FOUND = "TERM_NOT_FOUND"            # term_lookup：数据字典无匹配词条（不猜测）
 ERR_FEDERATED_FAILED = "FEDERATED_QUERY_FAILED"  # term_lookup：全部覆盖系统查询失败
+ERR_CAPABILITY_FAILED = "CAPABILITY_FAILED"      # capability_call：能力执行/定义业务失败
 
 SESSION_ID_HEADER = "mcp-session-id"
 
@@ -93,6 +94,13 @@ TOOLS_CONTRACT = {
         "reads": ["数据字典", "外部系统（经已配置 MCP 连接并行只读查询）"], "writes": [],
         "preconditions": ["数据字典存在可用词条（或同义词）"],
         "postconditions": ["查询审计已留痕（term_lookup_audit）"], "side_effect": False,
+    },
+    "capability_call": {
+        "reads": ["能力注册表", "实例ABox"],
+        "writes": ["实例ABox（output_attribute + __capability__ 元数据，dry_run 时不写）"],
+        "preconditions": ["能力已发布(active)；实例存在且对象类型与能力目标一致"],
+        "postconditions": ["返回四要素溯源（能力版本+输入实例+lookup命中原始值+计算值）"],
+        "side_effect": True,
     },
 }
 
@@ -193,6 +201,7 @@ class McpStreamableMiddleware:
     """
 
     _PATH = re.compile(r"^/mcp/([^/]+)/?$")
+    _MSG_PATH = re.compile(r"^/mcp/([^/]+)/messages/?$")
 
     def __init__(self, app, mcp_server: "McpServer") -> None:
         self.app = app
@@ -201,14 +210,24 @@ class McpStreamableMiddleware:
     async def __call__(self, scope, receive, send) -> None:
         if scope.get("type") == "http":
             path = scope.get("path", "")
-            m = self._PATH.match(path)
             method = scope.get("method", "")
+            # legacy SSE 的 POST 消息端点：SDK 自行通过原始 send 回 202/4xx，
+            # 必须在本层直通，避免 FastAPI 函数路由再补发一次隐式响应。
+            mm = self._MSG_PATH.match(path)
+            if mm and method == "POST":
+                await self.mcp_server.handle_messages_asgi(mm.group(1), scope, receive, send)
+                return
+            m = self._PATH.match(path)
             if m:
                 headers = _scope_headers(scope)
                 streamable = method in ("POST", "DELETE") or (
                     method == "GET" and SESSION_ID_HEADER in headers)
                 if streamable:
                     await self.mcp_server.handle_streamable_request(m.group(1), scope, receive, send)
+                    return
+                # legacy SSE GET：长连接响应由 SDK 直接发，绕开 FastAPI/BaseHTTPMiddleware
+                if method == "GET" and "text/event-stream" in headers.get("accept", ""):
+                    await self.mcp_server.handle_sse_asgi(m.group(1), scope, receive, send)
                     return
         await self.app(scope, receive, send)
 
@@ -370,16 +389,22 @@ class McpServer:
                             status_code=401)
 
     async def handle_sse(self, request):
-        """SSE 兼容路径（2024-11-05）：GET /mcp/{project_id}（Accept: text/event-stream 且无 session 头）。
+        """SSE 兼容路径（2024-11-05）：FastAPI 路由入口（保留兼容，正常流量由中间件直通）。"""
+        await self._run_sse(request.path_params["project_id"], request.scope,
+                            request.receive, _asgi_send(request))
 
-        P0-2：不再"连接即注册"——未发布 404 NOT_PUBLISHED，未鉴权 401 UNAUTHORIZED。
-        """
-        project_id = request.path_params["project_id"]
-        headers = {k.lower(): v for k, v in request.headers.items()}
-        if not self._token_ok(project_id, headers, request.url.query.encode()):
-            return self._unauthorized()
+    async def handle_sse_asgi(self, project_id: str, scope, receive, send) -> None:
+        """SSE GET 原始 ASGI 单响应入口：SDK connect_sse 自行发响应，框架不补发。"""
+        await self._run_sse(project_id, scope, receive, send)
+
+    async def _run_sse(self, project_id: str, scope, receive, send) -> None:
+        """P0-2：不再"连接即注册"——未发布 404 NOT_PUBLISHED，未鉴权 401 UNAUTHORIZED。"""
+        if not self._token_ok(project_id, _scope_headers(scope), scope.get("query_string", b"")):
+            await self._unauthorized()(scope, receive, send)
+            return
         if project_id not in self._published_ontologies:
-            return self._not_published()
+            await self._not_published()(scope, receive, send)
+            return
         self._ensure_endpoint(project_id)
         from mcp.server.sse import SseServerTransport
         transport = SseServerTransport(f"/mcp/{project_id}/messages/")
@@ -388,7 +413,7 @@ class McpServer:
         while len(self._sse_sessions) > MAX_SSE_SESSIONS:
             self._sse_sessions.popleft()
         ep = self._endpoints[project_id]
-        async with transport.connect_sse(request.scope, request.receive, _asgi_send(request)) as streams:
+        async with transport.connect_sse(scope, receive, send) as streams:
             await ep.mcp._lowlevel_server.run(
                 streams[0], streams[1],
                 ep.mcp._lowlevel_server.create_initialization_options(),
@@ -416,6 +441,36 @@ class McpServer:
             except Exception:  # noqa: BLE001  (session 不匹配/已关闭 → 试下一个)
                 continue
         return JSONResponse({"error": ERR_NOT_FOUND, "detail": "SSE 会话不存在或已过期，请重新连接"}, status_code=404)
+
+    async def handle_messages_asgi(self, project_id: str, scope, receive, send) -> None:
+        """SSE 兼容 POST 消息端点（原始 ASGI 单响应路径）。
+
+        SDK ``handle_post_message`` 会自行经 ``send`` 发 202/4xx；若再落到 FastAPI
+        函数路由，框架会补发一次隐式响应 → ASGI 双响应（BaseHTTPMiddleware
+        "Response content longer than Content-Length" / body_stream AssertionError）。
+        本方法由最外层 McpStreamableMiddleware 直通调用，响应仅一份。
+        """
+        query = scope.get("query_string", b"")
+        if not self._token_ok(project_id, _scope_headers(scope), query):
+            await _asgi_json(scope, send, 401, {"error": ERR_UNAUTHORIZED,
+                                                "detail": "缺少或无效的 MCP 接入 token"})
+            return
+        if project_id not in self._published_ontologies:
+            await _asgi_json(scope, send, 404, {"error": ERR_NOT_PUBLISHED,
+                                                "detail": "项目未发布。请先在 MCP 接入页发布本体"})
+            return
+        self._ensure_endpoint(project_id)
+        candidates = [t for (pid, t) in self._sse_sessions if pid == project_id]
+        if not candidates:
+            await _asgi_json(scope, send, 404, {"error": ERR_NOT_FOUND,
+                                                "detail": "SSE 会话不存在或已过期，请重新连接"})
+            return
+        # SDK 按 query 中的 session_id 自行路由；响应由 SDK 发出，本层不再补发。
+        try:
+            await candidates[-1].handle_post_message(scope, receive, send)
+        except Exception:  # noqa: BLE001
+            # 多数异常发生在 SDK 已发响应之后，再发一次会构成双响应，仅记录日志。
+            logger.exception("SSE messages 端点处理失败 project_id=%s", project_id)
 
     async def handle_streamable_request(self, project_id: str, scope, receive, send) -> None:
         """Streamable HTTP 分发（P0-1）：POST/DELETE /mcp/{pid}、GET /mcp/{pid}（带 session 头）。
@@ -557,6 +612,7 @@ class McpServer:
             "instance_get": {"method": "tools/call", "params": {"name": "instance_get", "arguments": {"ontology_id": "<ontology_id>", "object_type": "Activity"}}},
             "action_invoke": {"method": "tools/call", "params": {"name": "action_invoke", "arguments": {"action_id": "<action_id>", "confirmation_token": "<token>"}}},
             "term_lookup": {"method": "tools/call", "params": {"name": "term_lookup", "arguments": {"term": "客户", "value": "C0001", "dry_run": True}}},
+            "capability_call": {"method": "tools/call", "params": {"name": "capability_call", "arguments": {"capability": "cap_onsite_rate_d3", "instance_id": "<record_id>", "dry_run": True}}},
         }
         return examples.get(tool_name, {})
 
@@ -759,6 +815,43 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
             detail = "；".join(f"{s}: {r.get('error') or r.get('status')}"
                                for s, r in per.items()) or res.get("error") or "无已覆盖系统"
             raise _err(ERR_FEDERATED_FAILED, f"全部覆盖系统查询失败：{detail}")
+        return json.dumps(res, ensure_ascii=False)
+
+    @m.tool()
+    def capability_call(capability: str, instance_id: str = "", dry_run: bool = False) -> str:
+        """执行已发布(active)能力（M1-B / V2-04 首片，派生型 expression 实现）。
+        结果含四要素溯源：能力版本 + 输入实例 + lookup 命中（record_id/编码/原始值）+ 计算值。
+
+        capability 能力 name 或 id；留空则返回本项目已发布能力清单（供先枚举再执行）。
+        instance_id 目标实例 record_id（能力 object_type 下的实例）；
+        dry_run=true 不写回实例（试算）。
+        仅 active 能力可经 MCP 执行，draft 返回 FORBIDDEN_DRAFT 错误。
+        """
+        from capabilities import CapabilityApiError, CapabilityService
+
+        svc = CapabilityService(project_id)
+        name_or_id = (capability or "").strip()
+        if not name_or_id:
+            items = [
+                {"name": r["name"], "id": r["id"], "version": r.get("version"),
+                 "object_type": r.get("object_type"), "output_attribute": r.get("output_attribute")}
+                for r in svc.list_capabilities(status="active")
+            ]
+            return json.dumps({"published": bool(items), "count": len(items),
+                               "capabilities": items,
+                               "hint": "从清单取 name 后以 capability_call(name, instance_id) 执行。"},
+                              ensure_ascii=False)
+        rec = svc.get_by_name(name_or_id)
+        if rec is None:
+            rec = svc.get_capability(name_or_id)  # 按 id 查
+        if rec is None:
+            raise _err(ERR_NOT_FOUND, f"能力不存在: {name_or_id}")
+        try:
+            res = svc.execute(rec["id"], instance_id, channel="mcp",
+                              trigger_source="mcp", mcp_only=True, dry_run=dry_run)
+        except CapabilityApiError as e:
+            raise _err(ERR_CAPABILITY_FAILED,
+                       f"{e.code}: {e.message} (http_status={e.http_status})")
         return json.dumps(res, ensure_ascii=False)
 
 

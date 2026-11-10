@@ -2,10 +2,19 @@
 title: 操作日志
 type: log
 created: 2026-10-20
-updated: 2026-11-09
+updated: 2026-11-10
 ---
 
 # 操作日志
+
+## [2026-11-10] feat | M1-B（V2-04 能力层＋公式引擎首片）交付：验收 50/50，L5 回归 93/93，M1-A 回归 75/75
+- 后端：`backend/capabilities/`（opl-expr/v1 词法/AST/定义期校验/白名单求值＋null 传播＋TraceCollector；CapabilityService 注册表 CRUD/版本化/引用治理/删除保护/单实例与批量执行/写回与四要素溯源）；`api/router_capabilities.py`（11 端点统一信封）；`schemas/capability.py`；`mcp_server` 注册 `capability_call`（6 工具，仅 active，draft 403）；前端「能力」页（列表/公式编辑/校验/发布/版本历史/依赖/单实例与批量执行＋trace 展示）。
+- 口径：六成本公式 E/K/N/O/S＋D 全部经 `lookup()` 从 2297 实例基线取值，33 产品行维度仅从成本清单「区域/服务期限/类型」推导注入，不窥答案列；L1（VERIFIED）87 项容差 1e-9 零差异，L2（MOCK）8 行按区域口径出数，golden "—" 项返回 null 不当 0。
+- 关键修复（本轮发现）：① `iter_nodes` 漏遍历 DictLit 的 (key,value) 元组 → 字典内 `lookup`/`this.*`/`ref` 全逃过静态校验与引用收集；② `extract_refs` 只认字符串函数名，解析器实际产出 `Ident` → 引用治理（版本锁/依赖/循环）形同虚设；③ `do_ref` 只用引用方自身的 ref_locks → 多级 ref（O→E→D）报 REF_NOT_RESOLVED，改为锁内嵌被引用方锁快照并递归构造 ctx；④ `>=` 求值误返回 `<=`；⑤ `E_AMBIGUOUS` 未导入（null 维度路径 NameError）；⑥ `validate` 对 `ref()` 零参数越界；⑦ REST DELETE 返回 204 带 body → ASGI "Response content longer than Content-Length"，改平台惯例 200 信封；⑧ legacy SSE 双响应（checkpoint §22.3 登记待办）本轮闭环：GET/POST 均由最外层 `McpStreamableMiddleware` 原始 ASGI 直通，SDK 自发的响应不再被 FastAPI 补发第二次，日志 AssertionError 消失。
+- 性能：TP-04-09 实测基线 3 次中位数 **896.81 ms**（2297 实例库 / 33 产品行 × 6 公式，O 含 3 级 ref；目标值仍未冻结，见 `docs/V2-测试大纲.md` §八）；执行级 lookup 对象池缓存避免逐次全量读文件。
+- 验收 `scripts/verify_m1b_capabilities.py`：**PASS=50/FAIL=0/SKIP=1**（REST 全端点＋真实 MCP SSE；SKIP=TP-04-06/EP-04-03 按 D2 挂 M4-A）；L5 `backend/tests` **93/93**；`test_vs10_e2e` 5/5；M1-A 验收 **75/75** 回归全绿。
+- 登记：`docs/API-INTERFACE-DOC.md` §18（＋§11 工具/错误码/契约同步）、`docs/V2-开发里程碑.md` M1-B ✅、`docs/V2-测试大纲.md` §八实测基线、[[source-V2-测试用例]] 脚本区、[[V2开发里程碑]]、[[index]]、`TASK_CHECKPOINT.md` §24。
+- 下一步：M1-C（V2-03 主键编辑，1–2 人日）或 M1-E 里程碑退出（E2E-1 全链）待用户指示。
 
 ## [2026-11-09] feat | M1-A（V2-01 数据字典＋联邦查询）切片交付：垂直链路全链，验收 75/75，L5 回归 93/93
 - 后端：`backend/dictionary/`（词条 CRUD＋同义词晋升＋from-connections 导入＋解析链 精确→同义→确定性语义近似(0.6/0.1)→歧义候选＋联邦查询 asyncio.gather 并行/超时/未覆盖显式/冲突并存+来源标记/权威值/脏数据隔离/成本护栏 limit 下推+full 声明 fetch_limit+dry_run 预览+confirm/cancel＋审计 term_lookup_audit）；`api/router_dictionary.py` REST（list_payload 信封、DELETE 200 信封）；`schemas/dictionary.py`；连接 schema 加 field_map_source/fetch_mode/fetch_limit，`router_mcp` read_connection 走 `resolve_field_map` 收敛（explicit|dictionary 同一数据源）；`mcp_server` 注册 `term_lookup` 工具（5 工具）；mock 加 full_fetch_only 管理面。

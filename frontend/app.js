@@ -776,6 +776,7 @@ function switchTab(name) {
   if (name === 'inference') { loadOntologies().then(() => { renderOntologySelects(); loadInference(); }); }
   if (name === 'action') { loadActions(); }
   if (name === 'dictionary') { loadDictionary(); }
+  if (name === 'capability') { loadCapabilities(); }
   if (name === 'mcp') { loadMcpOntologies(1); loadMcpTools(); loadMcpToken(); }
   if (name === 'logs') { loadServerLogs(); }
   if (name === 'settings') { loadLLMSettings(); }
@@ -4583,6 +4584,313 @@ async function loadDictAudit() {
   } catch (e) {
     tb.innerHTML = '<tr><td colspan="8" class="p-3 text-center text-rose-400">加载失败: ' + esc(e.message) + '</td></tr>';
   }
+}
+
+/* ================= 能力层（M1-B / V2-04 首片：能力注册 + 公式引擎 + 执行 + 溯源） =================
+   能力 = 绑定 object_type 的表达式（derive×expression）。
+   公式语言：赋值块 / this.<attr> / lookup(对象类型, {维度}, 属性) / ref('能力名'[,'x.y.z']) /
+   if(a,b,c) / if_null(a,b) / 三元 ?: / && ||（and or 别名）。null 传播（禁止当 0）。
+   版本化：draft→publish 锁定引用版本；active 内容变更自动 minor+1 发新版（旧版可溯源）。 */
+const capState = { list: [], editingId: null };
+
+async function loadCapabilities() {
+  const st = ($('capFilterStatus') && $('capFilterStatus').value) || '';
+  try {
+    const j = await api('/api/capabilities' + (st ? '?status=' + encodeURIComponent(st) : ''));
+    capState.list = j.data.items || [];
+    renderCapList();
+  } catch (e) { console.warn('loadCapabilities', e); }
+}
+
+function capBtn(label, fn, cls) {
+  return '<button class="btn ' + (cls || 'secondary') + '" style="padding:2px 8px;font-size:12px" onclick="' + fn + '">' + label + '</button> ';
+}
+
+function renderCapList() {
+  const tb = $('capListBody');
+  if (!tb) return;
+  if (!capState.list.length) {
+    tb.innerHTML = '<tr><td colspan="7" class="p-3 text-center text-slate-500">暂无能力。点「＋ 新建能力」创建派生型公式能力（如上门率 D3、人工基线 D）。</td></tr>';
+    return;
+  }
+  const statusCls = { draft: 'text-amber-300', active: 'text-emerald-400', deprecated: 'text-slate-500' };
+  const statusCn = { draft: '草稿', active: '已发布', deprecated: '已弃用' };
+  tb.innerHTML = capState.list.map(c =>
+    '<tr class="border-b border-slate-700/40 hover:bg-slate-800/30 align-top">' +
+      '<td class="p-1.5 font-mono">' + esc(c.name) + '</td>' +
+      '<td class="p-1.5">' + esc(c.display_name || '') + '</td>' +
+      '<td class="p-1.5 font-mono text-slate-400">' + esc(c.object_type || '') + '</td>' +
+      '<td class="p-1.5 font-mono text-slate-400">' + (c.output_attribute ? esc(c.output_attribute) : '-') + '</td>' +
+      '<td class="p-1.5">' + esc(c.version || '-') + '</td>' +
+      '<td class="p-1.5 ' + (statusCls[c.status] || '') + '">' + (statusCn[c.status] || esc(c.status)) + '</td>' +
+      '<td class="p-1.5 whitespace-nowrap">' +
+        capBtn('编辑', "openCapEditor('" + c.id + "')") +
+        (c.status === 'draft' ? capBtn('发布', "capPublish('" + c.id + "')", '') : '') +
+        capBtn('版本', "capShowVersions('" + c.id + "')") +
+        capBtn('依赖', "capShowDependents('" + c.id + "')") +
+        capBtn('删除', "capDelete('" + c.id + "')", 'danger') +
+      '</td></tr>'
+  ).join('');
+}
+
+function openCapEditor(id) {
+  capState.editingId = id || null;
+  const c = capState.list.find(x => x.id === id) || null;
+  const box = $('capEditor');
+  box.classList.remove('hidden');
+  box.innerHTML =
+    '<div class="grid grid-cols-12 gap-2 text-sm">' +
+      '<div class="col-span-3"><label class="text-xs text-slate-400">name *（小写下划线，ref 定位用）</label><input id="capFName" class="w-full font-mono text-xs" value="' + esc(c ? c.name : '') + '" placeholder="如 cap_onsite_rate_d3" ' + (c ? 'readonly' : '') + '></div>' +
+      '<div class="col-span-3"><label class="text-xs text-slate-400">显示名</label><input id="capFDisplayName" class="w-full" value="' + esc(c ? (c.display_name || '') : '') + '" placeholder="如 上门率 D3"></div>' +
+      '<div class="col-span-3"><label class="text-xs text-slate-400">对象类型 *</label><input id="capFObjectType" class="w-full font-mono text-xs" value="' + esc(c ? (c.object_type || '') : '') + '" placeholder="如 obj_maintenance_product"></div>' +
+      '<div class="col-span-3"><label class="text-xs text-slate-400">输出属性（写回目标，留空仅记元数据）</label><input id="capFOutAttr" class="w-full font-mono text-xs" value="' + esc(c ? (c.output_attribute || '') : '') + '" placeholder="如 attr_d3_rate"></div>' +
+      '<div class="col-span-12"><label class="text-xs text-slate-400">公式（expression）*</label>' +
+        '<textarea id="capFExpr" rows="6" class="w-full font-mono text-xs" spellcheck="false" placeholder="lookup(obj_onsite_rate_baseline, {&#10;  &quot;attr_product_line&quot;: this.attr_product_line,&#10;  &quot;attr_customer_segment&quot;: this.attr_customer_segment,&#10;  &quot;attr_domestic&quot;: this.attr_region&#10;}, &quot;attr_onsite_rate&quot;) * if(this.attr_term_years == 3, 1.0, if(this.attr_term_years == 4, 1.4, 1.88))">' + esc(c ? (c.expression || '') : '') + '</textarea>' +
+        '<div class="text-xs text-slate-600 mt-1">语法：赋值块（var = expr）/ this.&lt;attr&gt; / lookup(对象类型, {维度}, 属性) / ref(&#39;能力名&#39;[,&#39;x.y.z&#39;]) / if(a,b,c) / if_null(a,b) / ?: / &amp;&amp; ||。lookup 0 命中→NOT_FOUND、多命中→AMBIGUOUS（逐实例错误，批不中断）；算术遇 null→null（用 if_null 显式守卫）。</div>' +
+      '</div>' +
+      '<div class="col-span-12"><label class="text-xs text-slate-400">说明</label><input id="capFDesc" class="w-full" value="' + esc(c ? (c.description || '') : '') + '" placeholder="口径/来源说明"></div>' +
+      '<div class="col-span-12 flex gap-2">' +
+        '<button class="btn" type="button" onclick="capSave()">保存</button>' +
+        '<button class="btn secondary" type="button" onclick="capValidateDraft()">校验公式（不落库）</button>' +
+        '<button class="btn ghost" type="button" onclick="closeCapEditor()">取消</button>' +
+      '</div>' +
+    '</div>';
+}
+
+function closeCapEditor() {
+  capState.editingId = null;
+  const box = $('capEditor');
+  box.classList.add('hidden');
+  box.innerHTML = '';
+  const vb = $('capValidateBox');
+  vb.classList.add('hidden');
+  vb.innerHTML = '';
+}
+
+function capCollectForm() {
+  return {
+    name: ($('capFName').value || '').trim(),
+    display_name: ($('capFDisplayName').value || '').trim() || null,
+    description: ($('capFDesc').value || '').trim() || null,
+    object_type: ($('capFObjectType').value || '').trim(),
+    output_attribute: ($('capFOutAttr').value || '').trim() || null,
+    expression: ($('capFExpr').value || '').trim(),
+  };
+}
+
+async function capSave() {
+  const data = capCollectForm();
+  if (!data.name || !data.object_type || !data.expression) {
+    toast('name / 对象类型 / 公式 必填', 'err');
+    return;
+  }
+  try {
+    if (capState.editingId) {
+      const j = await api('/api/capabilities/' + capState.editingId, { method: 'PUT', body: data });
+      toast('已保存' + (j.data.version ? '（版本 ' + j.data.version + '）' : ''), 'ok');
+    } else {
+      const j = await api('/api/capabilities', { method: 'POST', body: data });
+      toast('能力已创建（草稿），可「校验」→「发布」', 'ok');
+    }
+    closeCapEditor();
+    loadCapabilities();
+  } catch (e) {
+    capShowValidate({ valid: false, error_code: e.code, issues: (e.details && (e.details.issues || e.details.dependents)) || [{ message: e.message }] });
+    toast('保存失败: ' + e.message, 'err');
+  }
+}
+
+async function capValidateDraft() {
+  const expr = ($('capFExpr').value || '').trim();
+  if (!expr) { toast('先填写公式', 'err'); return; }
+  try {
+    let res;
+    if (capState.editingId) {
+      res = await api('/api/capabilities/' + capState.editingId + '/validate?draft_expression=' + encodeURIComponent(expr));
+    } else {
+      // 未落库能力：用临时校验端点不可用，直接提示先保存
+      toast('请先保存能力（草稿），再用「校验公式」', 'err');
+      return;
+    }
+    capShowValidate(res.data);
+  } catch (e) {
+    capShowValidate({ valid: false, error_code: e.code, issues: (e.details && e.details.issues) || [{ message: e.message }] });
+  }
+}
+
+function capShowValidate(res) {
+  const vb = $('capValidateBox');
+  vb.classList.remove('hidden');
+  if (res.valid) {
+    vb.innerHTML = '<div class="text-emerald-400">✓ 校验通过：公式语法/白名单/常量折叠/引用均正常。</div>' +
+      '<div class="text-slate-400 mt-1">引用能力：' + (res.refs && res.refs.length ? res.refs.map(r => esc(r.name) + (r.version ? '@' + esc(r.version) : '')).join('、') : '无') +
+      '　·　输入属性：' + (res.attr_refs && res.attr_refs.length ? res.attr_refs.map(esc).join('、') : '无') + '</div>';
+    return;
+  }
+  const issues = (res.issues || []).map(i => {
+    const msg = typeof i === 'string' ? i : (i.message || JSON.stringify(i));
+    return '<div class="text-rose-400">✗ ' + esc(msg) + '</div>';
+  }).join('');
+  vb.innerHTML = '<div class="text-rose-400 font-medium">校验未通过' + (res.error_code ? '（' + esc(res.error_code) + '）' : '') + '</div>' +
+    '<div class="mt-1 space-y-0.5">' + (issues || '<div class="text-rose-400">详见上方 toast</div>') + '</div>';
+}
+
+async function capPublish(id) {
+  if (!confirm('发布该能力？发布时锁定引用能力的当前版本（后续不自动跟随）。')) return;
+  try {
+    const j = await api('/api/capabilities/' + id + '/publish', { method: 'POST' });
+    toast('已发布 v' + (j.data.version || '?') + '，引用版本已锁定', 'ok');
+    loadCapabilities();
+  } catch (e) {
+    toast('发布失败: ' + e.message + (e.code ? '（' + e.code + '）' : ''), 'err');
+  }
+}
+
+async function capDelete(id) {
+  const c = capState.list.find(x => x.id === id);
+  if (!confirm('确认删除能力 ' + (c ? c.name : id) + '？被其他能力引用时禁止删除。')) return;
+  try {
+    await api('/api/capabilities/' + id, { method: 'DELETE' });
+    toast('已删除', 'ok');
+    loadCapabilities();
+  } catch (e) {
+    if (e.code === 'HAS_DEPENDENTS') {
+      const deps = (e.details && e.details.dependents) || [];
+      capShowPanel('删除被拒：存在 ' + deps.length + ' 个依赖方（引用方）',
+        deps.map(d => '<div class="mb-1">· <span class="font-mono">' + esc(d.name) + '</span> v' + esc(d.version || '?') +
+          (d.locked_version ? '（锁定 ' + esc(d.locked_version) + '）' : '') + ' — ' + esc(d.display_name || '') + '</div>').join('') ||
+        '<div>无依赖清单</div>', 'text-rose-400');
+    } else {
+      toast('删除失败: ' + e.message, 'err');
+    }
+  }
+}
+
+async function capShowVersions(id) {
+  try {
+    const j = await api('/api/capabilities/' + id + '/versions');
+    const items = j.data.items || [];
+    capShowPanel('版本历史（' + items.length + ' 版，最新在前）',
+      items.map(v =>
+        '<div class="mb-2 border-b border-slate-700/40 pb-2">' +
+          '<div><span class="text-slate-200 font-mono">' + esc(v.version) + '</span> ' +
+          '<span class="' + (v.status === 'active' ? 'text-emerald-400' : 'text-amber-300') + '">' + esc(v.status) + '</span>' +
+          '<span class="text-slate-600 ml-2">' + esc((v.published_at || v.created_at || '').replace('T', ' ').slice(0, 19)) + '</span></div>' +
+          '<pre class="font-mono text-slate-400 whitespace-pre-wrap mt-1 mb-0">' + esc(v.expression || '') + '</pre>' +
+        '</div>'
+      ).join('') || '<div>无历史</div>', 'text-slate-200');
+  } catch (e) { toast('加载版本失败: ' + e.message, 'err'); }
+}
+
+async function capShowDependents(id) {
+  try {
+    const j = await api('/api/capabilities/' + id + '/dependents');
+    const items = j.data.items || [];
+    capShowPanel('依赖方（引用该能力的其他能力，共 ' + items.length + '）',
+      items.map(d =>
+        '<div class="mb-1">· <span class="font-mono">' + esc(d.name) + '</span> v' + esc(d.version || '?') +
+        ' — ' + esc(d.display_name || '') +
+        (d.locked_version ? ' <span class="text-slate-500">（当前锁定 ' + esc(d.locked_version) + '）</span>' : ' <span class="text-amber-300">（引用未锁定：未发布或锁定版本不一致）</span>') +
+        '</div>'
+      ).join('') || '<div class="text-slate-500">无依赖方，可安全删除。</div>', 'text-slate-200');
+  } catch (e) { toast('加载依赖失败: ' + e.message, 'err'); }
+}
+
+function capShowPanel(title, html, cls) {
+  $('capPanelTitle').textContent = title;
+  $('capPanel').className = 'text-xs ' + (cls || 'text-slate-400');
+  $('capPanel').innerHTML = html;
+  $('capPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function capFmtValue(v) {
+  if (v === null || v === undefined) return '<span class="text-amber-300">null</span>';
+  if (typeof v === 'number') return esc(String(v));
+  return esc(JSON.stringify(v));
+}
+
+function capTraceHtml(trace) {
+  const lk = (trace && trace.lookups) || [];
+  if (!lk.length) return '<span class="text-slate-600">无 lookup</span>';
+  return lk.map(l =>
+    '<div class="mb-1"><span class="font-mono text-slate-300">' + esc(l.object_type) + '</span> ' +
+    esc(JSON.stringify(l.dims || {})) + ' → ' + esc(l.attr || '(整行)') +
+    '　<span class="text-slate-500">命中 ' + esc(String(l.matched_record_id || '?')) + (l.matched_code ? '（' + esc(String(l.matched_code)) + '）' : '') +
+    '，原始值 ' + capFmtValue(l.value) + '</span></div>'
+  ).join('');
+}
+
+async function capResolveName() {
+  const raw = ($('capExecName').value || '').trim();
+  if (!raw) { toast('填写能力 name / id', 'err'); return null; }
+  const hit = capState.list.find(c => c.id === raw || c.name === raw);
+  return hit ? hit.id : raw;
+}
+
+async function capExecuteSingle() {
+  const capId = await capResolveName();
+  if (!capId) return;
+  const instanceId = ($('capExecInstanceId').value || '').trim();
+  if (!instanceId) { toast('填写实例 record_id', 'err'); return; }
+  try {
+    const j = await api('/api/capabilities/' + capId + '/execute', {
+      method: 'POST', body: { instance_id: instanceId, channel: 'ui', trigger_source: 'manual' },
+    });
+    capRenderExecResult(j.data);
+  } catch (e) {
+    $('capExecResult').innerHTML = '<div class="text-rose-400">' + esc(e.message) + (e.code ? '（' + esc(e.code) + '）' : '') + '</div>';
+  }
+}
+
+async function capExecuteBatch() {
+  const capId = await capResolveName();
+  if (!capId) return;
+  const body = {
+    limit: parseInt($('capBatchLimit').value, 10) || 100,
+    channel: 'ui',
+    trigger_source: 'batch',
+    dry_run: !!($('capBatchDryRun').checked),
+  };
+  try {
+    const j = await api('/api/capabilities/' + capId + '/execute-batch', { method: 'POST', body });
+    capRenderBatch(j.data);
+  } catch (e) {
+    $('capBatchSummary').textContent = '';
+    $('capBatchBody').innerHTML = '<tr><td colspan="6" class="p-3 text-rose-400">' + esc(e.message) + '</td></tr>';
+  }
+}
+
+function capRenderExecResult(r) {
+  const el = $('capExecResult');
+  const ok = r.status === 'success';
+  el.innerHTML =
+    '<div class="mb-1"><span class="text-slate-400">能力：</span><span class="font-mono">' + esc(r.capability_name || '') + '</span> v' + esc(r.capability_version || '?') +
+    '　<span class="text-slate-400">实例：</span><span class="font-mono">' + esc(r.instance_id || '') + '</span></div>' +
+    '<div class="mb-1 text-lg font-medium ' + (ok ? 'text-emerald-400' : 'text-rose-400') + '">' +
+      (ok ? 'value = ' + capFmtValue(r.value) : 'error: ' + esc(r.error_code || '') + ' — ' + esc(r.error_message || '')) + '</div>' +
+    '<div class="text-slate-400 mb-1">' + capTraceHtml(r.trace) + '</div>' +
+    '<pre class="font-mono text-slate-500 whitespace-pre-wrap max-h-40 overflow-y-auto">' + esc(JSON.stringify(r.trace, null, 1)) + '</pre>';
+}
+
+function capRenderBatch(r) {
+  $('capBatchSummary').innerHTML =
+    'v' + esc(r.capability_version || '?') + '　共 ' + r.total + ' · 成功 ' + r.success +
+    ' · 错误 ' + r.error + ' · <span class="text-amber-300">null ' + (r.null != null ? r.null : 0) + '</span>' +
+    (r.dry_run ? ' · <span class="text-slate-400">dry_run 未写回</span>' : '') + ' · ' + r.duration_ms + 'ms';
+  const tb = $('capBatchBody');
+  if (!r.items || !r.items.length) {
+    tb.innerHTML = '<tr><td colspan="6" class="p-3 text-center text-slate-500">无实例</td></tr>';
+    return;
+  }
+  tb.innerHTML = r.items.map(it =>
+    '<tr class="border-b border-slate-700/40 align-top">' +
+      '<td class="p-1.5 font-mono text-slate-400">' + esc(String(it.instance_id || '').slice(0, 12)) + '…</td>' +
+      '<td class="p-1.5 ' + (it.status === 'success' ? 'text-emerald-400' : 'text-rose-400') + '">' + esc(it.status) + '</td>' +
+      '<td class="p-1.5 font-mono">' + capFmtValue(it.value) + '</td>' +
+      '<td class="p-1.5 text-slate-400">' + (it.error_code ? esc(it.error_code) + '<div class="text-slate-600">' + esc(it.error_message || '') + '</div>' : '-') + '</td>' +
+      '<td class="p-1.5">' + esc(it.capability_version || '') + '</td>' +
+      '<td class="p-1.5 text-slate-400">' + capTraceHtml(it.trace) + '</td></tr>'
+  ).join('');
 }
 
 /* ================= 使用教程（frontend/tutorial/） =================

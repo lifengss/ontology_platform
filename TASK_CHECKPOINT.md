@@ -470,3 +470,76 @@
 2. 待办（登记不阻塞）：legacy SSE 双响应修复（`mcp_server.handle_messages`/`handle_sse` 端点单响应化——SDK 经原始 ASGI send 已发响应后 FastAPI 不再补发）。
 3. 后续冻结项：golden dataset＋四类指标阈值（M3-F 前）；性能基线目标值；M4 前 D3 存量迁移方案单独评审。
 4. 每切片脚本继续在 wiki `source-V2-测试用例` 登记区登记；每次交互结束追加本文件 checkpoint。
+
+---
+
+## 23. 2026-11-10：M1-B（V2-04 能力层首片）启动——AST 求值引擎＋能力注册表落地（开发中快照，最终见 §24）
+
+### 23.1 本次交互交付
+- **口径探查收口**（开发前冻结）：P9 六公式全落可执行语义——D（lookup obj_aftersales_labor_baseline，维度 u_band/customer/product_category/response_level）/C（lookup obj_spare_aux_baseline 17 列，clause 选属性 machine_rma|machine_arma|NBD/4H，维度 area_category）/L（obj_mgmt_cost_baseline，维度 customer/product_category/domestic）/D3（obj_onsite_rate_baseline，维度 product_line/customer_segment/domestic）/年限系数 1.0|1.4|1.88；隐藏系数显式化（§3.3）；33 产品行维度属性全部从成本清单 sheet 自身列（区域/服务期限/类型）推导注入，不窥答案列；lookup 维度唯一性预检全过（C 按 response_level 各 1、G country 无重复、L/D 各 1）。
+- **引擎三件套**（`backend/capabilities/`，自研表达式语言 opl-expr 方言）：
+  - `expr_parser.py`：词法（数字/字符串/标识符/单双字符运算符/行注释）+AST（Program/Bind/Num/Str/Bool/Null/Ident/Member/BinOp/Unary/Call/DictLit/三元）+递归下降（赋值块→表达式→三元→or→and→比较→加减→乘除→一元→primary）+定义期 `validate`（未绑定标识符/成员仅 this.<attr>/常量折叠除零 CONSTANT_DIV_ZERO）+`extract_refs`/`extract_attr_refs`。
+  - `expr_eval.py`：AST 白名单求值＋`TraceCollector`（lookups 命中 record_id/code/原始值）；**null 传播**（算术遇 None→None＋NULL_INPUT 标记，禁止当 0）＋`if_null(a,b)` 显式守卫；内置白名单 abs/round/min/max/len/if/if_null/sum；错误码 DIV_ZERO/MISSING_INPUT_ATTR/REF_NOT_RESOLVED/TYPE_ERROR；lookup/ref 由执行层闭包注入（lookup 携带 trace）。
+  - `__init__.py` CapabilityService：注册表（JsonStore "capabilities"）CRUD＋name 唯一 `^[a-z][a-z0-9_]*$`＋**版本化**（create→draft 1.0.0；publish→active 并锁定引用 ref_locks（被引用方 expression 快照+hash，不自动跟随）；active 内容变更→自动 minor+1 发新版＋history 旧版快照可溯源）＋引用治理（REF_NOT_FOUND/REF_NOT_ACTIVE（引用 draft 422）/REF_VERSION_NOT_FOUND（拒绝静默指向最新 422）/CYCLE DFS 422）＋删除依赖保护（HAS_DEPENDENTS 422＋依赖清单 list_dependents）＋执行（execute 单实例/execute_batch 批量：批内单实例错误不中断、**null 显式计数**、dry_run、写回 output_attribute＋`__capability__` 元数据六类字段、源字段不覆盖）＋四要素溯源（capability_version＋instance_id/object_type＋trace 原始命中值）。
+- **冒烟 9/9**（`data/tmp_mb_smoke.py`）：SV/非BATZ/国内/4年→D3×1.4=0.30645359901361097 零差异；null 传播/if_null/DIV_ZERO/MISSING_INPUT_ATTR/常量折叠除零/三元/LOOKUP_NOT_FOUND/LOOKUP_AMBIGUOUS/语法错全过。
+- **修 2 bug**：① tokenizer 空白跳过分支 while 条件错（`source[i] not in "\n#"` 把整行非空白当空白吞掉）→拆独立分支；②（待修）validate 对 Call 函数名 Ident 与 Member 基座 this 误报 UNKNOWN_IDENTIFIER→skip_ids 机制。
+
+### 23.2 当前进展
+- M1-B 开发中：引擎＋注册表服务层完成并冒烟通过；REST/MCP/前端/验收脚本未动。
+- 验收基准锁定：golden `成本清单_维保服务产品_复算版.xlsx` 33 行，对比列 E/K/N/O/S 容差 1e-9，golden "—"（None）→引擎必须 null（TC-04-02）；TC-04-09 计时 2297 实例×3 取中位数（基线值待确认不伪造）。
+
+### 23.3 未完成 / 下一步
+1. 修 validate 误报（Call.func Ident/Member.base this 跳过）→冒烟复验。
+2. REST 层：`schemas/capability.py`＋`api/router_capabilities.py`（list/get/create/update/delete/publish/validate/versions/dependents/execute/execute_batch）＋main.py 挂路由（**公共 helper success/list_payload/ApiError 实际位置待确认**——`api/common.py` 不存在，M1-A router_dictionary.py 在 import 它）。
+3. MCP：`mcp_server` 注册 `capability_call` 工具（仅 active，draft→403 FORBIDDEN_DRAFT；TOOLS_CONTRACT 6 工具）。
+4. 前端：index.html 能力管理 tab＋app.js 能力模块（列表/新建/公式编辑/校验/发布/版本历史/依赖/单实例与批量执行+结果表+trace 展示）。
+5. 验收：`scripts/verify_m1b_capabilities.py`（TC-04-01~09/EP-04-01/02/04/TCE-04-02/03/04）→全绿→L5 回归（93 项基线）。
+6. 文档/登记/提交：项目 wiki（测试用例登记 TC→脚本）＋用户 wiki（raw 快照 2026-11-10 已建）＋git 提交。
+7. 清理临时文件：`data/tmp_mb_smoke.py`/`data/tmp_mb_*.txt`（验收后删）
+
+---
+
+## 24. 2026-11-10：M1-B（V2-04 能力层＋公式引擎首片）切片交付（验收 50/50；L5 回归 93/93）
+
+> §23 为开发过程快照，最终状态以本节为准。
+
+### 24.1 本次交互交付
+- **引擎三件套**（`backend/capabilities/`，§23 已完成部分）：`expr_parser.py`（opl-expr/v1 词法/AST/递归下降/定义期校验/extract_refs/extract_attr_refs）、`expr_eval.py`（白名单求值＋null 传播＋TraceCollector）、`__init__.py`（CapabilityService：注册表 CRUD＋name 唯一＋版本化＋引用治理＋删除保护＋单实例/批量执行＋写回＋四要素溯源）。
+- **全链补齐**：`schemas/capability.py`＋`api/router_capabilities.py`（11 端点统一信封，`main.py` 挂路由）；`mcp_server` 注册 `capability_call`（TOOLS_CONTRACT 6 工具，仅 active，draft 403，错误文本带 http_status）；`frontend/index.html`＋`app.js` 能力页（列表/公式编辑/校验/发布/版本历史/依赖/单实例与批量执行＋trace 展示）。
+- **验收脚本** `scripts/verify_m1b_capabilities.py`（`--no-mcp` 可跳过 SSE 段）：服务层 + REST + 真实 MCP SSE 客户端；数据 = `data/datasets/v2/maintenance_cost_2297.xlsx`（17 对象 2297 实例）＋仓库根 `成本清单_维保服务产品_复算版.xlsx`（33 行 golden）。
+- **口径**：6 个成本公式（D/E/K/N/O/S）全部经 `lookup()` 从基线实例取值，`ref()` 组成 D→E/K/N→O→S 三级引用链；33 产品行的维度属性只从成本清单「区域/服务期限/类型」推导注入（组合行 ARMA+RMA 年限系数 1.0/1.4/1.88），**不窥答案列**；F/R 取实例自身输入属性；介质保留/RMA/ARMA 的 n/a 项用 `if()` 短路返回 null，`O` 用 `if_null(...,0)` 显式守卫。
+
+### 24.2 本轮修复的 bug（真实缺陷，均由验收脚本暴露）
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | `iter_nodes` 不递归 DictLit 的 `(key,value)` 元组 → 字典内 `lookup()/this.*/ref()` 全部逃过静态校验与引用收集（冒烟 `attrs` 仅 1 个应由 4 个） | 统一 list/tuple 递归遍历 |
+| 2 | `extract_refs` 只认字符串函数名，解析器实际产出 `Ident('ref')` → 版本锁/依赖保护/循环检测全部失效 | 兼容 `Ident.func.name` |
+| 3 | `do_ref` 只查引用方自身 `ref_locks` → 多级引用（O→E→D）报 `REF_NOT_RESOLVED` | `_resolve_locks` 锁内嵌被引用方锁快照；`do_ref` 递归构造子 ctx，共享 trace 与 lookup 缓存 |
+| 4 | `>=` 比较求值误返回 `left <= right` | 返回 `left >= right` |
+| 5 | `do_lookup` 使用未导入的 `E_AMBIGUOUS`（null 维度路径 NameError） | 补导入；`ref()` 零参数校验越界一并加 guard |
+| 6 | REST `DELETE /api/capabilities/{id}` 用 204 + JSON body → uvicorn `Response content longer than Content-Length` | 改平台惯例 200 统一信封 `{deleted: id}` |
+| 7 | **legacy SSE 双响应**（§22.3 登记待办）：SDK 经原始 ASGI send 发响应后 FastAPI 又补发隐式响应 → `BaseHTTPMiddleware.body_stream AssertionError` | `McpStreamableMiddleware` 接管 legacy SSE 的 GET（`Accept: text/event-stream`）与 POST `/messages/`，新增 `handle_sse_asgi`/`handle_messages_asgi` 原始 ASGI 单响应路径；验收日志异常消失 |
+| 8 | 2297 规模下每个 lookup 全量读 JSONL 文件 | 执行级 lookup 对象池缓存（批内共享，写回目标对象后失效） |
+| 9 | ARMA+RMA 组合行年限系数误用标准行映射（r19/r20 少乘 1.4） | 组合行按 RMA 年数映射 二→1.0/三→1.4/四→1.88 |
+
+### 24.3 验证结果（全绿）
+- `python scripts/verify_m1b_capabilities.py`：**PASS=50 / FAIL=0 / SKIP=1**（SKIP=TP-04-06/EP-04-03 源连接型渠道按偏差决策 D2 挂 M4-A）。
+  - TC-04-01：33 行 golden 的 **L1 87 项硬基准零差异**（容差 1e-9）、L2 8 行 MOCK 按区域口径出数、golden "—" 项返回 null 不当 0。
+  - TC-04-02/03/04/05/07/08/09：四要素溯源、删除依赖 422＋draft MCP 403、版本锁不跟随（D 1.0.0→1.1.0 翻倍而 E 仍用旧快照）、上传型写回本地且源字段不覆盖、MCP/UI 同口径、分工边界、性能计时。
+  - TCE-04-01/02/04（EP-04-01/02/04）：null 显式计数、非法公式定义期 422 / 运行期 DIV_ZERO 不中断批次、失效版本拒绝。
+  - REST 全端点信封 + 真实 MCP SSE（6 工具、`capability_call` 清单/执行/draft 403/dry_run 不写回）。
+- L5 全量回归：`backend/tests` **93 passed / 0 failed**（`test_vs10_e2e` 5/5）。
+- M1-A 回归：`scripts/verify_m1a_dictionary.py` **PASS=75 / FAIL=0**（工具数断言同步为 ≥5，能力工具上线后为 6）。
+- 性能基线（TP-04-09，实测未冻结目标）：2297 实例库 / 33 产品行 × 6 公式（O 含 3 级 ref），3 次中位数 **896.81 ms**（样本 896.81/874.50/1006.77 ms；多轮 882–969 ms）。记入 `docs/V2-测试大纲.md` §八。
+
+### 24.4 当前进展
+- M1-B ✅ 完成（退出标准满足：TP-04 P0 全绿 + L5 回归 93/93 + M1-A 无回归）。
+- 文档/登记：`docs/API-INTERFACE-DOC.md` §18（能力层）＋§11 工具/错误码/契约同步、`docs/V2-开发里程碑.md` M1-B ✅、`docs/V2-测试大纲.md` §八实测基线、项目 wiki（`V2开发里程碑`/`source-V2-测试用例`/`log`/`index`）、本 checkpoint。
+- 临时文件 `data/tmp_mb_*` 已清理；改动已 git 提交（见本节末尾提交记录）。
+
+### 24.5 未完成 / 下一步
+1. **M1-C（V2-03 显式指定业务主键，1–2 人日）** 与 **M1-E（里程碑退出：TCE2E-01 全链 term_lookup→公式→带溯源回答）**——启动需用户明确指示。
+2. TP-04-06 / EP-04-03 源连接型渠道（批量联邦读＋成本提示＋派生图"派生数据非权威"＋fetched_at 溯源）按 D2 随 **M4-A** 交付（依赖 V2-02 实例数据模型）。
+3. 后续冻结项：golden dataset＋四类指标阈值（M3-F 前）、性能基线目标值（各基准用例前）、M4 前 D3 存量迁移方案单独评审。
+4. 用户级 wiki：本轮未定位到跨会话用户级 wiki 目录（checkpoint §22/§23 提及的 raw 快照路径），本轮仅同步项目内 wiki；下次会话若提供路径再补登记。
+5. 每切片脚本继续在 wiki `source-V2-测试用例` 登记区登记；每次交互结束追加本文件 checkpoint。。

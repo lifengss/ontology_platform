@@ -472,7 +472,7 @@
 - **接入鉴权（P0-2）**：`/mcp/{project_id}` 所有请求须带 `Authorization: Bearer <token>`（或 `?token=`）；缺失/无效 → HTTP 401 `{ "error": "UNAUTHORIZED" }`；未发布项目 → HTTP 404 `{ "error": "NOT_PUBLISHED" }`，且不出现在 `/mcp/status`（不再"连接即注册"）。token 经 §5.2 `POST /api/mcp/server/token` 生成。
 - **会话治理（P0-2）**：Streamable 会话空闲超时 30 分钟（过期后旧 `Mcp-Session-Id` 得 404，客户端重走 `initialize`）；内存驻留项目端点上限 100、空闲 30 分钟回收——**发布态以磁盘为准**（`mcp_published.json`，重启自动恢复），回收无副作用。
 
-### 11.2 工具（4 个标准工具）
+### 11.2 工具（6 个，VS2-00 后随切片递增）
 
 | 工具名 | 输入 | 输出语义 |
 |---|---|---|
@@ -480,6 +480,8 @@
 | `inference_trace` | `{ "ontology_id": "本体名称或 uuid" }` | OWL2-RL 风格推理链路 steps（同 §4 inference） |
 | `instance_get` | `{ "ontology_id": "本体名称或 uuid", "object_type": "obj_x（可选）", "instance_id": "（可选）", "limit": 50, "offset": 0, "fields": "attr1,attr2"（可选，逗号分隔字符串或数组） }` | 实例读取（P1-4）：**limit 默认 50/上限 200**、offset 翻页、fields 属性白名单投影（**字符串优先**，与 stdio bridge 一致；数组仍兼容）；返回 `{ ontology_id, total, offset, limit, has_more, count, instances }`，截断且未过滤时附 `hint` |
 | `action_invoke`(VS8) | `{ "action_id": "uuid", "confirmation_token": "uuid" }` | 确认执行 Action（**side_effect=true**；令牌须先经 `POST /api/actions/{id}/execute` 获取） |
+| `term_lookup`(M1-A) | `{ "term": "词条/同义词", "value": "键值（可选）", "dry_run": false, "confirm_cost": false }` | 数据字典解析＋多系统联邦并行查询（来源标记/未覆盖显式/冲突并存）；`dry_run=true` 仅返回成本预估、确认前零外呼 |
+| `capability_call`(M1-B) | `{ "capability": "能力 name 或 id", "instance_id": "record_id", "dry_run": false }` | 执行**已发布(active)**能力并返回四要素溯源（能力版本＋输入实例＋输入属性原值＋lookup 命中 record_id/编码/原始值）；`capability` 留空返回已发布能力清单；`dry_run=true` 不写回；draft 调用 `FORBIDDEN_DRAFT`(403) |
 
 > MCP 工具的输入/输出 schema 由本体自动生成，不在此 REST 文档约束范围内，但须与 `mcp_server` 模块实现一致。
 
@@ -504,6 +506,9 @@
 | `UNAUTHORIZED` | 无 token 或无效（HTTP 层 401） |
 | `INVALID_ARGUMENT` | 参数非法（预留） |
 | `TOO_LARGE` | 响应过大（预留） |
+| `TERM_NOT_FOUND` | 数据字典无匹配词条（不猜测，M1-A） |
+| `FEDERATED_QUERY_FAILED` | 词条覆盖的全部外部系统查询失败（M1-A） |
+| `CAPABILITY_FAILED` | 能力不存在/未发布/实例不匹配等执行失败，文本附 `http_status`（M1-B） |
 
 ### 11.4 工具契约（P-02 借鉴补丁）
 每个自动生成工具附带读写/前置后置/副作用契约，供外部 Agent 静态判断是否会改动数据，降低误调风险（完整版见 `docs/mcp_tools_contract.yaml` 与 `mcp_server.TOOLS_CONTRACT`）：
@@ -514,6 +519,8 @@
 | `inference_trace` | 推理结论, 推导路径 | — | false | 已执行过推理快照 |
 | `instance_get` | 实例ABox | — | false | 实例存在 |
 | `action_invoke`(VS8) | Action定义, 目标外部系统 | 外部系统, 本地执行日志 | **true** | Action 已定义 + 已人工确认 |
+| `term_lookup`(M1-A) | 数据字典, 外部系统（并行只读） | — | false | 字典存在可用词条 |
+| `capability_call`(M1-B) | 能力注册表, 实例ABox | 实例ABox（output_attribute + `__capability__` 元数据，dry_run 不写） | **true** | 能力 active + 实例存在且对象类型一致 |
 
 ---
 
@@ -660,3 +667,59 @@
 ```
 
 前端入口：已移除（2026-10-27 起前端不再提供空间选择器/管理卡片，UI 作用域统一为「部门 → 项目」，避免与部门维度混淆）。本节 API 完整保留，供程序化调用；若产品后续重新启用项目内多分组，可基于这些端点恢复 UI。
+
+---
+
+## 18. 能力层（capabilities，V2 / M1-B）
+
+能力 = 绑定某 `object_type` 的**派生公式**（`kind=derive` × `implementation=expression`，本切片仅实现该单元格）。注册表按项目存 `data/projects/<project_id>/capabilities.json`；前端入口为左侧「能力」页；MCP 侧工具见 §11.2 `capability_call`。
+
+### 18.1 端点（统一信封；`project_id` 走公共参数）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/capabilities` | 列表；过滤 `status`(draft/active/deprecated)、`object_type`、`q`；`data={items,total,page,page_size}` |
+| POST | `/api/capabilities` | 新建（201），状态 `draft`、版本 `1.0.0`；`name` 项目内唯一且须匹配 `^[a-z][a-z0-9_]*$` |
+| GET/PUT/DELETE | `/api/capabilities/{cap_id}` | 详情 / 局部更新 / 删除（**200 信封** `{deleted: cap_id}`；有依赖方 422） |
+| POST/GET | `/api/capabilities/{cap_id}/validate` | 定义期校验（不落库）；可传 `?draft_expression=`，返回 `{valid, issues, refs, attr_refs}` |
+| POST | `/api/capabilities/{cap_id}/publish` | 发布为 `active`，解析并锁定引用版本 |
+| GET | `/api/capabilities/{cap_id}/versions` | 版本历史（新版在前，含表达式快照与发布时间） |
+| GET | `/api/capabilities/{cap_id}/dependents` | 引用该能力的其他能力（含锁定版本） |
+| POST | `/api/capabilities/{cap_id}/execute` | 单实例执行；body `{instance_id, channel?, trigger_source?, dry_run?}` |
+| POST | `/api/capabilities/{cap_id}/execute-batch` | 批量执行；body `{instance_ids?|limit/offset, channel?, trigger_source?, dry_run?}` |
+
+`dry_run=true` 只返回计算值，**不写回实例**；非 dry_run 写回 `output_attribute` 与 `__capability__` 元数据（`capability_id/name/version`、`executed_at`、`execution_channel`、`trigger_source`、`source_instance_id`、`execution_status`、`value`、`error_*`、`trace`），**源字段不覆盖**。
+
+### 18.2 表达式（opl-expr/v1）
+
+多行顺序绑定 `name = expr`，最后一行为返回值；支持数字/字符串/布尔/`null`/字典字面量、`this.<attr>`（实例属性）、`+ - * / %`、比较、`and/or/not`/三元、白名单函数 `if / if_null / coalesce / lookup / ref / abs / round / min / max / str / contains / starts_with`。
+
+- `lookup(object_type, {attr: value}, attr)`：按维度精确查基线实例；0 命中 `LOOKUP_NOT_FOUND`、多命中 `LOOKUP_AMBIGUOUS`、维度含 null 拒绝（须 `if_null()` 显式守卫）。命中信息写入 `trace.lookups`（`matched_record_id`/`matched_code`/`value`）。
+- `ref('cap_name'[, 'x.y.z'])`：引用其他能力；仅可引用 active 或明确存在的历史版本；发布时锁定被引用方版本（快照，不自动跟随），多级引用按同一锁定链求值。
+- **null 传播**：算术遇 null 得 null + 显式计数（`null ≠ 0`），禁止当 0；需当 0 参与合计时用 `if_null(x, 0)` 显式守卫。
+- 定义期静态校验：语法/白名单/参数个数/未知标识符/`ref()` 字面量实参/常量除零/自引用；失败 422 `VALIDATION_ERROR`（或 `SYNTAX_ERROR`/`CYCLE`）。运行期 `DIV_ZERO`、`MISSING_INPUT_ATTR`、`TYPE_ERROR`、`REF_NOT_RESOLVED` 等只标记**单实例错误**，不中断批次。
+
+### 18.3 版本与引用治理
+
+| 规则 | 行为 |
+|---|---|
+| 创建 | `draft` v1.0.0，history 留快照 |
+| 发布 | `active`，`ref_locks` 锁存被引用方 `cap_id + version + 表达式快照 + hash` |
+| active 内容变更 | 自动 `minor+1` 发新版并重新锁引用；history 保留旧版可追溯 |
+| 引用目标异常 | `REF_NOT_FOUND` / `REF_NOT_ACTIVE`(draft 422) / `REF_VERSION_NOT_FOUND`(拒绝静默指向最新) / `CYCLE` |
+| 删除保护 | 有依赖方 → 422 `HAS_DEPENDENTS` + `details.dependents` 清单 |
+| MCP 通道 | 仅 active 可执行；draft → `FORBIDDEN_DRAFT`(403) |
+
+### 18.4 执行响应（四要素溯源）
+
+```json
+{ "capability_version": "1.0.0", "instance_id": "obj_x-5", "status": "success", "value": 304.46,
+  "trace": { "inputs": [{"attr":"attr_term_factor","value":1.4}],
+             "null_inputs": [], "lookups": [{"matched_record_id":"...","matched_code":"SA-001","value":88.74}], "refs": [] } }
+```
+
+批量响应另含 `total/success/error/null/duration_ms/items`（`items[].error_code|error_message|trace`）。
+
+### 18.5 验收
+
+`scripts/verify_m1b_capabilities.py`（`--no-mcp` 跳过 SSE 段）：2297 实例 + 33 行 golden，L1 87 项容差 1e-9 零差异；REST/MCP 同口径；PASS=50/FAIL=0/SKIP=1（TP-04-06 源连接型渠道按偏差决策 D2 挂 M4-A）。

@@ -115,6 +115,7 @@
     <div class="tab" data-tab="inference" onclick="switchTab('inference')">推理</div>
     <div class="tab" data-tab="action" onclick="switchTab('action')">业务动作</div>
     <div class="tab" data-tab="dictionary" onclick="switchTab('dictionary')">数据字典</div>
+    <div class="tab" data-tab="capability" onclick="switchTab('capability')">能力</div>
     <div class="tab" data-tab="mcp" onclick="switchTab('mcp')">MCP</div>
     <div class="tab" data-tab="logs" onclick="switchTab('logs')">日志</div>
     <div class="tab" data-tab="settings" onclick="switchTab('settings')">设置</div>
@@ -570,6 +571,95 @@
               <tbody id="dictAuditBody"></tbody>
             </table>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 能力页（M1-B / V2-04 首片：能力注册 + 公式引擎 + 批量执行 + 四要素溯源） -->
+    <section id="capability" class="tab-content hidden grid grid-cols-12 gap-4">
+      <div class="col-span-12 lg:col-span-7">
+        <div class="card p-4">
+          <div class="flex items-center justify-between mb-2 gap-2">
+            <div>
+              <h3 class="font-medium text-sm text-slate-200 mb-1">能力（派生型 · 公式）</h3>
+              <div class="text-xs text-slate-500 leading-relaxed">
+                能力 = 绑定对象类型的表达式：<span class="font-mono">lookup(对象类型, 维度, 属性)</span> 查引用基线、<span class="font-mono">ref('能力名')</span> 引用其他已发布能力。<b>null 传播</b>（算术遇 null 得 null，禁止当 0，须 <span class="font-mono">if_null()</span> 显式守卫）。
+                版本化：草稿 → 发布（锁定引用版本）；已发布能力内容变更自动发新版（minor+1，旧版可溯源）。被引用的能力不可删除。
+              </div>
+            </div>
+            <div class="flex gap-2 shrink-0">
+              <select id="capFilterStatus" class="w-24" onchange="loadCapabilities()">
+                <option value="">全部状态</option>
+                <option value="draft">草稿</option>
+                <option value="active">已发布</option>
+                <option value="deprecated">已弃用</option>
+              </select>
+              <button class="btn" type="button" onclick="openCapEditor()">＋ 新建能力</button>
+            </div>
+          </div>
+          <div id="capEditor" class="hidden mb-3 border border-slate-700/60 rounded-lg p-3 bg-slate-900/40"></div>
+          <div id="capValidateBox" class="hidden mb-3 text-xs"></div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs border-collapse">
+              <thead><tr class="text-slate-400">
+                <th class="border-b border-slate-700 p-1.5 text-left">name</th>
+                <th class="border-b border-slate-700 p-1.5 text-left">显示名</th>
+                <th class="border-b border-slate-700 p-1.5 text-left">对象类型</th>
+                <th class="border-b border-slate-700 p-1.5 text-left">输出属性</th>
+                <th class="border-b border-slate-700 p-1.5 text-left">版本</th>
+                <th class="border-b border-slate-700 p-1.5 text-left">状态</th>
+                <th class="border-b border-slate-700 p-1.5 text-left whitespace-nowrap">操作</th>
+              </tr></thead>
+              <tbody id="capListBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="col-span-12 lg:col-span-5">
+        <div class="card p-4">
+          <h3 class="font-medium text-sm text-slate-200 mb-1">执行</h3>
+          <div class="text-xs text-slate-500 mb-2 leading-relaxed">单实例：对指定实例执行并写回输出属性 + <span class="font-mono">__capability__</span> 元数据（源字段不覆盖）。批量：对象类型全部实例逐条执行，单实例错误不中断，<b>null 结果显式计数（null ≠ 0）</b>。</div>
+          <div class="grid grid-cols-2 gap-2 text-sm">
+            <div class="col-span-2"><label class="text-xs text-slate-400">能力 name / id</label><input id="capExecName" class="w-full font-mono text-xs" placeholder="如 cap_onsite_rate_d3"></div>
+            <div class="col-span-2"><label class="text-xs text-slate-400">实例 record_id（单实例执行）</label><input id="capExecInstanceId" class="w-full font-mono text-xs" placeholder="record_id"></div>
+            <div><label class="text-xs text-slate-400">批量 limit</label><input id="capBatchLimit" type="number" class="w-full" value="100" min="1" max="10000"></div>
+            <div class="flex items-end"><label class="text-xs text-slate-400 flex items-center gap-1"><input type="checkbox" id="capBatchDryRun"> dry_run（不写回）</label></div>
+          </div>
+          <div class="flex items-center gap-2 mt-3">
+            <button class="btn" type="button" onclick="capExecuteSingle()">单实例执行</button>
+            <button class="btn secondary" type="button" onclick="capExecuteBatch()">批量执行</button>
+          </div>
+        </div>
+        <div class="card p-4 mt-4">
+          <h3 class="font-medium text-sm text-slate-200 mb-1">执行结果（四要素溯源）</h3>
+          <div id="capExecResult" class="text-xs text-slate-500">执行后显示：值 / 错误码 / 溯源（能力版本 + 输入实例 + lookup 命中 record_id 与原始值）。</div>
+        </div>
+      </div>
+      <div class="col-span-12">
+        <div class="card p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-medium text-sm text-slate-200">批量执行明细</h3>
+            <div id="capBatchSummary" class="text-xs text-slate-400"></div>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs border-collapse">
+              <thead><tr class="text-slate-400">
+                <th class="border-b border-slate-700 p-1.5 text-left">instance_id</th>
+                <th class="border-b border-slate-700 p-1.5 text-left">status</th>
+                <th class="border-b border-slate-700 p-1.5 text-left">value</th>
+                <th class="border-b border-slate-700 p-1.5 text-left">error_code</th>
+                <th class="border-b border-slate-700 p-1.5 text-left">版本</th>
+                <th class="border-b border-slate-700 p-1.5 text-left w-72">trace（lookup 命中）</th>
+              </tr></thead>
+              <tbody id="capBatchBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="col-span-12">
+        <div class="card p-4">
+          <h3 class="font-medium text-sm text-slate-200 mb-2" id="capPanelTitle">版本历史 / 依赖</h3>
+          <div id="capPanel" class="text-xs text-slate-500">点击列表「版本」或「依赖」在此查看。</div>
         </div>
       </div>
     </section>

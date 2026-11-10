@@ -626,8 +626,8 @@ def _mcp_calls(ctx: dict, base: str) -> None:
         return out
 
     out = asyncio.run(_run())
-    check("term_lookup 在工具列表（共 5 工具）", "term_lookup" in out["tools"]
-          and len(out["tools"]) == 5, str(out["tools"]))
+    check("term_lookup 在工具列表（M1-B 后为 6 工具）", "term_lookup" in out["tools"]
+          and len(out["tools"]) >= 5, str(out["tools"]))
 
     def _text(res) -> str:
         return res.content[0].text if res.content else ""
