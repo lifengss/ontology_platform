@@ -683,3 +683,41 @@
 3. 已执行 `git commit`：`b0b779a`（main，14 files changed +1961/-54；仅含 hotfix 相关源码/脚本/文档，排除 `cost_baseline_kit/`、`docs/备份/` 与无关 `docs/数据缺口...md`）。
 4. 边界补全：远程 Fuseki 增量 SPARQL update 已做真实 remote 往返（Fuseki 5.1.0 本地，`scripts/_smoke_fuseki_remote.py` 新增/更新/删除全绿）；HF-07 业务 Excel 数值验收仍待冻结外部数据资产，未宣称通过。
 4. M2-B 启动仍需用户明确指示；M2 退出仍待 V2-14i / V2-06 / V2-09 / V2-07 / TCE2E-05/06。
+
+---
+
+## 29. 2026-11-11：M2-B（V2-14i 身份联邦）切片交付（验收 19/19；L5 回归 93/93）
+
+> 用户「可以启动后续开发了」→ 启动 M2-B。**M2-A ✅、M2-B ✅，M2 未退出**。
+
+### 29.1 已完成
+- **`backend/identity_federation/`**：平台用户→外部系统（MCP 连接）凭据映射。CRUD（create/get/list/delete）；凭据走 `credential_store` 本地加密存储（`CREDENTIAL_ENCRYPTION_ENABLED=1`＋`CREDENTIAL_MASTER_KEY` 时 Fernet 加密、chmod 600）；映射只存 `secret_ref` 引用名＋非敏感 `principal`；`resolve_credential()` 返回**引用式** auth override（bearer_token_ref / api_key_ref / client_id+client_secret_ref / username+password_ref），平台内部不持有明文；`delegated_auth_header()` 供联邦读/编排回写以访问者身份代查；缺失映射抛 `IDENTITY_MAPPING_MISSING`（403，指明缺失系统，**不回落匿名**）；审计 `identity_mapping_create/delete`、`identity_resolve`（principal 脱敏，无明文）。
+- **`backend/api/router_identity.py`**：`/api/identity/mappings`（POST/GET/GET{id}/resolve-status/DELETE）＋ `/api/identity/auth-types`；RBAC=本人可管自己、admin 可管任意（越权 403）；**所有响应不回显 secret_ref/secret**；已注册 `main.py`。
+- **mcp_client 接入**：凭据引用解析统一走 `credential_store.resolve_ref`（本地加密存储优先、env 兜底，原仅 env）；`_auth_header` 支持 `basic` 与字面量 `client_id`；`invoke_tool/_http_invoke` 新增 `auth_override` 委托身份参数。
+- **验收**：`scripts/verify_m2b_identity_federation.py` **PASS=19/FAIL=0**（临时 DATA_DIR＋合成凭据）：映射 CRUD 服务层＋API（响应无 secret_ref）、加密落盘（encrypted=true、明文不落盘、load_secret 还原）、resolve→mcp_client 委托代查（本地 mock HTTP 校验 Bearer：正确凭据 200、错误凭据 401）、缺失映射 403 指明系统、DATA_DIR＋secrets 目录 grep 无凭据明文（TC-14-11/TCE-14-04）；`compileall` 通过、lints 0。
+- **回归**：L5 `backend/tests` **93 passed / 0 failed**（102s）。
+- **文档/wiki**：`docs/API-INTERFACE-DOC.md` §23（端点契约＋解析契约＋验收边界）；`docs/V2-开发里程碑.md` M2-B ✅；项目 wiki `source-V2-测试用例` 脚本登记；本 checkpoint；用户级 wiki 同步。
+
+### 29.2 已知边界 / 未完成下一步
+1. 编排回写调用点（M3-F / V2-14 主体）与实例联邦读调用点（M4 / V2-02）在后续切片接入 `delegated_auth_header()`；本轮只交付身份联邦底座并经 mcp_client 集成测试证明委托身份真实生效。
+2. TP-06-06（源连接内容按访问者权限代查）与 M2-C 联验；凭据映射管理 UI（前端页面）随 M2-C 一并补。
+3. **下一步 M2-C（V2-06 多租户隔离＋共享等级，8–12 人日）启动需用户明确指示**；M2 退出仍待 V2-06 / V2-09 / V2-07 / TCE2E-05/06。
+4. 未执行 `git commit`（提交须用户明确指示）；本轮改动范围：`backend/identity_federation/`、`backend/api/router_identity.py`、`backend/mcp_client/__init__.py`、`backend/main.py`、`scripts/verify_m2b_identity_federation.py`、docs、项目 wiki、checkpoint。
+
+---
+
+## 30. 2026-11-11：TP-06-06 联合验收完成＋M2-B 提交（联测 13/13；M2-B 19/19 复绿；L5 93/93）
+
+> 用户指令：「1. 完成联合测试TP-06-06 2. 可以commit 3. 完成后进行M2-C开发」。
+
+### 30.1 TP-06-06 联合验收（V2-06 × M2-B）
+- 新增 `identity_federation.federated_read(project_id, *, user_id, connection, tool, params)`：**源连接型内容联邦读统一调用点**——以访问者身份代查（缺失映射即 403）、返回 `source_connection/resolved_as/result` 来源标记、审计 `identity_delegated_read`（不含结果数据与凭据明文）。
+- `scripts/verify_tp0606_delegated_read.py` **PASS=13/FAIL=0**：同一源连接 A/B 访问者各持映射，mock 源系统按 Bearer 身份返回宽 8 行/窄 3 行（敏感字段掩码）；委托身份真实传递到源系统（alice→tok_alice、bob→tok_bob，连接自带 auth 被覆盖）；缺失映射拒绝且不产生源系统调用；审计/存储 grep 无明文。
+- **如实标注边界**：范围"由业务端按访问者权限决定"中的平台侧租户/schema 过滤随 M2-C（V2-06）与 M4（V2-02）在 `federated_read()` 之上叠加；本轮证明委托链路真实生效。
+- 回归：M2-B 验收 **19/19** 复跑全绿；L5 **93/93**；lints 0；临时验收数据与测试 secret 已清理。
+
+### 30.2 git commit
+- 用户明确授权提交。范围：M2-B 源码（`identity_federation/`、`router_identity.py`、`mcp_client`、`main.py`）＋两个验收脚本＋docs（API §23、里程碑）＋项目 wiki 5 页＋checkpoint；**排除**预存无关未跟踪项（`cost_baseline_kit/`、`docs/备份/`、`docs/成本核算*.md`、`docs/数据缺口*.md` 既有改动）。
+
+### 30.3 下一步
+- **M2-C（V2-06 多租户隔离＋共享等级，8–12 人日）已获用户指示启动**：tenant_id 全链路过滤（API＋UI＋MCP）→ 四级共享（私有/项目组/部门/公开，schema 只读）→ 实例永不共享（INV-2）→ 上传型内容显式开放 → 共享降级即时收口 → 共享不授写；验收 TP-06-01~08/EP-06-01~03（TC-06-06 已提前联验）；凭据映射管理 UI 随 M2-C 一并补。

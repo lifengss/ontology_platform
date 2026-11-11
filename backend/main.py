@@ -30,6 +30,7 @@ from api.router_ontologies import router as ontologies_router
 from api.router_projects import router as projects_router
 from api.router_system import router as system_router
 from api.router_templates import router as templates_router
+from api.router_identity import router as identity_router  # V2-14i 身份联邦（M2-B）
 from config import get_settings
 from core.responses import ApiError, fail, success
 from jena_adapter.client import health as jena_health
@@ -122,6 +123,7 @@ app.include_router(templates_router)
 app.include_router(llm_router)
 app.include_router(system_router)
 app.include_router(auth_router)  # V2-05 登录鉴权与 RBAC（M2-A）
+app.include_router(identity_router)  # V2-14i 身份联邦（M2-B）
 
 
 # VS6: 由 mcp_server 模块按项目挂载 /mcp/{project_id}，双传输（2026-10-28 MCP 接入层修复）：

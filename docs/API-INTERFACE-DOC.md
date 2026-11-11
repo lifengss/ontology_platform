@@ -952,3 +952,45 @@
 - `scripts/verify_hotfix_hf01_hf07.py` **PASS=47/FAIL=0**：临时 DATA_DIR＋合成实例，覆盖定义期静态校验、REST/服务层、表达式、lookup 回退、`ontology_id` 过滤、复合唯一、变更日志、stale、RDF 文件降级、前端 PATCH 静态检查。
 - 回归：L5 `backend/tests` **93/93**；M1-A **75/75**、M1-B **50/50（SKIP=1）**、M1-C **33/33**、M1-E **26/26**、M2-A **67/67** 全绿。
 - **如实标注**：HF-07 的 Excel/业务对象/业务数值（如 `209.83`）属于外部数据资产，不在本接口验收范围；本轮只证明平台具备受限声明式 `sum/map/filter/group_by` 能力。远程 Fuseki 增量 SPARQL update **已完成真实 remote 往返**（Fuseki 5.1.0 本地：单实例新增→更新→删除，命名图内三元组随增量更新正确变化，`scripts/_smoke_fuseki_remote.py` 全绿）；文件模式降级分支仍按 §22.1 回退全量重写。
+
+## 23. 身份联邦（V2-14i / M2-B，2026-11-11）
+
+平台用户 → 各外部系统（MCP 连接）凭据映射。凭据明文仅一次性经请求传入，落 `credential_store`（本地加密存储：`CREDENTIAL_ENCRYPTION_ENABLED=1` + `CREDENTIAL_MASTER_KEY` 时 Fernet 加密、chmod 600）；平台存储与审计只存 `secret_ref` 引用名与非敏感 `principal`。**所有响应不回显 secret_ref / secret；日志与审计无凭据明文（TC-14-11）**。用途：编排回写与实例内容联邦读（平台以访问者身份代查源系统，V2-02）；缺失映射显式拒绝，不回落匿名/默认账号（TCE-14-04）。
+
+### 23.1 端点
+
+| 方法 / 路径 | 说明 | 关键字段 |
+|---|---|---|
+| `POST /api/identity/mappings` | 创建凭据映射（201） | body: `user_id` / `connection_id` / `auth_type`（bearer_token \| api_key \| oauth2_client_credentials \| basic）/ `principal`（client_id 或用户名，非敏感）/ `secret`（一次性明文，不回显） |
+| `GET /api/identity/mappings` | 列表 | query: `user_id`（默认当前用户）/ `connection_id`；非管理员仅可查本人 |
+| `GET /api/identity/mappings/{id}` | 详情 | 不含 secret_ref |
+| `GET /api/identity/mappings/{id}/resolve-status` | 完整性查询 | 返回 `auth_type` / `principal` / `has_secret`，不返回任何凭据值 |
+| `DELETE /api/identity/mappings/{id}` | 删除映射并吊销 secret | 同步删除 credential_store 内 secret 文件 |
+| `GET /api/identity/auth-types` | 支持的凭据类型清单 | — |
+
+- 鉴权：本人可管理自己的映射；`role=admin` 可管理任意用户（越权 403 `FORBIDDEN`）。
+- 同一 `(project_id, user_id, connection_id)` 重建映射为覆盖写（secret_ref 幂等：`IDFED_<project>_<conn>_<user>`）。
+- 响应记录字段：`id/project_id/user_id/connection_id/auth_type/principal/created_by/created_at/updated_at`（**无 secret_ref**）。
+
+### 23.2 内部解析契约（供联邦读 / 编排回写调用）
+
+`identity_federation.resolve_credential(project_id, user_id, connection_id)` 返回**引用式** auth override（明文由 `mcp_client` 就地解析，平台内部不持有明文）：
+
+| auth_type | override |
+|---|---|
+| `bearer_token` | `{"type":"bearer_token","bearer_token_ref":<ref>}` |
+| `api_key` | `{"type":"api_key","api_key_ref":<ref>}` |
+| `oauth2_client_credentials` | `{"type":...,"client_id":<principal>,"client_secret_ref":<ref>}` |
+| `basic` | `{"type":"basic","username":<principal>,"password_ref":<ref>}` |
+
+- `McpClient.invoke_tool(config, tool, params, auth_override=...)`：传入 override 时以映射身份调用（覆盖连接自带 auth）；`mcp_client` 凭据引用解析统一走 `credential_store.resolve_ref`（本地加密存储优先、环境变量兜底）。
+- **`identity_federation.federated_read(project_id, *, user_id, connection, tool, params)`**：源连接型内容联邦读的统一调用点（TP-06-06 / M4 V2-02 / M2-C 内容共享复用）——以访问者身份代查（缺失映射即 403），返回 `{"source_connection", "resolved_as": {user_id, auth_type}, "tool", "result"}`；审计 `identity_delegated_read`（不含结果数据与凭据明文）。
+- 缺失映射：抛 `IDENTITY_MAPPING_MISSING`（403），错误信息指明缺失的外部系统，**不回落匿名/默认账号**。
+- 审计事件：`identity_mapping_create` / `identity_mapping_delete` / `identity_resolve` / `identity_delegated_read`（detail 中 principal 已脱敏，无凭据明文）。
+
+### 23.3 验收
+
+- `scripts/verify_m2b_identity_federation.py` **PASS=19/FAIL=0**：映射 CRUD（服务层＋API）、加密落盘（明文不落盘＋load_secret 还原）、resolve→mcp_client 委托代查（本地 mock HTTP 校验 Bearer，正确凭据 200 / 错误凭据 401）、缺失映射显式拒绝、数据目录与 secrets 目录 grep 无凭据明文、API 响应不回显 secret_ref。对应 **TC-14-11 / TCE-14-04**。
+- **TP-06-06 联合验收**（V2-06 × M2-B，2026-11-11）：`scripts/verify_tp0606_delegated_read.py` **PASS=13/FAIL=0**——同一源连接、访问者 A/B 各持独立映射，`federated_read()` 以访问者身份代查（mock 源系统按 Bearer 身份返回宽 8 行 / 窄 3 行且敏感字段掩码）；断言委托身份真实传递到源系统（alice→tok_alice、bob→tok_bob，连接自带 auth 被覆盖）、同一连接 A/B 返回范围不同、缺失映射用户拒绝且不产生源系统调用、审计 `identity_delegated_read` 无明文。
+- 回归：L5 `backend/tests` **93/93** 全绿。
+- 边界：范围"由业务端按访问者权限决定"中的平台侧租户/schema 过滤随 M2-C（V2-06）与 M4（V2-02）在 `federated_read()` 之上叠加；编排回写调用点（M3-F）后续接入 `delegated_auth_header()`。

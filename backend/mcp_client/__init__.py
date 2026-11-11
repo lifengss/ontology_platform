@@ -5,6 +5,7 @@ MVP 对 HTTP transport 做通用工具调用封装；真实 MCP stdio JSON-RPC �
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -12,11 +13,13 @@ import shutil
 import subprocess  # noqa: S404
 import time
 import urllib.error
+import urllib.parse  # noqa: F401
 import urllib.request
 from typing import Any
 
 from config import get_settings
 from core.responses import ApiError
+from credential_store import resolve_ref as _cs_resolve_ref
 from ingestion import apply_field_map
 from logging_setup import get_logger
 
@@ -24,16 +27,22 @@ logger = get_logger("mcp_client")
 
 
 def _resolve_ref(ref: str | None) -> str | None:
-    """解析凭据引用：支持 ${ENV_NAME} 或直接 ENV_NAME。"""
+    """解析凭据引用：支持 ${ENV_NAME} 或直接 ENV_NAME；优先 credential_store（含本地加密存储），回退环境变量。
+
+    绝不返回明文到日志：调用方应只把 ref 名用于构造请求头，明文由本函数就地解析。
+    """
     if not ref:
         return None
-    m = re.match(r"\$\{(.+)\}", ref.strip())
-    name = m.group(1) if m else ref.strip()
-    return os.getenv(name)
+    return _cs_resolve_ref(ref)
 
 
 def _auth_header(auth: dict[str, Any]) -> dict[str, str]:
-    """根据 auth 配置生成请求头；不暴露 secret。"""
+    """根据 auth 配置生成请求头；不暴露 secret。
+
+    支持类型：bearer_token / api_key / oauth2_client_credentials / basic。
+    身份联邦委托：auth 由 identity_federation.resolve_credential 以“引用式”注入（bearer_token_ref /
+    api_key_ref / client_id+client_secret_ref / username+password_ref），本函数就地解析为请求头。
+    """
     headers: dict[str, str] = {"Accept": "application/json", "Content-Type": "application/json"}
     atype = auth.get("type")
     if atype == "bearer_token":
@@ -45,16 +54,22 @@ def _auth_header(auth: dict[str, Any]) -> dict[str, str]:
         if key:
             headers["X-API-Key"] = key
     elif atype == "oauth2_client_credentials":
-        # MVP 简化：token_url + client_id/secret 取 token（标准 client_credentials）
+        # token_url + client_id/secret 取 token（标准 client_credentials）；client_id 支持引用或字面量
         token = _fetch_oauth_token(auth)
         if token:
             headers["Authorization"] = f"Bearer {token}"
+    elif atype == "basic":
+        username = auth.get("username")
+        password = _resolve_ref(auth.get("password_ref"))
+        if username and password:
+            raw = f"{username}:{password}".encode("utf-8")
+            headers["Authorization"] = "Basic " + base64.b64encode(raw).decode("ascii")
     return headers
 
 
 def _fetch_oauth_token(auth: dict[str, Any]) -> str | None:
     token_url = auth.get("token_url")
-    client_id = _resolve_ref(auth.get("client_id_ref"))
+    client_id = auth.get("client_id") or _resolve_ref(auth.get("client_id_ref"))
     client_secret = _resolve_ref(auth.get("client_secret_ref"))
     if not token_url or not client_id or not client_secret:
         return None
@@ -132,20 +147,25 @@ class McpClient:
             "record_count": len(records),
         }
 
-    def invoke_tool(self, config: dict[str, Any], tool: str, params: dict[str, Any]) -> Any:
-        """通用 MCP/HTTP 工具调用（读写均可），返回原始结果。"""
+    def invoke_tool(self, config: dict[str, Any], tool: str, params: dict[str, Any], auth_override: dict[str, Any] | None = None) -> Any:
+        """通用 MCP/HTTP 工具调用（读写均可），返回原始结果。
+
+        auth_override：身份联邦委托时由 caller 传入（identity_federation.resolve_credential 的引用式输出），
+        优先级高于连接自带 auth；用于以访问者身份代查源系统。
+        """
         transport = config.get("transport")
         if transport in ("streamable_http", "http"):
-            return self._http_invoke(config, tool, params)
+            return self._http_invoke(config, tool, params, auth_override=auth_override)
         if transport == "stdio":
             return self._stdio_invoke(config, tool, params)
         raise ApiError("VALIDATION_ERROR", f"未知 transport: {transport}", http_status=422)
 
-    def _http_invoke(self, config: dict[str, Any], tool: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    def _http_invoke(self, config: dict[str, Any], tool: str, params: dict[str, Any], auth_override: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         endpoint = config.get("endpoint")
         if not endpoint:
             raise ApiError("VALIDATION_ERROR", "HTTP transport 缺少 endpoint", http_status=422)
-        headers = _auth_header(config.get("auth") or {})
+        auth = auth_override if auth_override is not None else (config.get("auth") or {})
+        headers = _auth_header(auth)
         body = json.dumps({"tool": tool, "params": params}).encode("utf-8")
         req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")  # noqa: S310
 

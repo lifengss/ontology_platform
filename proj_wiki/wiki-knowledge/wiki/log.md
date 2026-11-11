@@ -7,6 +7,27 @@ updated: 2026-11-11
 
 # 操作日志
 
+## [2026-11-11] test | TP-06-06 联合验收（V2-06 × M2-B）通过 13/13，M2-B＋TP-06-06 提交
+- 新增 `identity_federation.federated_read()`：源连接型内容联邦读统一调用点（委托身份代查＋来源标记＋审计 identity_delegated_read）；`scripts/verify_tp0606_delegated_read.py` **PASS=13/FAIL=0**（A/B 范围不同、委托身份真实传递、缺失映射不产生源系统调用、审计无明文）。
+- 边界如实标注：平台侧租户/schema 过滤随 M2-C（V2-06）/M4（V2-02）在 federated_read 之上叠加。
+- 登记：`docs/API-INTERFACE-DOC.md` §23.2/§23.3、`docs/V2-开发里程碑.md` M2-B 边界补记、[[身份联邦]]、[[source-V2-测试用例]]、`TASK_CHECKPOINT.md` §30。
+- 回归：M2-B 验收 **19/19** 复跑全绿；L5 **93/93**；用户已明确授权 git commit（本次提交 M2-B＋TP-06-06）。
+
+## [2026-11-11] feat | M2-B（V2-14i 身份联邦）交付：验收 19/19，L5 回归 93/93
+- 后端：`backend/identity_federation/`（平台用户→外部系统凭据映射 CRUD＋`resolve_credential` 引用式解析＋`delegated_auth_header` 委托接入＋审计脱敏）＋ `api/router_identity.py`（/api/identity/mappings*，本人/管理员 RBAC，响应不回显 secret_ref）＋ mcp_client 接入（凭据解析统一走 `credential_store.resolve_ref`、支持 basic/字面量 client_id、`invoke_tool` 新增 `auth_override` 委托身份）。
+- 安全口径：凭据走 `credential_store` 本地加密存储（Fernet＋chmod 600）；明文仅一次性经请求传入，不回显、不入库、不进日志/审计；缺失映射 `IDENTITY_MAPPING_MISSING` 403 指明缺失系统，不回落匿名/默认账号。
+- 验收：`scripts/verify_m2b_identity_federation.py` **PASS=19/FAIL=0**（CRUD/加密落盘/委托代查 200 vs 错误凭据 401/缺失映射 403/grep 无明文；对应 TC-14-11、TCE-14-04）；L5 **93/93**。
+- 登记：`docs/API-INTERFACE-DOC.md` §23、`docs/V2-开发里程碑.md` M2-B ✅、[[身份联邦]]（新页）、[[source-V2-测试用例]]、[[index]]、`TASK_CHECKPOINT.md` §29。
+- 下一步：编排回写（M3-F）与实例联邦读（M4/V2-02）后续接入 `delegated_auth_header()`；TP-06-06 与 M2-C 联验；**M2-C（V2-06 多租户＋共享）启动需用户明确指示**，M2 未退出。
+
+## [2026-11-11] fix | Hotfix HF-01~HF-07 修复：合成验收 47/47，L5 93/93，M1/M2-A 回归全绿
+- 依据 `hotfix/hotfix.md` 修复实例更新无校验、RDF 全量同步、复合唯一/lookup 回退、基线改动不失效、`ontology_id` 未过滤、字符串日期内置缺失、G7 聚合分组缺失 7 类问题。
+- 实现：`router_ingest.py` PUT/PATCH/批量＋变更日志；`validate_instance()` 业务层复合唯一（按 `scope`）；`rdf_sync.sync_instance()` 单实例增量＋文件模式全量回退；`lookup_first/coalesce_lookup/lookup_all` 与 `sum/map/filter/group_by`/字符串日期内置；`source_fingerprint`＋`affected-instances`＋`invalidate_for_baseline()`；前端字段级编辑改 PATCH。
+- **诚实边界**：HF-07 的 Excel/业务数值属外部数据资产，本轮只用合成数据验收平台声明式能力，不宣称 `209.83` 通过；远程 Fuseki 增量 SPARQL update 未做真实 remote smoke。
+- 验收：`scripts/verify_hotfix_hf01_hf07.py` **PASS=47/FAIL=0**；L5 **93/93**；M1-A **75/75**、M1-B **50/50(SKIP=1)**、M1-C **33/33**、M1-E **26/26**、M2-A **67/67**。
+- 登记：`hotfix/hotfix.md` §9、`docs/API-INTERFACE-DOC.md` §2/§15/§18.2/§22、`docs/V2-开发里程碑.md` Hotfix 节、[[source-V2-测试用例]]、[[V2开发里程碑]]、[[index]]、`TASK_CHECKPOINT.md` §28、用户级 wiki raw 快照与详情页。
+- 下一步：未执行 git commit（需用户明确指示）；M2-B 仍需用户明确指示，M2 未退出。
+
 ## [2026-11-11] feat | M2-A（V2-05 登录鉴权＋RBAC）交付：验收 67/67，L5 回归 93/93
 - 后端：`backend/auth/`（PBKDF2 密码哈希、标准库 HS256 JWT 固定 alg/恒定时间比较、用户/角色/grants/审计/撤销名单）＋`backend/api/router_auth.py`（login/logout/me/roles/users/audit/sso 预留 10 端点）＋`backend/api/auth_middleware.py` 全局过滤器（未登录 401/越权 403＋审计）；`main.py` 注册过滤器、CORS 改为凭据模式（本机任意端口正则＋`allow_credentials`）。
 - **关键决策**：JWT 只带身份与过期，权限每次实时查库 → 角色调整免重登即时生效、过期/篡改 token 不残留权限；过滤器放行 `/mcp/*`（沿用项目静态 token）、`/health`、静态资源、OPTIONS，且不改中间件层级（避免 M1-B legacy SSE 双响应复发）；`ONTOLOGY_AUTH_ENABLED=false` 仅作 L5/M1 回归测试态豁免，**默认启用、生产严禁设置**。
