@@ -749,3 +749,65 @@
 3. 凭据映射管理 UI（前端页面）仍未做（M2-B 遗留，可随 M2-D/M4 补）。
 4. **M2 剩余**：V2-09 权限审计与治理（M2-D）、V2-07 能力注册与发现（M2-E）、TCE2E-05/06；下一步切片启动需用户明确指示。
 5. **已执行 `git commit`：`9a75cb0`（main，23 files +1225/-44）**——M2-C 源码（tenant.py＋9 路由＋schemas）＋`scripts/verify_m2c_multitenant.py`＋docs（API §24、里程碑 M2-C ✅）＋前端（index.html/app.js）＋项目 wiki 4 页＋checkpoint；排除预存无关项（`cost_baseline_kit/`、`docs/备份/`、`docs/成本核算*.md`、`docs/数据缺口*.md`）。
+
+## 32. M2-E（V2-07 变更审批流）✅ ＋ M2-D（V2-09 完整审计）✅（2026-11-11）
+
+### 32.1 指令与交付
+- 用户指令：「继续」（M2-D/M2-E 开发）→ 交付后「按之前的方案处理，进度写入wiki，按需披露加载」。
+- **M2-E 变更审批流**：`backend/schemadiff.py`（语义 diff 兼容/不兼容＋版本归一/bump）＋`schemas/changesets.py`＋`api/router_changesets.py`（提交=diff 判定：**兼容自动升小版本直发**；**不兼容须升大版本**（422 `INCOMPATIBLE_REQUIRES_MAJOR`，details.breaking_changes 列明）＋pending 变更单；`supersedes` 归档旧单（新单创建成功后执行）；approve 含 `BASE_DRIFT` 409；模块锁内并发**幂等**（`_idempotent` 恰一次）；**提交人不可自审**（`changeset_review_denied` reason=self_approval）；withdraw/abandon 仅提交人；版本端点 `GET /versions`（清单不内嵌 model）、`GET /versions/{version}`（固定引用）、`POST /deprecate-attribute`（弃用=兼容升版，宽限期内真删 422 `DEPRECATION_GRACE_NOT_EXPIRED`））；`router_ontologies` 加 `_ensure_editable`（active→409 `PUBLISHED_IMMUTABLE`，PUT/PATCH/auto_save 禁直编）＋`get_ontology?version=`＋**publish 首发布写 1.0 基线快照**；`auth` `REVIEW_POST_RE` 覆盖 changesets 审批路径；MCP `ontology_query` 加 `version` 固定引用＋对象 attributes/relations id 清单（供外部 Agent 投影 instance_get fields）；前端「变更审批/审计日志」页签。
+- **M2-D 完整审计**：`api/router_audit.py`（`GET /api/audit` 组合检索 actor/action/project_id/tenant_id/target 模糊/target_id 精确/start/end 分页倒序；`GET /api/audit/export` csv/jsonl 同条件全量；`GET /api/audit/{target_type}/{id}` 单条；**PUT/PATCH/DELETE 一律 405 `AUDIT_IMMUTABLE`（INV-4 append-only）＋`audit_tamper_attempt` 留痕**；非 admin 403＋permission_denied（中间件）/audit_access_denied（路由兜底）留痕）；全链路埋点：建模五动作（before/after=model_view 或状态迁移；object_update target_id=对象 id＋detail.ontology_id 回溯）、入库（ingest_upload/approve/reject、instance_delete）、回写（action_execute/writeback）、审批（changeset_submit/approve/reject/archived/withdraw、ontology_version_publish、ontology_attribute_deprecate）。
+
+### 32.2 验收与回归
+- M2-E：`scripts/verify_m2e_changesets.py` **PASS=72/FAIL=0**（临时 DATA_DIR＋鉴权启用态＋真实 JWT＋MCP 真实 streamable HTTP `?token=` 通道；TC-07-01~08＋TCE-07-01~04；版本链 1.0→1.5→2.0 全程断言）。
+- M2-D：`scripts/verify_m2d_audit.py` **PASS=47/FAIL=0**（TC-09-01~04＋TCE-09-01；完整操作链：建模→发布→CSV 入库→审批→实例删除→Action 回写→变更驳回→本体删除→导出对比→越权→篡改）。
+- 回归：L5 `backend/tests` **93/93**（M2-E 后、M2-D 后各一轮全绿）。
+- **M2-D 验收中发现并修复 3 真实缺陷**：① 审计时间过滤字符串比较跨时区错误（落盘 +08:00 vs 查询 UTC，未来 start 仍返回记录）→ `audit._parse_ts` 绝对时间比较＋`_ts_key` 时区安全排序（query/export 双处）；② `ingest_approve` before 被 `_approve_one` 原地改写 rec 污染（before.status=imported 应为 pending）→ 调用前捕获 before_status，**并补齐 batch-approve 完全缺失的逐条审计**（before.batch=True）；③ 篡改/越权留痕缺 project_id → 请求 query 透传。
+
+### 32.3 踩坑与边界
+- Starlette `TestClient` 非 with 模式每请求新建事件循环 → MCP 端点常驻任务（`manager.run()`）随首请求循环销毁致 initialize 恒 503 → `tc_mcp.__enter__()` 持有上下文管理器（portal/loop 存活全程）。
+- `data_type` 合法集 boolean/date/datetime/float/integer/string（"number" 非法 422）；`schemadiff` 在 backend 根（非 core 包）；`McpService.generate_token` 返回 dict 记录（取 `["token"]`）。
+- 审计为 JSONL 文件 append-only（线性检索，MVP 口径；量级上来后需落库）；导出同步生成。
+- M2 剩余仅 TCE2E-05/06 端到端联验；TP-04-06/EP-04-03 按 D2 随 M4-A；凭据映射管理 UI 仍未做（M2-B 遗留，后于 §34 收口）。
+- **git commit 已执行 `f6636b1`（2026-11-12，M2 全量收口提交，M2-D/E 与 TCE2E、凭据映射 UI 合并同一提交；另 `7ba41b9` 清理遗留调试脚本）**。
+
+### 32.4 文档/wiki
+- raw 快照 `2026-11-11-M2-D审计与M2-E变更审批.md` ＋ 进展与测试 M2-E/M2-D 两节 ＋ 实体页（状态行/sources/导航表）/log 同步 ＋ 项目 wiki `source-V2-测试用例.md` 登记 M2-E/M2-D 两行 ＋ 本 checkpoint。
+
+## 33. TCE2E-05/06 端到端联验全绿——M2 全量完成（2026-11-12）
+
+### 33.1 指令与交付
+- 用户指令：「按之前的方案处理，进度写入wiki，按需披露加载」——延续既定 E2E 方案（⑦/⑧ 双上下文 RBAC 负向断言）修到全绿并沉淀 wiki。
+- **E2E harness（`scripts/verify_m2_endtoend.py`）**：⑦/⑧ 重写双上下文（alice/modeler 上传候选＋负向断言无审批入口；rita/reviewer 独立上下文会签；alice reload 后重新进入项目验证查询页——bootApp 不加载本体列表）＋⑥b 显式共享 department（V2-06 新建默认 private）；全绿后移除 tce2e_06 临时诊断监听（request/response 记 `/api/`）与超时 DBG 打印，删探针 `scripts/_probe_goto.py`。
+
+### 33.2 联验发现并修复的 2 个产品级缺陷
+1. **前端 CDN 阻塞 DOMContentLoaded**（上轮修、本轮复验固化）：`frontend/index.html` tailwind/d3 同步 CDN 脚本企业内网挂起 → DCL 永不触发 → `Page.goto` 30s 超时（间歇性，取决于 CDN 当次响应）→ CDN 本地化 `frontend/assets/vendor/`（d3.v7.min.js 279706B＋tailwindcss.js 407279B，首字节校验合法）；E2E 静态服务改进程内 `ThreadingHTTPServer`（`::` dual-stack＋逐请求 `[STATIC]` 日志）替代 `python -m http.server` 子进程；探针证实 `readyState=loading` 卡死、d3js.org 挂起。
+2. **V2-07 变更提案路径缺 O-01 字段补齐**（本轮修复）：`submit_changeset` 直接对提案模型跑 `validate_business_layer`，而前端表单不采集 `business_definition`/`stable_key`/`namespace` → UI 创建的本体提交变更单**必然 422**（『业务语义定义』为必填），审批流对 UI 创建本体完全不可用。`backend/api/router_changesets.py` 新增 `_backfill_proposal_model(model, base_model, fallback_namespace)`，在 `_published_base(rec)` 之后、`_validate_model` 之前调用：business_definition 提案值→**基线同 id 对象继承**→description→name 派生（<5 字兜底）；stable_key 提案值→**基线继承（主键属性仍在提案 attr_ids 才继承，防删属性主键漂移/diff 噪声）**→首个 required string→首个 string→任意属性（explicit 继承/自动 False）；namespace 同链。与创建/更新路径 `_backfill_object_fields` 同口径。
+
+### 33.3 验收
+- `scripts/verify_m2_endtoend.py` **TOTAL PASS=41 FAIL=0**（修复后一轮＋诊断代码清理后复跑一轮，均全绿）：TCE2E-05 22 断言（建模→发布 1.0→共享→CSV→SHACL 门禁整批拦截→违规零入库→查询页）＋TCE2E-06 19 断言（不兼容变更 pending→负向不可自审→rita 会签发布 2.0→bob(viewer) 7 tab 负向全链＋只读查询）。
+- `python -m py_compile`＋IDE lint 0 错。
+- **M2 全量完成**（M2-A/B/C/D/E＋TCE2E-05/06）；TP-04-06/EP-04-03 按 D2 随 M4-A；凭据映射管理 UI 未做（M2-B 遗留）。
+
+### 33.4 文档/wiki
+- raw 快照 `2026-11-12-TCE2E-05-06端到端联验全绿.md` ＋ 进展与测试「TCE2E-05/06」节 ＋ 实体页（状态行/sources/导航表）/log/对话历史 #32 同步 ＋ 项目 wiki `source-V2-测试用例.md` 登记 TCE2E-05/06 一行 ＋ 本 checkpoint。
+- **git commit 已执行 `f6636b1`（2026-11-12，M2 全量收口提交，与 M2-D/E、凭据映射 UI 合并同一提交）**：本轮改动＝`backend/api/router_changesets.py`＋`scripts/verify_m2_endtoend.py`＋`frontend/index.html`＋`frontend/assets/vendor/`（2 新文件）＋项目 wiki 1 行。
+
+## 34. 凭据映射管理 UI 收口——M2-B 遗留清零（2026-11-12）
+
+### 34.1 指令与交付
+- 用户指令：先问「M2-B遗留的UI是啥？」（答：身份联邦「凭据映射管理」前端 UI，后端 6 端点 19/19 已交付、页面无入口）、「M2-C没做吗？」（答：M2-C 做多租户+共享等级、未排入此项）→ **「现在先补」→ 立即实现并验收**。
+- **前端「凭据映射」tab**（`frontend/index.html`＋`frontend/app.js`）：`#credUserBox`（admin「管理用户」下拉 `#credUser`，跨用户管理）/`#credNewBtn`（＋新建映射）/`#credSummary`/`#credEditor`（连接/凭据类型/principal/secret 表单，secret type=password）/`#credTable`（连接名/principal/「已加密存储/缺失」徽标/删除按钮仅 canWrite）。app.js 模块：`loadCredentials`（连接列表→auth-types→admin 用户下拉→mappings 列表→逐行 resolve-status）、`renderCredentials`、`openCredEditor`、`saveCredMapping`（POST 含 `user_id: _credTargetUserId()`）、`deleteCredMapping`、`credCheckStatus`；helper `_credCanWrite()/_credIsAdmin()/_credMeId()/_credTargetUserId()`。
+- **RBAC 接线**：`backend/auth/__init__.py` `tabs_read` 加 `credentials`（各角色均可见＝账号级能力，建/删仍受 write 动作约束）；前端 `WRITE_BUTTON_ACTIONS` 加 `openCredEditor()`（viewer 无 write → applyPermissionMatrix 禁用按钮）。后端 §23 六端点本轮**回用未改**。
+
+### 34.2 验收
+- `scripts/verify_m2b_mapping_ui.py` **PASS=22/FAIL=0**（临时 DATA_DIR `backend/data/_m2bcred`＋鉴权启用态＋uvicorn 8000＋进程内 ThreadingHTTPServer 静态服务 8123 dual-stack＋真实 Chromium 多上下文）：②alice(modeler) 建映射（basic/alice@crm/SECRET_PLAIN）→「已加密存储」→**页面 DOM 与所有 `/api/identity/` 响应均不含明文**→删除行消失→重建；③carol(admin) 管理用户下拉选 alice→可见并删除其映射（跨用户）；④bob(viewer) tab 可见但「新建映射」按钮禁用＋管理用户下拉不可见＋REST `POST /api/identity/mappings` **403**（中间件 write 判定）。
+- 既有 `scripts/verify_m2b_identity_federation.py` 复跑 **PASS=19/FAIL=0** 无回归；L5 回归 `python -m pytest tests/ -q` **93 passed**。
+- **关键坑（Playwright option 可见性语义）**：折叠态 `<select>` 下 `<option>` 在 Playwright 可见性判定里**恒为 hidden**，`wait_for_selector` 默认 `state="visible"` 必超时（日志特征 `N × locator resolved to hidden <option ...>`）→ 必须 `state="attached"`。诊断脚本直接读 innerHTML 不触发该语义，故 diag 通而 verify 卡，曾误判时序/环境问题；加 `[API]` 响应日志＋失败现场 dump（connList/currentProject/credConn html/toasts）后定位。
+
+### 34.3 清理
+- 删临时物：`scripts/_diag_cred.py`、`_diag2.out`、`_credui_run.log`、`backend/_uvicorn_credui.err`、临时数据 `backend/data/_m2bcred`、`backend/data/_m2b_verify`；误建到真实 `backend/data/shared/auth_users.json` 的 alice/carol/bob 已移除（保留原 admin）——根因＝进程内预建账号漏 `os.environ.update(env)`＋`get_settings.cache_clear()`。
+
+### 34.4 文档/wiki
+- 项目 wiki `source-V2-测试用例.md`「测试脚本链接登记」登记 TC-14-04 UI → `scripts/verify_m2b_mapping_ui.py`（22/22 通过＋option 可见性坑）；raw 快照 `2026-11-12-凭据映射管理UI收口.md` ＋ 进展与测试「凭据映射管理 UI」节 ＋ 实体页（状态行/sources/导航表）/log/对话历史 #33 同步 ＋ 本 checkpoint。
+- **M2-B 遗留清零**：M2 全量（A/B/C/D/E＋TCE2E-05/06）＋凭据映射 UI 全部收口。
+- **git commit 已执行 `f6636b1`（2026-11-12，M2 全量收口提交，与 M2-D/E、TCE2E 合并同一提交）**：本轮改动＝`frontend/index.html`＋`frontend/app.js`＋`backend/auth/__init__.py`（tabs_read 等，含 M2-D/E 累积）＋`scripts/verify_m2b_mapping_ui.py`（新）＋项目 wiki 登记。
