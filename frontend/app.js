@@ -524,11 +524,45 @@ async function loadConnections() {
   } catch (e) { console.warn('loadConnections', e); }
 }
 
+function connHealthHtml(c) {
+  // V2-11：schema 检查健康摘要（上次检查/探测失败/超阈值/停更/待处理漂移数）
+  const sh = c.schema_health || {};
+  let html;
+  if (!sh.last_schema_check_at) {
+    html = '<span class="text-slate-500">未检查</span>';
+  } else if (sh.last_schema_check_ok === false) {
+    html = '<span class="text-rose-400">探测失败</span><div class="text-slate-500 max-w-[160px] break-all" title="' + esc(sh.last_schema_check_error || '') + '">' + esc((sh.last_schema_check_error || '').slice(0, 60)) + '</div>';
+  } else if (sh.stale) {
+    html = '<span class="text-amber-300">超阈值未检查</span><div class="text-slate-500">' + esc(String(sh.last_schema_check_at).slice(0, 19)) + '</div>';
+  } else {
+    html = '<span class="text-emerald-400">正常</span><div class="text-slate-500">' + esc(String(sh.last_schema_check_at).slice(0, 19)) + '</div>';
+  }
+  if (sh.snapshot_auto_update === 'stopped') {
+    html += '<div class="text-rose-400 font-medium">快照自动更新已停止</div>';
+  } else if (sh.open_drifts > 0) {
+    html += '<div class="text-amber-300">漂移 ' + sh.open_drifts + ' 条待处理</div>';
+  }
+  return html;
+}
+
 function renderConnections() {
   const tb = $('connTableBody');
   if (!tb) return;
+  const banner = $('connDriftBanner');
+  if (banner) {
+    // V2-11：键属性漂移停更 → 顶部告警横幅（含明细连接名）
+    const stopped = connList.filter(c => (c.schema_health || {}).snapshot_auto_update === 'stopped' || c.snapshot_auto_update === 'stopped');
+    if (stopped.length) {
+      banner.innerHTML = '<b>Schema 漂移告警（键属性）</b>：' + stopped.map(c => esc(c.display_name)).join('、') +
+        ' 的快照自动更新已停止（读取→候选/CDC 被拒）。请修正源端或映射后，点该连接「漂移」→「人工确认恢复」。';
+      banner.classList.remove('hidden');
+    } else {
+      banner.classList.add('hidden');
+      banner.innerHTML = '';
+    }
+  }
   if (!connList.length) {
-    tb.innerHTML = '<tr><td colspan="7" class="p-3 text-center text-slate-500">暂无连接。点右上「＋ 新建连接」配置业务系统 MCP Server。</td></tr>';
+    tb.innerHTML = '<tr><td colspan="8" class="p-3 text-center text-slate-500">暂无连接。点右上「＋ 新建连接」配置业务系统 MCP Server。</td></tr>';
     return;
   }
   tb.innerHTML = connList.map(c => {
@@ -544,10 +578,13 @@ function renderConnections() {
       '<td class="p-1.5 font-mono text-xs text-slate-400 break-all max-w-[220px]">' + esc(c.endpoint || '-') + '</td>' +
       '<td class="p-1.5 text-xs">' + authLabel + '</td>' +
       '<td class="p-1.5 text-xs">' + esc(maps.ontology_id || '-') + (maps.object_type ? '<div class="text-slate-500">' + esc(maps.object_type) + ' · ' + Object.keys(maps.field_map || {}).length + ' 字段映射</div>' : '') + '</td>' +
+      '<td class="p-1.5 text-xs">' + connHealthHtml(c) + '</td>' +
       '<td class="p-1.5 font-mono text-xs text-slate-400">' + esc(allow || '（全部）') + '</td>' +
-      '<td class="p-1.5 whitespace-nowrap">' +
+      '<td class="p-1.5">' +
         '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="testConnection(\'' + c.connection_id + '\')">测试</button> ' +
         '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="readConnection(\'' + c.connection_id + '\')">读取→候选</button> ' +
+        '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="schemaCheckConn(\'' + c.connection_id + '\')">检查schema</button> ' +
+        '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="openDriftPanel(\'' + c.connection_id + '\')">漂移</button> ' +
         '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="openConnEditor(\'' + c.connection_id + '\')">编辑</button> ' +
         '<button class="btn danger" style="padding:2px 8px;font-size:12px" onclick="deleteConnection(\'' + c.connection_id + '\')">删除</button>' +
       '</td></tr>';
@@ -745,7 +782,102 @@ async function deleteConnection(id) {
     await api('/api/mcp/connections/' + id, { method: 'DELETE' });
     toast('连接已删除', 'ok');
     await loadConnections();
+    closeDriftPanel();
   } catch (e) { toast('删除失败: ' + e.message, 'err'); }
+}
+
+// ---- V2-11（M3-A）：schema 漂移检查 + 漂移面板 ----
+async function schemaCheckConn(id) {
+  toast('正在检查 schema（只拉字段结构，不拉数据值）…', 'info');
+  try {
+    const j = await api('/api/mcp/connections/' + id + '/schema-check', { method: 'POST', body: '{}' });
+    const d = j.data || {};
+    if (d.status === 'probe_failed') toast('schema 探测失败（不判定漂移，源不可达/鉴权失败）：' + (d.error || ''), 'err', 8000);
+    else if (d.severity === 'key') toast('检测到键属性漂移（' + (d.items || []).length + ' 项）：该连接快照自动更新已停止，请修正后在「漂移」面板人工确认恢复', 'err', 10000);
+    else if (d.severity === 'attribute') toast('检测到非键属性漂移（' + (d.items || []).length + ' 项）：联邦读将显式标记该字段，快照更新可继续', 'info', 8000);
+    else if (d.severity === 'unmapped') toast('发现未映射新字段 ' + (d.items || []).length + ' 个（仅提示补映射，不阻断）', 'info', 8000);
+    else toast('schema 检查通过，无漂移', 'ok');
+    await loadConnections();
+    if (driftConnId === id) await openDriftPanel(id);
+  } catch (e) { toast('schema 检查失败: ' + e.message, 'err', 6000); }
+}
+
+let driftConnId = null;
+const DRIFT_KIND_LABELS = {
+  key_missing: '键字段缺失', key_type_changed: '键字段类型变化',
+  attr_missing: '属性字段缺失', attr_type_changed: '属性字段类型变化',
+  new_unmapped: '未映射新字段',
+};
+
+async function openDriftPanel(id) {
+  driftConnId = id;
+  const box = $('connDriftPanel');
+  if (!box) return;
+  box.classList.remove('hidden');
+  box.innerHTML = '<div class="text-xs text-slate-500">加载漂移记录…</div>';
+  try {
+    const j = await api('/api/mcp/connections/' + id + '/drifts?status=all');
+    renderDriftPanel(j.data || {});
+  } catch (e) {
+    box.innerHTML = '<div class="text-xs text-rose-400">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderDriftPanel(d) {
+  const box = $('connDriftPanel');
+  if (!box) return;
+  const recs = d.items || [];
+  const connName = (connList.find(c => c.connection_id === driftConnId) || {}).display_name || driftConnId;
+  if (!recs.length) {
+    box.innerHTML = '<div class="text-xs text-slate-400 mb-2">连接「' + esc(connName) + '」暂无 schema 漂移记录。' +
+      '可点「检查schema」手动触发一次探测（与周期探测同一管道）。</div>' +
+      '<button class="btn secondary" type="button" style="padding:2px 10px;font-size:12px" onclick="closeDriftPanel()">关闭</button>';
+    return;
+  }
+  box.innerHTML = '<div class="text-xs text-slate-400 mb-2">连接「' + esc(connName) + '」的 schema 漂移记录（恢复仅允许人工确认，不允许自动恢复）</div>' +
+    recs.map(r => {
+      const rows = (r.items || []).map(i =>
+        '<tr class="border-b border-slate-700/40">' +
+        '<td class="p-1 font-mono">' + esc(i.field || '-') + '</td>' +
+        '<td class="p-1 font-mono">' + esc(i.property || '-') + '</td>' +
+        '<td class="p-1">' + esc(DRIFT_KIND_LABELS[i.kind] || i.kind) +
+          (i.severity === 'key' ? ' <span class="text-rose-400">（键）</span>' : '') + '</td>' +
+        '<td class="p-1 text-slate-400">' + esc(i.expected || '-') + ' → ' + esc(i.actual || '-') + '</td></tr>').join('');
+      const head = r.status === 'open'
+        ? '<span class="text-rose-400 font-medium">待处理</span>' +
+          '<button class="btn" type="button" style="padding:2px 10px;font-size:12px;margin-left:auto" onclick="resolveDrift(\'' + esc(r.connection_id) + '\',\'' + esc(r.id) + '\')">人工确认恢复</button>'
+        : '<span class="text-emerald-400">已确认</span><span class="text-slate-500" style="margin-left:auto">确认人 ' + esc(r.resolved_by || '-') + ' · ' + esc((r.resolved_at || '').slice(0, 19)) + '</span>';
+      return '<div class="mb-2 p-2 rounded border border-slate-700/60">' +
+        '<div class="flex items-center gap-2 mb-1 text-xs">' +
+        '<span class="text-slate-500">检测于 ' + esc((r.detected_at || '').slice(0, 19)) + '（通道 ' + esc(r.last_detected_source || r.source || '-') + '）</span>' +
+        head + '</div>' +
+        '<table class="w-full text-xs border-collapse"><thead><tr class="text-slate-500">' +
+        '<th class="border-b border-slate-700 p-1 text-left">源字段</th><th class="border-b border-slate-700 p-1 text-left">本体属性</th>' +
+        '<th class="border-b border-slate-700 p-1 text-left">漂移类型</th><th class="border-b border-slate-700 p-1 text-left">期望 → 实际</th></tr></thead><tbody>' +
+        rows + '</tbody></table></div>';
+    }).join('') +
+    '<button class="btn secondary mt-1" type="button" style="padding:2px 10px;font-size:12px" onclick="closeDriftPanel()">关闭</button>';
+}
+
+async function resolveDrift(connId, driftId) {
+  if (!confirm('人工确认该漂移已处理（源端已恢复/映射已修正）？\n确认后清除漂移标记；若该连接已无其他待处理漂移，快照自动更新将恢复。')) return;
+  try {
+    const j = await api('/api/mcp/connections/' + connId + '/drifts/' + driftId + '/resolve', { method: 'POST', body: '{}' });
+    const d = j.data || {};
+    toast(d.resumed_snapshot_auto_update
+      ? '漂移已人工确认，快照自动更新已恢复'
+      : '漂移已人工确认（该连接仍有其他待处理漂移，快照更新保持停止）', 'ok', 6000);
+    await loadConnections();
+    await openDriftPanel(connId);
+  } catch (e) { toast('确认恢复失败: ' + e.message, 'err', 6000); }
+}
+
+function closeDriftPanel() {
+  driftConnId = null;
+  const box = $('connDriftPanel');
+  if (!box) return;
+  box.classList.add('hidden');
+  box.innerHTML = '';
 }
 
 let _lastTab = '';
@@ -5063,12 +5195,16 @@ function renderDictResult(res) {
       '<div class="overflow-x-auto"><table class="w-full text-xs border-collapse"><thead><tr class="text-slate-500">' +
       '<th class="border-b border-slate-700 p-1 text-left">属性</th><th class="border-b border-slate-700 p-1 text-left">值</th>' +
       '<th class="border-b border-slate-700 p-1 text-left">冲突</th><th class="border-b border-slate-700 p-1 text-left">来源</th></tr></thead><tbody>' +
-      res.merged.map(m => Object.entries(m.fields || {}).map(([prop, f]) =>
-        '<tr class="border-b border-slate-700/40 align-top"><td class="p-1 font-mono">' + esc(prop) + '</td>' +
-        '<td class="p-1">' + (f.conflict ? '-' : esc(f.value == null ? '（空）' : String(f.value))) + (f.authoritative ? ' <span class="text-emerald-400 text-[11px]">[权威]</span>' : '') + '</td>' +
+      res.merged.map(m => Object.entries(m.fields || {}).map(([prop, f]) => {
+        // V2-11 TP-11-02/EP-11-03：schema 漂移字段显式标记（不静默放行、不当作有效旧值）
+        const marks = (f.drift_marks || []).map(mk =>
+          '<div class="text-amber-300 text-[11px] mt-0.5" title="' + esc(mk.message || '') + '">[漂移] ' + esc(mk.connection) + ' · ' + esc(mk.field) + '（' + esc(DRIFT_KIND_LABELS[mk.kind] || mk.kind || '') + '）</div>').join('');
+        return '<tr class="border-b border-slate-700/40 align-top"><td class="p-1 font-mono">' + esc(prop) + '</td>' +
+        '<td class="p-1">' + (f.conflict ? '-' : esc(f.value == null ? '（空）' : String(f.value))) + (f.authoritative ? ' <span class="text-emerald-400 text-[11px]">[权威]</span>' : '') + marks + '</td>' +
         '<td class="p-1 ' + (f.conflict ? 'text-amber-300' : 'text-slate-600') + '">' + (f.conflict ? '是' : '') + '</td>' +
         '<td class="p-1 text-slate-400">' + Object.entries(f.sources || {}).map(([src, v]) =>
-          esc(src) + '=' + esc(v == null ? '（空）' : String(v))).join('<br>') + '</td></tr>').join('')).join('') +
+          esc(src) + '=' + esc(v == null ? '（空）' : String(v))).join('<br>') + '</td></tr>';
+      }).join('')).join('') +
       '</tbody></table></div></div>';
   }
   if (!res.per_system && !res.cost_estimate && !res.candidates) {

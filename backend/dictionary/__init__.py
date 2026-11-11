@@ -342,7 +342,7 @@ def _cost_estimate(covered: list[dict[str, Any]], limit: int) -> dict[str, Any]:
 
 
 def _fetch_one(client, c: dict[str, Any], term: dict[str, Any],
-               norm_value: str, limit: int) -> dict[str, Any]:
+               norm_value: str, limit: int, project_id: str = "") -> dict[str, Any]:
     """单系统取数（调用方在独立线程执行）：失败显式返回 error，不吞。"""
     sid = c.get("connection_id") or ""  # system_bindings 以 connection_id 为键（与 federated_lookup/_merge 一致）
     sys_field = (term.get("system_bindings") or {}).get(sid) or ""
@@ -382,6 +382,14 @@ def _fetch_one(client, c: dict[str, Any], term: dict[str, Any],
         return {"status": "error", "code": "MCP_DIRTY_DATA",
                 "error": f"系统 {sid} 返回 {rejected} 行脏数据（缺键字段 '{sys_field}' 或非对象行），全部拒收",
                 "rejected_rows": rejected, "latency_ms": latency_ms}
+    # V2-11 TP-11-08：联邦读异常反馈——源字段缺失作为漂移信号（不阻断本次查询）
+    if project_id and clean:
+        try:
+            from schema_drift import field_feedback
+
+            field_feedback(project_id, c, clean, actor="federation", source="federation")
+        except Exception:  # noqa: BLE001
+            logger.debug("federation 漂移反馈跳过", exc_info=True)
     return {"status": "ok", "row_count": len(clean), "truncated": truncated,
             "fetch_mode": mode, "rejected_rows": rejected,
             "latency_ms": latency_ms, "records": clean}
@@ -398,6 +406,18 @@ def _merge(covered: list[dict[str, Any]], results: dict[str, dict[str, Any]],
         for c in covered:
             if c.get("connection_id") == auth:
                 auth_aliases.add(c.get("display_name") or auth)
+    # V2-11 TP-11-02/EP-11-03：各连接 open 的非键属性漂移标记 {connection_id: {源字段: item}}
+    drift_marks: dict[str, dict[str, dict[str, Any]]] = {}
+    try:
+        from schema_drift import open_attribute_marks
+
+        for c in covered:
+            sid = c.get("connection_id") or ""
+            marks = open_attribute_marks(project_id, sid)
+            if marks:
+                drift_marks[sid] = marks
+    except Exception:  # noqa: BLE001——标记失败不阻断查询
+        pass
     fields_acc: dict[str, dict[str, Any]] = {}
     present_in: list[str] = []
     for c in covered:
@@ -417,6 +437,15 @@ def _merge(covered: list[dict[str, Any]], results: dict[str, dict[str, Any]],
                 cell = fields_acc.setdefault(prop, {"value": None, "conflict": False,
                                                      "authoritative": None, "sources": {}})
                 cell["sources"][(c.get("display_name") or sid)] = v
+                mark = (drift_marks.get(sid) or {}).get(k)
+                if mark:
+                    # 漂移期字段显式标记（值即使非空也标注：不静默放行）
+                    cell.setdefault("drift_marks", []).append({
+                        "connection": c.get("display_name") or sid,
+                        "field": k,
+                        "kind": mark.get("kind"),
+                        "message": f"该字段处于 schema 漂移（{mark.get('kind')}），值为显式漂移标记、不作有效旧值使用；详见 /api/mcp/connections/{sid}/drifts",
+                    })
     for prop, cell in fields_acc.items():
         vals = list(cell["sources"].values())
         if len({str(v) for v in vals}) <= 1:
@@ -430,6 +459,31 @@ def _merge(covered: list[dict[str, Any]], results: dict[str, dict[str, Any]],
                 cell["authoritative"] = hit
             else:
                 cell["value"] = None  # 冲突且无权威来源：两值并存，由调用方/用户裁决
+    # V2-11：源字段缺失类漂移补显式 cell（字段不在任何行中 → value 显式 null＋漂移标记）
+    for c in covered:
+        sid = c.get("connection_id") or ""
+        marks = drift_marks.get(sid)
+        if not marks:
+            continue
+        r = results.get(sid) or {}
+        row_fields: set[str] = set()
+        if r.get("status") == "ok":
+            for row in r.get("records", []):
+                if isinstance(row, dict):
+                    row_fields.update(row.keys())
+        fmap, _src = resolve_field_map(project_id, c)
+        for src, mark in marks.items():
+            if src in row_fields:
+                continue  # 字段仍在（类型变化等），行循环已标记
+            prop = fmap.get(src, src)
+            cell = fields_acc.setdefault(prop, {"value": None, "conflict": False,
+                                                 "authoritative": None, "sources": {}})
+            cell.setdefault("drift_marks", []).append({
+                "connection": c.get("display_name") or sid,
+                "field": src,
+                "kind": mark.get("kind"),
+                "message": f"源系统该字段缺失（schema 漂移 {mark.get('kind')}），值显式标记为 null、不作有效旧值使用；详见 /api/mcp/connections/{sid}/drifts",
+            })
     if not fields_acc:
         return []
     return [{
@@ -560,7 +614,7 @@ def federated_lookup(project_id: str, input_term: str, value: str = "",
     results: dict[str, dict[str, Any]] = {}
     if covered:
         with ThreadPoolExecutor(max_workers=max(1, min(8, len(covered)))) as ex:
-            futs = {ex.submit(_fetch_one, client, c, term, norm_value, limit): c
+            futs = {ex.submit(_fetch_one, client, c, term, norm_value, limit, project_id): c
                     for c in covered}
             for fut, c in futs.items():
                 results[c.get("connection_id") or ""] = fut.result()

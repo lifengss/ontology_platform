@@ -83,6 +83,13 @@ class Settings:
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO")
         self.log_dir: str = os.getenv("LOG_DIR", os.path.join(os.path.dirname(__file__), "logs"))
 
+        # V2-11（M3-A）：schema 漂移检测
+        # 周期探测开关（只拉字段结构、不拉数据值）；周期秒数；
+        # 连接健康视图「长期未检查」阈值 = stale_multiplier × 探测周期
+        self.schema_drift_probe_enabled: bool = _env_bool("ONTOLOGY_SCHEMA_DRIFT_PROBE_ENABLED", True)
+        self.schema_drift_probe_interval_seconds: int = _env_int("ONTOLOGY_SCHEMA_DRIFT_PROBE_INTERVAL_SECONDS", 300)
+        self.schema_drift_stale_multiplier: float = _env_float("ONTOLOGY_SCHEMA_DRIFT_STALE_MULTIPLIER", 3.0)
+
     def ensure_dirs(self) -> None:
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)

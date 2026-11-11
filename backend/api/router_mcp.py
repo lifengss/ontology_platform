@@ -1,10 +1,10 @@
-"""MCP 接入路由（UC3/UC4 / VS6,VS7,VS9）：连接配置 CRUD + 连通测试 + 读取 + Server 发布。"""
+"""MCP 接入路由（UC3/UC4 / VS6,VS7,VS9）：连接配置 CRUD + 连通测试 + 读取 + Server 发布 + V2-11 schema 漂移。"""
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 
 from api.dependencies import project_id_param
@@ -16,8 +16,9 @@ from logging_setup import get_logger
 from mcp_client import McpClient
 from mcp_server import get_mcp_server
 from schemas.mcp import ConnectionConfig, ConnectionCreate
+from schema_drift import assert_connection_allowed, check_connection, field_feedback, health_info, resolve_drift
 
-from tenant import project_tenant_guard  # V2-06 租户隔离（TC-06-01）
+from tenant import current_user, project_tenant_guard  # V2-06 租户隔离（TC-06-01）/ V2-11 审计 actor
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"], dependencies=[Depends(project_tenant_guard)])
 logger = get_logger("api.mcp")
@@ -43,10 +44,6 @@ def _now() -> str:
 
 def _make_candidate_id() -> str:
     return uuid.uuid4().hex
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _instance_counts(project_id: str) -> dict[str, int]:
@@ -83,7 +80,16 @@ def list_connections(
     items = _connections_for(project_id).all()
     total = len(items)
     start = (page - 1) * page_size
-    return success(list_payload(items[start: start + page_size], total, page, page_size))
+    page_items = []
+    for it in items[start: start + page_size]:
+        item = dict(it)
+        # V2-11：列表内嵌 schema 检查健康摘要（上次检查/距上次秒/超阈值/停更/open 漂移数）
+        try:
+            item["schema_health"] = health_info(project_id, it["id"])
+        except ApiError:
+            pass
+        page_items.append(item)
+    return success(list_payload(page_items, total, page, page_size))
 
 
 @router.get("/connections/{connection_id}")
@@ -124,6 +130,7 @@ def test_connection(connection_id: str, project_id: str = Depends(project_id_par
 
 @router.post("/connections/{connection_id}/read")
 def read_connection(
+    request: Request,
     connection_id: str,
     project_id: str = Depends(project_id_param),
     tool: str | None = None,
@@ -133,6 +140,9 @@ def read_connection(
     rec = conn_store.get(connection_id)
     if not rec:
         raise ApiError("NOT_FOUND", "连接不存在", http_status=404)
+
+    # V2-11 门禁：键属性漂移停止期间，拒绝该连接的快照更新（读取→候选）
+    assert_connection_allowed(project_id, connection_id)
 
     allowlist = rec.get("tool_allowlist") or []
     tool = tool or rec.get("maps_to_ontology", {}).get("read_tool")
@@ -159,6 +169,10 @@ def read_connection(
     raw = _client.read(eff_rec, tool or "read", params or {})
     records = raw.get("records", [])
 
+    # V2-11 TP-11-07：快照更新（入库读取）时结构比对——源字段缺失作为漂移信号（不阻断本次读取）
+    _actor = (current_user(request) or {}).get("username", "-")
+    field_feedback(project_id, eff_rec, records, actor=_actor, source="ingest")
+
     obj = next((o for o in ontology.get("objects", []) if o["id"] == object_type), None)
     valid_attrs = {a["id"] for a in obj.get("attributes", [])} if obj else set()
     instances = apply_field_map(records, field_map, object_type, connection_id, valid_attrs)
@@ -183,6 +197,53 @@ def read_connection(
         "record_count": len(instances),
         "object_type": object_type,
     })
+
+
+# --------------------------------------------------------------------------- #
+# V2-11（M3-A）：schema 漂移检测 + 连接健康视图
+# --------------------------------------------------------------------------- #
+@router.get("/connections/{connection_id}/drifts")
+def list_drifts(
+    connection_id: str,
+    status: str = Query(default="all", pattern="^(all|open|resolved)$"),
+    project_id: str = Depends(project_id_param),
+):
+    """V2-11：该连接的 schema 漂移记录（含明细项列表；status: all|open|resolved）。"""
+    from schema_drift import _drift_store
+
+    if not _connections_for(project_id).get(connection_id):
+        raise ApiError("NOT_FOUND", "连接不存在", http_status=404)
+    recs = [d for d in _drift_store(project_id).all() if d.get("connection_id") == connection_id]
+    if status != "all":
+        recs = [d for d in recs if d.get("status") == status]
+    recs.sort(key=lambda d: d.get("detected_at") or "", reverse=True)
+    return success({"items": recs, "total": len(recs), "page": 1, "page_size": len(recs)})
+
+
+@router.post("/connections/{connection_id}/schema-check")
+def schema_check(request: Request, connection_id: str, project_id: str = Depends(project_id_param)):
+    """V2-11：手动 schema 检查（复用周期探测同一管道；检查后距上次时间清零）。
+
+    write 权限：检查可能使连接进入「快照自动更新停止」状态。
+    """
+    actor = (current_user(request) or {}).get("username", "-")
+    return success(check_connection(project_id, connection_id, source="manual", actor=actor))
+
+
+@router.post("/connections/{connection_id}/drifts/{drift_id}/resolve")
+def drift_resolve(request: Request, connection_id: str, drift_id: str, project_id: str = Depends(project_id_param)):
+    """V2-11：人工确认漂移恢复（唯一恢复路径，不允许自动恢复）。"""
+    actor = (current_user(request) or {}).get("username", "-")
+    return success(resolve_drift(project_id, connection_id, drift_id, actor=actor))
+
+
+@router.get("/connections/{connection_id}/health")
+def connection_health(connection_id: str, project_id: str = Depends(project_id_param)):
+    """V2-11：连接健康视图——上次 schema 检查时间/距上次秒/探测周期/超阈值「长期未检查」标记。
+
+    成功率/熔断/CDC 状态随 M3-D（V2-12）补齐（cdc_status 先返回 planned_m3d）。
+    """
+    return success(health_info(project_id, connection_id))
 
 
 class _McpServerOpBody(BaseModel):

@@ -820,3 +820,31 @@
 - 推送后 `main` 与 `origin/main` 完全同步（`[origin/main]` 无 ahead）。远端＝`https://github.com/lifengss/ontology_platform.git`。
 - 工作区仍有成本核算业务线未提交项（数据缺口文档/cost_baseline_kit/docs/备份/成本核算*.md）——与 M2 代码无关，**未推送、保留**。
 - 用户级 wiki 对话历史 #34 末句「git push 未执行」为当时时点记录，以本 §35 为准；项目记忆同步刷新。
+
+## 36. M3-A 交付——V2-11 schema 漂移停快照自动更新（2026-11-12）
+
+### 36.1 指令与交付
+- 用户指令：**「按里程碑顺序，完成所有M3、M4需求。中间不需要询问我。进度自动存wiki，按需披露。授权所有代码执行」**。M3 序列＝A schema漂移→B 血缘→C 数据健康度→D 流式CDC→E 回写风险→F Action编排→G 退出＋push。
+- **后端（本轮）**：
+  - `backend/config.py`：3 个新 env 配置（`ONTOLOGY_SCHEMA_DRIFT_PROBE_ENABLED=true`/`_INTERVAL_SECONDS=300`/`_STALE_MULTIPLIER=3.0`）。
+  - `backend/mcp_client/__init__.py`：`McpClient.probe_schema()`——两级回退探测（`GET {origin}/schema` → 404 回退 `POST {endpoint} {tool:"schema"}`），错误分级 401/403→`MCP_AUTH_ERROR`、不可达→`MCP_UNREACHABLE`、其他→`MCP_SCHEMA_ERROR`；非 http transport→501。
+  - `backend/schema_drift/__init__.py`（新，~480 行核心模块）：`check_connection(project_id, connection_id, source, actor)` 统一管道（探测→`compare_schema` 比对→`_upsert_open` 每连接唯一 open 记录合并→key 级置 `snapshot_auto_update=stopped`＋`_alert` 审计告警→健康位 `last_schema_check_at/ok/ms/error/version`）；`compare_schema` 五种 kind（key_missing/key_type_changed/attr_missing/attr_type_changed/new_unmapped，severity key/attribute/unmapped，类型按 family 归一）；`resolve_drift`（**唯一恢复路径**，重复 409 `ALREADY_RESOLVED`，无 open 剩余→恢复 active）；`assert_connection_allowed`（门禁 409 `SCHEMA_DRIFT_STOPPED`）；`open_attribute_marks`（联邦读标记源）；`field_feedback`（ingest/federation 缺失类反馈，records 空不触发、永不抛错）；`health_info`（含 `cdc_status=planned_m3d`，M3-D 前不显示假健康）；`_probe_loop`（周期线程：遍历 projects×http 连接）。
+  - `backend/api/router_mcp.py`：4 新端点（`POST .../schema-check`、`GET .../drifts?status=`、`POST .../drifts/{id}/resolve`、`GET .../health`）＋列表项内嵌 `schema_health`＋`read` 端点门禁＋读取后 ingest 结构反馈；审计 actor 取 `tenant.current_user(request)`。
+  - `backend/dictionary/__init__.py`：`_fetch_one` 成功路径调 `field_feedback(source="federation")`（不阻断）；`_merge` 对 open 属性漂移字段在合并单元格附加 `drift_marks`，源字段缺失时补显式空值 cell（value=null＋缺失标记，EP-11-03）。
+  - `backend/main.py`：startup 新增 `_start_schema_drift_probe`（daemon 线程，受 PROBE_ENABLED 控制）。
+- **前端（`frontend/index.html`＋`frontend/app.js`）**：连接表新增「schema 健康」列（`connHealthHtml`：未检查/正常/探测失败/超阈值/停更/待处理数）＋行内「检查schema」「漂移」按钮＋顶部键漂移告警横幅（`connDriftBanner`）＋漂移面板（`connDriftPanel`：明细 kind/property/severity/期望→实际＋「人工确认恢复」）＋联邦查询合并结果 `drift_marks` 渲染（琥珀色 [漂移] 标记）。函数：`schemaCheckConn`/`openDriftPanel`/`renderDriftPanel`/`resolveDrift`/`closeDriftPanel`。
+- **设计口径**：①探测失败≠漂移（EP-11-01）；②恢复仅人工、不自动（源修复后旧 open 记录仍在，须再确认）；③键重命名＝key_missing＋new_unmapped 组合识别；④比对严格按 stable_key 反查源字段（TP-11-04 不误报）；⑤attribute/unmapped 不停更不阻断，仅显式标记/提示。
+
+### 36.2 验收
+- `scripts/verify_m3a_schema_drift.py` **PASS=47/FAIL=0**（临时 DATA_DIR `_m3a_verify`＋进程内 `ControllableMockSystem` schema 热变 rename/add/remove/change_type＋TestClient with 模式；周期线程 env 关闭，periodic 通道以 `check_connection(source="periodic")` 直调同管道验证）：TP-11-01~11 ＋ EP-11-01/02/03 全覆盖（见 §36.1 口径）。
+- L5 回归 `python -m pytest tests/ -q` **93/93** 全绿无回归。
+- **关键坑**：①`current_user` 在 `tenant` 模块（不在 `api.dependencies`），router_mcp 曾因 import 路径错致 main 导入失败；②mock 数据面路径是 `/read` 非 `/mcp/read`（`{origin}/schema` 探测另走）；③MCP 连接鉴权 type 是 `bearer_token`（非 `bearer`），token 引用 `${ENV}` 经 credential_store 回退 env 解析；④mock 管理头 `X-Mock-Admin`（默认 key 非 "adm"，需构造时传 `admin_key="adm"`）；⑤`resolve_drift` 返回 `status:"resolved"`（无 `resolved` 布尔键）。
+- 脚本断言细节：stale 判定用 `ONTOLOGY_SCHEMA_DRIFT_STALE_MULTIPLIER=0.000001` 把阈值压到 0s 确定性断言；不可达端点用「bind 后立即 close 的随机端口」。
+
+### 36.3 文档/wiki
+- `docs/API-INTERFACE-DOC.md`：§1.3 错误码表加 `SCHEMA_DRIFT_STOPPED`/`ALREADY_RESOLVED`；§5.2 端点表加 4 新端点＋read 门禁注记；新增 **§25**（探测协议/漂移分级表/端点契约/配置/验收/边界如实标注）。
+- 项目 wiki `source-V2-测试用例.md`「测试脚本链接登记」登记 M3-A 行（47/47 通过＋L5 93/93）。
+- 本 checkpoint ＋ 用户级 wiki（raw 快照/进展与测试/实体页/log/对话历史）同步。
+
+### 36.4 状态
+- M3-A **已交付并 commit**（见 git log）；M3 剩余：B 血缘→C 数据健康度→D 流式CDC→E 回写风险→F Action编排→G 退出＋push；随后 M4 全片＋终验＋push。里程碑退出时才 push（用户指令）。

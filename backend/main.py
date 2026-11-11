@@ -148,6 +148,18 @@ async def _start_mcp_sweeper():
     _mcp_server.start_sweeper()
 
 
+@app.on_event("startup")
+async def _start_schema_drift_probe():
+    # V2-11（M3-A）：schema 漂移周期探测（source=periodic）。
+    # 全局单循环遍历 项目×http 连接，复用 check_connection 统一管道；daemon 线程随进程退出。
+    if settings.schema_drift_probe_enabled:
+        import threading
+
+        from schema_drift import _probe_loop
+
+        threading.Thread(target=_probe_loop, name="schema-drift-probe", daemon=True).start()
+
+
 @app.get("/mcp/status")
 def mcp_status(project_id: str | None = Query(default=None)):
     return success(_mcp_server.status(project_id=project_id))

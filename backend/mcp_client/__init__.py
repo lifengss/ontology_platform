@@ -198,6 +198,72 @@ class McpClient:
         # MVP 占位：真实 MCP stdio 需要 JSON-RPC session，先不支持
         raise ApiError("NOT_IMPLEMENTED", "stdio MCP 读取在 MVP 中未实现", http_status=501)
 
+    def probe_schema(self, config: dict[str, Any]) -> dict[str, Any]:
+        """V2-11：schema 探测——只拉源端字段结构，不拉数据值（数据不落平台）。
+
+        探测协议（两级回退）：
+        1. GET {origin}/schema：源端结构探测端点（mock 源系统原生支持，仅返回 fields/key_field/schema_version）；
+        2. POST {endpoint} {tool: "schema"}：MCP 工具式探测（源端仅支持 MCP 接口时）。
+        返回 {"fields": [{"name","type"}], "key_field": str|None, "schema_version": int|None}。
+        错误分级与 read 一致：401/403 → MCP_AUTH_ERROR（不重试）；不可达 → MCP_UNREACHABLE。
+        """
+        transport = config.get("transport")
+        if transport not in ("streamable_http", "http"):
+            raise ApiError("TRANSPORT_NOT_SUPPORTED", "V2-11 schema 探测当前仅支持 http transport（stdio 随 M3-D）", http_status=501)
+        endpoint = config.get("endpoint")
+        if not endpoint:
+            raise ApiError("VALIDATION_ERROR", "HTTP transport 缺少 endpoint", http_status=422)
+        auth = config.get("auth") or {}
+        headers = _auth_header(auth)
+
+        # 1) GET {origin}/schema（结构探测专用端点）
+        parts = urllib.parse.urlsplit(endpoint)
+        schema_url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, "/schema", parts.query, ""))
+        try:
+            req = urllib.request.Request(schema_url, headers=headers, method="GET")  # noqa: S310
+            with urllib.request.urlopen(req, timeout=self.settings.mcp_timeout_seconds) as resp:  # noqa: S310
+                data = json.loads(resp.read().decode("utf-8"))
+            fields = data.get("fields") or data.get("data")
+            if not isinstance(fields, list):
+                raise ApiError("MCP_SCHEMA_ERROR", "schema 探测返回缺少 fields 列表", http_status=502)
+            return {
+                "fields": fields,
+                "key_field": data.get("key_field"),
+                "schema_version": data.get("schema_version"),
+            }
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise ApiError("MCP_AUTH_ERROR", f"schema 探测鉴权失败: HTTP {e.code}", http_status=403)
+            # 404/405：源端无 GET /schema → 回退 MCP 工具式探测
+        except urllib.error.URLError as e:
+            raise ApiError("MCP_UNREACHABLE", f"schema 探测端点不可达: {e}", http_status=503)
+        except (ApiError, ValueError) as e:
+            if isinstance(e, ApiError) and e.code == "MCP_AUTH_ERROR":
+                raise
+            raise ApiError("MCP_SCHEMA_ERROR", f"schema 探测失败: {e}", http_status=502)
+
+        # 2) POST {endpoint} tool=schema（MCP 工具式回退）
+        body = json.dumps({"tool": "schema", "params": {}}).encode("utf-8")
+        req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")  # noqa: S310
+        try:
+            with urllib.request.urlopen(req, timeout=self.settings.mcp_timeout_seconds) as resp:  # noqa: S310
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise ApiError("MCP_AUTH_ERROR", f"schema 探测鉴权失败: HTTP {e.code}", http_status=403)
+            raise ApiError("MCP_SCHEMA_ERROR", f"schema 探测失败: HTTP {e.code}", http_status=502)
+        except urllib.error.URLError as e:
+            raise ApiError("MCP_UNREACHABLE", f"schema 探测端点不可达: {e}", http_status=503)
+        except Exception as e:  # noqa: BLE001
+            raise ApiError("MCP_SCHEMA_ERROR", f"schema 探测异常: {e}", http_status=502)
+        if isinstance(data, dict):
+            fields = data.get("fields") or data.get("data")
+            if isinstance(fields, list):
+                return {"fields": fields, "key_field": data.get("key_field"), "schema_version": data.get("schema_version")}
+        if isinstance(data, list):
+            return {"fields": data, "key_field": None, "schema_version": None}
+        raise ApiError("MCP_SCHEMA_ERROR", "schema 探测返回格式无法识别", http_status=502)
+
     def _backoff(self, attempt: int) -> float:
         return min(2 ** attempt, 8)  # 指数退避，≤8s
 

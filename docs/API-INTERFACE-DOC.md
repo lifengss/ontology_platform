@@ -54,6 +54,8 @@
 | `INVALID_CREDENTIALS` | 401 | 登录失败统一文案（防账号枚举） |
 | `FORBIDDEN` | 403 | 角色或资源级授权不足 |
 | `SSO_NOT_ENABLED` | 403 | SSO 预留接口未启用 |
+| `SCHEMA_DRIFT_STOPPED` | 409 | 连接存在键属性 schema 漂移（快照自动更新已停止），读取→候选被拒（§25） |
+| `ALREADY_RESOLVED` | 409 | 漂移记录已人工确认，重复 resolve 拒绝（§25） |
 | `INTERNAL_ERROR` | 500 | 未预期内部错误 |
 
 > 注意：`FORBIDDEN_WRITE`(403) 用于**语义护栏**（如归化候选未审核不得落库、Action 未确认不得回写），与鉴权无关；鉴权类 403 使用 `FORBIDDEN`。平台自 M2-A（V2-05，2026-11-11）起**已启用自身登录鉴权与 RBAC**，见 §21；此前"平台自身不鉴权"的注记已废止。`/mcp/*` 仍沿用项目静态 Bearer token 独立体系（§11.1）。
@@ -357,7 +359,11 @@
 | PUT | `/api/mcp/connections/{id}` | 更新连接 |
 | DELETE | `/api/mcp/connections/{id}` | 删除连接 |
 | POST | `/api/mcp/connections/{id}/test` | 连通性测试（含鉴权握手） |
-| POST | `/api/mcp/connections/{id}/read` | 触发读取 → 生成候选实例（转 §3 候选，status=pending） |
+| POST | `/api/mcp/connections/{id}/read` | 触发读取 → 生成候选实例（转 §3 候选，status=pending）；**键漂移停更期间 409 `SCHEMA_DRIFT_STOPPED`（§25）** |
+| POST | `/api/mcp/connections/{id}/schema-check` | 手动触发一次 schema 探测与比对（与周期/入库/联邦通道同一管道，source=manual）（§25） |
+| GET | `/api/mcp/connections/{id}/drifts` | 漂移记录列表，`?status=open|resolved|all`（默认 all）（§25） |
+| POST | `/api/mcp/connections/{id}/drifts/{drift_id}/resolve` | 人工确认恢复（**唯一恢复路径**，不允许自动恢复）（§25） |
+| GET | `/api/mcp/connections/{id}/health` | 连接健康摘要（schema 检查时效/停更态/待处理漂移数）（§25） |
 | POST | `/api/mcp/server/publish` | 由本体一键发布 MCP Server（发布态落盘 `data/projects/{pid}/mcp_published.json`，重启不丢） |
 | POST | `/api/mcp/server/unpublish` | 取消发布（不带 `ontology_id`=项目整体下线；带=仅下线该本体，清单空则整体下线） |
 | GET | `/api/mcp/server/status` | MCP Server 运行状态（含 `transports`/`protocol_versions`/token 状态；`?project_id=` 查单项目） |
@@ -1030,3 +1036,54 @@
 - `scripts/verify_m2c_multitenant.py` **PASS=37/FAIL=0**（真实 JWT，鉴权启用态）：TC-06-01（项目/实例/连接/字典租户隔离）、TC-06-02（猜测 ID 同文案 404）、TC-06-03（四级共享可见矩阵）、TC-06-04（sharing_change 审计）、TC-06-05（实例永不共享）、TC-06-07（内容受限标记→开放→可读→收回，开放/收回审计）、TC-06-08（共享不授写）、TCE-06-01/02/03；**TC-06-06** 由 `scripts/verify_tp0606_delegated_read.py`（13/13）联验。
 - 前端：建模页本体详情共享等级控制（owner/admin 可调，project 级成员输入）；实例详情弹层内容受限提示＋内容开放管理（开放/收回）。
 - 边界（如实标注）：MCP 工具（/mcp/{project}）沿用项目静态 token（token 即租户边界），不携带访问者身份——访问者级代查走 §23 `federated_read()`（M4/V2-02 调用点）；跨租户上传内容经开放的读取随 V2-15 开放接口落地；legacy 无 owner/sharing 的存量本体按 department 级处理。
+
+## 25. Schema 漂移检测与停快照自动更新（V2-11 / M3-A，2026-11-12）
+
+**同一管道、四个触发通道**：periodic（后台周期探测，默认 300s，可配 `ONTOLOGY_SCHEMA_DRIFT_PROBE_*` 环境变量）/ ingest（读取→候选时入库结构比对，缺映射字段即反馈）/ federation（联邦读缺失反馈，**不阻断联邦读**）/ manual（`schema-check` 端点）。四通道仅 `source` 不同，共用 `schema_drift.check_connection()`：探测源端字段结构 → 与连接 `field_map`＋对象 `stable_key` 比对 → 落漂移记录 → 键属性漂移时置连接 `snapshot_auto_update=stopped`。
+
+### 25.1 探测与比对
+
+- 探测协议两级回退：`GET {origin}/schema`（期望 `{"fields":[{"name","type"}], "key_field","schema_version"}`）→ 404 回退 `POST {endpoint} {"tool":"schema"}`。
+- 探测失败 **≠ 漂移**（EP-11-01）：只更新 `last_schema_check_at/ok/error` 健康位，不产生漂移记录、不停更。
+- 类型按 family 归一比对（number 族含 int/float/number；boolean 族；string 族；date 族）。
+- 漂移分级（`kind` → `severity`）：
+
+| kind | severity | 含义 | 平台动作 |
+|---|---|---|---|
+| `key_missing` / `key_type_changed` | `key` | stable_key 源字段缺失/类型变 | **停快照自动更新**（读取→候选 409）＋审计告警；联邦读不阻断 |
+| `attr_missing` / `attr_type_changed` | `attribute` | 非键映射字段缺失/类型变 | 联邦读/详情对该字段**显式标记**（EP-11-03，不当作有效旧值），快照可继续 |
+| `new_unmapped` | `unmapped` | 源端新增未映射字段 | 仅提示（补映射），不阻断不停更 |
+
+- **恢复仅人工**（`resolve` 端点），不允许自动恢复；源端未修复时再次检测会重新判定停更（EP-11-02 闭环再入），源端修复后仍需人工确认才恢复。
+- 漂移记录**每连接唯一 open 记录**（新检出合并进 open 记录，`detected_at` 保留首次，`last_detected_at/source` 随通道刷新）；`resolve` 后记录转 `resolved`（留痕）。
+- 比较严格按 `stable_key` 反查的源字段进行（不按名称），同源多连接/多对象互不误报（TP-11-04）。
+
+### 25.2 端点
+
+| 方法 / 路径 | 说明 | 响应 `data` |
+|---|---|---|
+| `POST /api/mcp/connections/{id}/schema-check` | 手动检查（source=manual） | 探测成功：`{"status":"ok","connection_id","severity":"key\|attribute\|unmapped\|null","items":[漂移明细],"snapshot_auto_update":"active\|stopped"}`；探测失败：`{"status":"probe_failed","connection_id","error":"...","severity":null,"items":[]}`（HTTP 200） |
+| `GET /api/mcp/connections/{id}/drifts?status=all` | 漂移记录列表（`?status=open|resolved|all`，默认 all） | 列表信封 `{items, total, page, pageSize}`；记录：`{id, connection_id, detected_at, last_detected_at, source, last_detected_source, items:[{field, property, kind, severity, expected, actual}], status, resolved_at, resolved_by}` |
+| `POST /api/mcp/connections/{id}/drifts/{drift_id}/resolve` | 人工确认恢复 | `{"drift_id","status":"resolved","resolved_by","resumed_snapshot_auto_update":bool,"remaining_open":int}`；重复确认 409 `ALREADY_RESOLVED` |
+| `GET /api/mcp/connections/{id}/health` | 健康摘要 | `{"last_schema_check_at","last_schema_check_ok","last_schema_check_ms","last_schema_check_error","schema_version","age_seconds","never_checked","probe_interval_seconds","stale_threshold_seconds","stale","snapshot_auto_update","open_drifts","cdc_status":"planned_m3d"}` |
+| `GET /api/mcp/connections`（既有） | 列表项新增内嵌 `schema_health`（= health 响应，无检查记录时 `last_schema_check_at=null, never_checked=true`） | — |
+| `POST /api/mcp/connections/{id}/read`（既有） | 门禁：存在 key 级 open 漂移 → 409 `SCHEMA_DRIFT_STOPPED` | — |
+
+- 漂移明细字段：`field`（源字段名）、`property`（本体属性 id 或空=未映射）、`kind`、`severity`、`expected`（本地声明类型）、`actual`（源端实际类型或 `missing`）。
+- **联邦读显式标记**：`/api/dictionary/term-lookup` 合并结果中，处于 open 属性漂移的字段带 `drift_marks: [{connection, field, kind, message}]`；源字段缺失时该字段显式 `value: null` ＋ `drift_marks`（不静默、不回填旧值）；连接/字段无漂移时 `drift_marks` 为空或缺省。
+- 审计（统一审计日志，`GET /api/audit?action=`）：`schema_check_manual`（手动检查）/ `schema_drift_detected`（severity≠none）/ `schema_drift_resolved`（含 resumed 标记）。
+
+### 25.3 配置（环境变量）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ONTOLOGY_SCHEMA_DRIFT_PROBE_ENABLED` | `true` | 是否启动后台周期探测线程（进程内 daemon） |
+| `ONTOLOGY_SCHEMA_DRIFT_PROBE_INTERVAL_SECONDS` | `300` | 周期探测间隔 |
+| `ONTOLOGY_SCHEMA_DRIFT_STALE_MULTIPLIER` | `3.0` | 超阈值（stale）判定 = 间隔 × 乘数；`last_check` 为空 → `never_checked=true, stale=false` |
+
+### 25.4 验收
+
+- `scripts/verify_m3a_schema_drift.py` **PASS=47/FAIL=0**（临时 DATA_DIR＋进程内 ControllableMockSystem schema 热变＋TestClient）：TP-11-01（手动通道＋探测失败≠漂移）、TP-11-02（键重命名→停更＋409 门禁＋列表 schema_health）、TP-11-03（人工确认恢复＋重复 409＋审计）、TP-11-04（同源他连接不误报）、TP-11-05（periodic 通道 source 标记）、TP-11-06（明细字段＋状态过滤）、TP-11-07（入库结构比对不阻断）、TP-11-08/EP-11-03（联邦读显式标记/缺失显式空值）、TP-11-09（未映射仅提示）、TP-11-10（stale/never_checked）、TP-11-11（health 全字段）；EP-11-01/02 覆盖。
+- L5 回归 `backend/tests` **93/93** 全绿。
+- 前端（`frontend/app.js`＋`index.html`）：连接表新增「schema 健康」列（未检查/正常/探测失败/超阈值/停更/待处理数）、行内「检查schema」「漂移」按钮、键漂移顶部告警横幅、漂移面板（明细＋人工确认恢复）、联邦查询结果漂移标记渲染。
+- 边界（如实标注）：探测仅比对字段名/类型 family，不含嵌套结构语义（V2 源均为平面记录）；`cdc_status` 恒为 `planned_m3d`（流式 CDC 属 M3-D，未上线前不显示假健康）；周期探测线程在 `PROBE_ENABLED=false` 时不启动（测试/单实例部署可关）。
