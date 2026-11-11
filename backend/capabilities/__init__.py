@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import re
 import time
 from datetime import datetime, timezone
@@ -63,6 +64,17 @@ def _bump_minor(version: str) -> str:
 
 def _expr_hash(expression: str) -> str:
     return hashlib.sha256(expression.encode("utf-8")).hexdigest()[:16]
+
+
+def _source_fingerprint(lookups: list[dict[str, Any]]) -> str:
+    """HF-04：本次计算依赖的全部 lookup 命中记录与取值的稳定指纹。
+
+    基线实例值变化会改变指纹，从而把「未重算」与「重算后恰好相同」区分开。
+    """
+    parts = [[str(l.get("matched_record_id")), l.get("value")] for l in (lookups or [])]
+    return hashlib.sha256(
+        json.dumps(parts, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:16]
 
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -445,41 +457,102 @@ class CapabilityService:
                    lookup_cache: Optional[dict[str, list]] = None) -> EvalContext:
         instance = inst_record.get("instance", {}) or {}
 
+        # HF-05：能力记录 ontology_id 可选；未指定则不过滤，历史实例缺该字段视为当前本体。
+        cap_ontology_id = rec.get("ontology_id")
+
+        def _in_scope(r: dict[str, Any]) -> bool:
+            if not cap_ontology_id:
+                return True
+            return (r.get("ontology_id") or cap_ontology_id) == cap_ontology_id
+
         def do_lookup(otype: str, dims: dict[str, Any], attr: Optional[str],
-                      tr: TraceCollector) -> Any:
-            if any(v is None for v in dims.values()):
-                raise ExprError(E_AMBIGUOUS, f"lookup 维度值含 null（应显式 if_null 守卫）: {dims}", None)
-            # 单次/批量执行内复用只读基线对象池：2297 实例规模下避免逐 lookup 全量读文件。
-            # 写回目标对象后由调用方清除该对象缓存，保证批内后续实例看到最新值。
-            if lookup_cache is not None and otype in lookup_cache:
-                pool = lookup_cache[otype]
+                      tr: TraceCollector, mode: str = "strict",
+                      order_by: Optional[str] = None, descending: bool = False,
+                      dims_list: Optional[list[dict[str, Any]]] = None) -> Any:
+            # 缓存键加入 ontology_id，避免多本体共存时跨本体串池（HF-05）。
+            cache_key = (otype, cap_ontology_id or "")
+            if lookup_cache is not None and cache_key in lookup_cache:
+                pool = lookup_cache[cache_key]
             else:
                 pool = [(r, r.get("instance", {}) or {})
-                        for r in self._instances.find(object_type=otype, limit=None)]
+                        for r in self._instances.find(object_type=otype, limit=None)
+                        if _in_scope(r)]
                 if lookup_cache is not None:
-                    lookup_cache[otype] = pool
-            matches = [(irec, iinst) for irec, iinst in pool
-                       if all(iinst.get(k) == v for k, v in dims.items())]
-            if not matches:
-                raise ExprError(
-                    "LOOKUP_NOT_FOUND",
-                    f"lookup {otype} 维度 {dims} 0 命中（NOT_FOUND）", None)
-            if len(matches) > 1:
-                raise ExprError("LOOKUP_AMBIGUOUS",
-                                f"lookup {otype} 维度 {dims} 命中 {len(matches)} 条（AMBIGUOUS）", None)
-            irec, iinst = matches[0]
-            value = iinst.get(attr) if attr else iinst
-            code = iinst.get("attr_baseline_code") or iinst.get("attr_code") \
-                or iinst.get("attr_product_code") or irec.get("id")
-            tr.lookups.append({
-                "object_type": otype,
-                "dims": dims,
-                "attr": attr,
-                "matched_record_id": irec.get("id"),
-                "matched_code": code,
-                "value": None if isinstance(value, dict) else value,
-            })
-            return value
+                    lookup_cache[cache_key] = pool
+
+            def _match(d: dict[str, Any]):
+                if any(v is None for v in d.values()):
+                    raise ExprError(E_AMBIGUOUS,
+                                    f"lookup 维度值含 null（应显式 if_null 守卫）: {d}", None)
+                return [(irec, iinst) for irec, iinst in pool
+                        if all(iinst.get(k) == v for k, v in d.items())]
+
+            def _record(matched: list, d: dict[str, Any], rule: str,
+                        total_matches: int | None = None) -> Any:
+                values = []
+                count = len(matched) if total_matches is None else total_matches
+                for irec, iinst in matched:
+                    value = iinst.get(attr) if attr else iinst
+                    code = iinst.get("attr_baseline_code") or iinst.get("attr_code") \
+                        or iinst.get("attr_product_code") or irec.get("id")
+                    tr.lookups.append({
+                        "object_type": otype,
+                        "dims": d,
+                        "attr": attr,
+                        "matched_record_id": irec.get("id"),
+                        "matched_code": code,
+                        "value": None if isinstance(value, dict) else value,
+                        # HF-03 兼容追加，不改动既有 6 字段
+                        "matched_count": count,
+                        "selection_rule": rule,
+                    })
+                    values.append(value)
+                return values if mode == "all" else values[0]
+
+            if mode == "coalesce":
+                # 按 dims 列表依次尝试；某组多命中仍报歧义（不静默取错值），全未命中显式报错。
+                for idx, d in enumerate(dims_list or []):
+                    matched = _match(d)
+                    if len(matched) == 1:
+                        return _record(matched, d, f"coalesce:{idx}")
+                    if len(matched) > 1:
+                        raise ExprError("LOOKUP_AMBIGUOUS",
+                                        f"coalesce_lookup {otype} 第 {idx + 1} 组维度命中 {len(matched)} 条", None)
+                raise ExprError("LOOKUP_NOT_FOUND",
+                                f"coalesce_lookup {otype} 所有 {len(dims_list or [])} 组维度均 0 命中", None)
+
+            matched = _match(dims)
+            if mode == "all":
+                # 红线：0 命中是合法的「未装配/无分组」状态，聚合时不得判为 lookup 失败。
+                return _record(matched, dims, "all") if matched else []
+            if not matched:
+                raise ExprError("LOOKUP_NOT_FOUND",
+                                f"lookup {otype} 维度 {dims} 0 命中（NOT_FOUND）", None)
+            if len(matched) > 1:
+                if mode != "first":
+                    raise ExprError("LOOKUP_AMBIGUOUS",
+                                    f"lookup {otype} 维度 {dims} 命中 {len(matched)} 条（AMBIGUOUS）", None)
+
+                def _sort_key(pair):
+                    irec, iinst = pair
+                    v = iinst.get(order_by) if order_by else None
+                    if v is None:
+                        v = irec.get("id") or ""
+                    # 数值优先按数值比较；字符串数字也按数字字符串比较，避免 "10" < "2" 的字典序误判。
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        return (0, float(v), "")
+                    if isinstance(v, str):
+                        try:
+                            return (0, float(v), "")
+                        except ValueError:
+                            return (1, 0.0, v)
+                    return (1, 0.0, str(v))
+
+                total_matches = len(matched)
+                matched.sort(key=_sort_key, reverse=bool(descending))
+                rule = f"first:{order_by or 'record_id'}:{'desc' if descending else 'asc'}"
+                return _record(matched[:1], dims, rule, total_matches=total_matches)
+            return _record(matched, dims, "strict")
 
         def do_ref(name: str, version: Optional[str]) -> Any:
             lock = (rec.get("ref_locks") or {}).get(name)
@@ -596,6 +669,12 @@ class CapabilityService:
                 filters={"project_id": self.project_id},
                 limit=limit, offset=offset,
             )
+            # HF-05：同项目多本体共存时只执行当前能力所属本体的实例；
+            # 能力未指定 ontology_id 或历史实例缺该字段时保持原行为（兼容 M1-B golden）。
+            cap_oid = rec.get("ontology_id")
+            if cap_oid:
+                records = [r for r in records
+                           if (r.get("ontology_id") or cap_oid) == cap_oid]
 
         items: list[dict[str, Any]] = []
         lookup_cache: dict[str, list] = {}
@@ -610,7 +689,9 @@ class CapabilityService:
                 n_error += 1
             if not dry_run:
                 self._write_back(rec, irec, res, channel, trigger_source)
-                lookup_cache.pop(rec.get("object_type"), None)
+                # 缓存键已带 ontology_id，按对象类型清除所有本体分区
+                for k in [k for k in lookup_cache if k[0] == rec.get("object_type")]:
+                    lookup_cache.pop(k, None)
             items.append({
                 "instance_id": irec.get("id"),
                 "status": res["status"],
@@ -643,6 +724,7 @@ class CapabilityService:
         instance = dict(inst_record.get("instance", {}) or {})
         if res["status"] == "success" and rec.get("output_attribute"):
             instance[rec["output_attribute"]] = res.get("value")
+        lookups = (res.get("trace") or {}).get("lookups") or []
         instance["__capability__"] = {
             "capability_id": rec.get("id"),
             "capability_name": rec.get("name"),
@@ -659,5 +741,87 @@ class CapabilityService:
             "input_overrides": res.get("input_overrides"),
             "data_gaps": res.get("data_gaps"),
             "inputs_persisted": res.get("inputs_persisted", False),
+            # HF-04 追加字段（既有 15 字段保持不变，M1-B 溯源断言不受影响）
+            "source_fingerprint": _source_fingerprint(lookups),
+            "stale": False,
+            "result_freshness": "fresh",
         }
         self._instances.update(inst_record.get("id"), {"instance": instance})
+
+    def affected_instances(self, cap_id: str, baseline_instance_id: str) -> dict[str, Any]:
+        """HF-04：反查哪些结果实例的 trace 命中过这条基线，并判定是否 stale。
+
+        读取时按当前基线实例值重算指纹，与写回时的 source_fingerprint 比对；
+        历史写回（无指纹）不报 stale，避免误伤存量数据。
+        """
+        rec = self._store.get(cap_id)
+        if not rec:
+            raise CapabilityApiError("NOT_FOUND", "能力不存在", 404)
+        items: list[dict[str, Any]] = []
+        for r in self._instances.find(limit=None):
+            if r.get("id") == baseline_instance_id:
+                continue
+            meta = (r.get("instance") or {}).get("__capability__") or {}
+            if meta.get("capability_id") != cap_id:
+                continue
+            lookups = (meta.get("trace") or {}).get("lookups") or []
+            hits = [l for l in lookups if l.get("matched_record_id") == baseline_instance_id]
+            if not hits:
+                continue
+            current: list[dict[str, Any]] = []
+            for l in lookups:
+                rid, attr = l.get("matched_record_id"), l.get("attr")
+                src = self._instances.get(rid) if rid else None
+                cur = (src.get("instance") or {}).get(attr) if src and attr else None
+                current.append({"matched_record_id": rid, "value": cur})
+            current_fp = _source_fingerprint(current)
+            stored_fp = meta.get("source_fingerprint")
+            stale = bool(stored_fp and stored_fp != current_fp)
+            items.append({
+                "instance_id": r.get("id"),
+                "object_type": r.get("object_type"),
+                "value": meta.get("value"),
+                "capability_version": meta.get("capability_version"),
+                "source_fingerprint": stored_fp,
+                "current_fingerprint": current_fp,
+                "stale": stale,
+                "matched_lookups": len(hits),
+            })
+        return {
+            "capability_id": cap_id,
+            "baseline_instance_id": baseline_instance_id,
+            "total": len(items),
+            "stale": sum(1 for i in items if i["stale"]),
+            "items": items,
+        }
+
+    def invalidate_for_baseline(self, baseline_instance_id: str) -> dict[str, Any]:
+        """HF-04：把命中该基线且指纹已变化的能力写回结果物理标记为 stale。"""
+        cap_ids = sorted({c.get("id") for c in self._store.all() if c.get("id")})
+        caps: list[str] = []
+        seen: set[str] = set()
+        for cap_id in cap_ids:
+            res = self.affected_instances(cap_id, baseline_instance_id)
+            if res.get("items"):
+                caps.append(cap_id)
+            for item in res.get("items", []):
+                iid = item.get("instance_id")
+                if not item.get("stale") or not iid or iid in seen:
+                    continue
+                rec = self._instances.get(iid)
+                if not rec:
+                    continue
+                instance = dict(rec.get("instance") or {})
+                meta = dict(instance.get("__capability__") or {})
+                meta["stale"] = True
+                meta["result_freshness"] = "stale"
+                meta["current_fingerprint"] = item.get("current_fingerprint")
+                meta["stale_detected_at"] = _now()
+                instance["__capability__"] = meta
+                self._instances.update(iid, {"instance": instance})
+                seen.add(iid)
+        return {
+            "capabilities": caps,
+            "marked": len(seen),
+            "instance_ids": sorted(seen),
+        }

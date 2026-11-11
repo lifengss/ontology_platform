@@ -242,6 +242,11 @@
 | POST | `/api/ingest/candidates/{id}/approve` | 人工审核通过 → SHACL → 落 Neo4j（返回落库结果） |
 | POST | `/api/ingest/candidates/{id}/reject` | 人工拒绝 |
 | GET | `/api/ingest/instances` | 已入库实例列表（分页，query=`namespace`,`ontology_id`,`object_type`,`page`,`pageSize`，默认 pageSize=50 上限 200） |
+| PUT | `/api/ingest/instances/batch` | 批量更新：统一校验/变更日志；query=`project_id`,`reason`,`strict_fields`,`defer_rdf_sync`；默认按 touched ontology 末尾只同步一次 |
+| PUT | `/api/ingest/instances/{instance_id}` | 整体替换：SHACL＋字段白名单＋复合唯一校验，写变更日志，默认单实例增量 RDF 同步 |
+| PATCH | `/api/ingest/instances/{instance_id}` | 字段级局部更新，保留 `_source` / `__capability__` 血缘；走同一校验链路 |
+| GET | `/api/ingest/instances/{instance_id}/change-logs` | 变更日志（页面参数 `page/pageSize`，响应字段 `page_size`；含 before/after/diff/operator/reason/operation/warnings） |
+| DELETE | `/api/ingest/instances/{instance_id}` | 删除实例并按 subject 增量同步 RDF；返回 `stale_marked` 等失效通知统计 |
 
 - `namespace` 过滤（candidates/instances 通用）：只返回**指定部门空间内本体**的候选/实例（按本体的 `namespace` 归属判定，无 `namespace` 字段的本体归属默认空间=项目 id）；不传则返回整个项目的数据（向后兼容）。前端顶栏作用域为「部门 → 项目」，默认**不注入**该参数（项目级全量）；该参数保留供程序化调用 / 进阶过滤。
 
@@ -591,6 +596,7 @@
 - 待增强：Fuseki 远程推理开关、SHACL 在 Jena 侧执行、MCP stdio transport 完整 JSON-RPC。
 - Action 回写健壮性（指数退避重试 + 按端点熔断）已完成（2026-10-23，见 §6.2 与 TASK_CHECKPOINT §19；`test_action_resilience.py` 7/7）。
 - V2 切片进展：**VS2-00 ✅**、**M1-A（§17 字典/联邦查询）✅**、**M1-B（§18 能力层/公式引擎）✅**、**M1-C（§19 显式业务主键）✅**、**M1-E（§20 里程碑退出 / TCE2E-01 全链）✅**（均为 2026-11-09~10 交付，验收脚本见各章节）、**M2-A（§21 登录鉴权与 RBAC）✅**（2026-11-11，验收 67/67）。
+- 2026-11-11 hotfix：按 `hotfix/hotfix.md` 完成 HF-01~HF-07（实例更新校验/审计、RDF 增量同步、复合唯一与 lookup 回退、失效通知、`ontology_id` 过滤、字符串/日期内置、声明式聚合分组），详见 §22；`scripts/verify_hotfix_hf01_hf07.py` PASS=47/FAIL=0，L5/M1/M2-A 回归全绿。该修复**不是 V2 里程碑切片**，M2 未退出。
 - 待补（M2-A 登记）：§3 responseExample 中曾把响应分页字段写作 `pageSize`，与全平台 `list_payload` 的 snake_case `page_size` 不一致，后续统一修正文档（代码不改名）；跨进程直连 REST 的回归脚本在启用鉴权的部署上需携带 Bearer token。
 
 ## 16. 项目管理（projects）
@@ -713,12 +719,15 @@
 
 ### 18.2 表达式（opl-expr/v1）
 
-多行顺序绑定 `name = expr`，最后一行为返回值；支持数字/字符串/布尔/`null`/字典字面量、`this.<attr>`（实例属性）、`+ - * / %`、比较、`and/or/not`/三元、白名单函数 `if / if_null / coalesce / lookup / ref / abs / round / min / max / str / contains / starts_with`。
+多行顺序绑定 `name = expr`，最后一行为返回值；支持数字/字符串/布尔/`null`/字典字面量、`this.<attr>`（实例属性）、`+ - * / %`、比较、`and/or/not`/三元。白名单函数 = 原有 `if / if_null / coalesce / lookup / ref / abs / round / min / max / str / contains / starts_with` ＋ hotfix 新增 `len / split / regex_match / upper / lower / date_add / date_diff / sum / map / filter / group_by / lookup_first / coalesce_lookup / lookup_all`。**不引入 lambda、数组字面量或任意表达式语法**。
 
-- `lookup(object_type, {attr: value}, attr)`：按维度精确查基线实例；0 命中 `LOOKUP_NOT_FOUND`、多命中 `LOOKUP_AMBIGUOUS`、维度含 null 拒绝（须 `if_null()` 显式守卫）。命中信息写入 `trace.lookups`（`matched_record_id`/`matched_code`/`value`）。
+- `lookup(object_type, {attr: value}, attr)`：按维度精确查基线实例；0 命中 `LOOKUP_NOT_FOUND`、多命中 `LOOKUP_AMBIGUOUS`、维度含 null 拒绝（须 `if_null()` 显式守卫）。默认严格模式不变；命中信息写入 `trace.lookups`（既有 6 字段 ＋ `matched_count` / `selection_rule`）。
+- **HF-03 显式回退**：`lookup_first(object_type, dims, attr, order_by?, descending?)` 多命中时按优先级取第一条（数值/数字字符串按数值排序，排序前命中数保留在 `matched_count`）；`coalesce_lookup(object_type, attr, dims1, dims2, ...)` 按维度组首个命中即返回，某组多命中仍 `LOOKUP_AMBIGUOUS`，全未命中 `LOOKUP_NOT_FOUND`；`lookup_all(object_type, dims, attr?)` 返回全部命中值，**0 命中返回 `[]` 而非错误**。三者都必须写明调用意图，避免静默取错值。
+- **HF-06 字符串/日期**：`len/split/regex_match/upper/lower/date_add/date_diff`；`split()` 分隔符不能为空，字符串函数对非字符串显式 `TYPE_ERROR`。
+- **HF-07 声明式聚合**：`sum(list)`、`map(list, field)`、`filter(list, field, value)`、`group_by(list, key_attr, value_attr, 'sum'|'count')`；字段名/聚合名必须是字符串字面量，`group_by` 跳过 `key_attr is None` 的合法空分组。未装配分组由 `lookup_all()` 返回 `[]`，`sum([])=0`。
 - `ref('cap_name'[, 'x.y.z'])`：引用其他能力；仅可引用 active 或明确存在的历史版本；发布时锁定被引用方版本（快照，不自动跟随），多级引用按同一锁定链求值。
 - **null 传播**：算术遇 null 得 null + 显式计数（`null ≠ 0`），禁止当 0；需当 0 参与合计时用 `if_null(x, 0)` 显式守卫。
-- 定义期静态校验：语法/白名单/参数个数/未知标识符/`ref()` 字面量实参/常量除零/自引用；失败 422 `VALIDATION_ERROR`（或 `SYNTAX_ERROR`/`CYCLE`）。运行期 `DIV_ZERO`、`MISSING_INPUT_ATTR`、`TYPE_ERROR`、`REF_NOT_RESOLVED` 等只标记**单实例错误**，不中断批次。
+- 定义期静态校验：语法/白名单/参数个数/未知标识符/`ref()` 字面量实参/常量除零/自引用；新增内置还校验字段名、排序字段、descending 布尔值、维度组字典字面量与聚合名。失败 422 `VALIDATION_ERROR`（或 `SYNTAX_ERROR`/`CYCLE`）。运行期 `DIV_ZERO`、`MISSING_INPUT_ATTR`、`TYPE_ERROR`、`REF_NOT_RESOLVED` 等只标记**单实例错误**，不中断批次。
 
 ### 18.3 版本与引用治理
 
@@ -904,3 +913,42 @@
 - 审计事件：`login_success`、`login_failed`、`logout`、`user_created`、`permission_change`、`permission_denied`、`auth_missing`、`auth_invalid`；含 `ts/actor/target/detail`。
 - **已知边界（如实标注）**：① httpOnly Cookie 降低 XSS 窃取 token 风险，但 `mode=bearer` 返回的 token 由调用方自行保管，浏览器端不应持久化；生产建议配合 CSP 与 HTTPS。② 审计/撤销名单当前用 `JsonStore` 全量读写，适合单部门规模，多部门高并发前需换存储。③ 资源级授权按 `project_id` 判定，M2-C 多租户隔离（V2-06）与 M2-B 身份联邦（V2-14i）尚未实现。④ 直连 REST 的既有回归脚本在启用鉴权的部署上需携带 `Authorization: Bearer <token>`（由 `?mode=bearer` 登录获取）；测试态豁免不适用于跨进程服务。
 - 验收：`scripts/verify_m2a_auth_rbac.py` **PASS=67/FAIL=0/SKIP=0**（TP-05-01~05、EP-05-01~03、TC/TCE-05、真实 Chromium DOM、MCP 体系不受影响、默认启用断言）；回归 L5 **93/93**、M1-A **75/75**、M1-B **50/50（SKIP=1）**、M1-C **33/33**、M1-E **26/26**。
+
+## 22. Hotfix HF-01~HF-07（2026-11-11）
+
+> 本节来自 `hotfix/hotfix.md` 的实际源码修复；**不是 V2 里程碑切片**，M2-A ✅ 但 M2 未退出。鉴权仍按 §21：除放行端点外，REST 调用需携带 §21 会话/Bearer 凭据；MCP 工具仍为 6 个，未新增回答编排端点。
+
+### 22.1 实例更新、校验与审计
+
+| 方法 / 路径 | body / query | 行为 |
+|---|---|---|
+| `PUT /api/ingest/instances/{instance_id}` | body `{ "instance": {...}, "reason"?: "..." }`；query `project_id`,`reason`,`strict_fields`,`defer_rdf_sync` | 整体替换；SHACL＋字段白名单＋复合唯一校验；写变更日志；默认单实例增量 RDF 同步 |
+| `PATCH /api/ingest/instances/{instance_id}` | body `{ "patch": {...}, "reason"?: "..." }`；同上 query | 字段级局部更新，保留 `_source` / `__capability__`；走同一校验链路；前端实例详情编辑保存使用此端点 |
+| `PUT /api/ingest/instances/batch` | body `{ "items": [{"id":"...","instance":{...},"reason"?: "..."}] }`；同上 query | 逐条校验并写日志；末尾按 touched ontology 只做一次 RDF 同步；`defer_rdf_sync=true` 时不自动同步 |
+| `GET /api/ingest/instances/{instance_id}/change-logs` | query `project_id`,`page`,`pageSize` | `list_payload` 信封，响应字段为 `page_size`；每条含 `before/after/diff/operator/reason/operation/warnings` |
+| `DELETE /api/ingest/instances/{instance_id}` | query `project_id` | 删除实例，按 subject 增量同步 RDF；返回 `stale_marked` / `affected_capabilities` |
+
+- `strict_fields=false`（默认）：未知字段保留并写入 `warnings`，不直接 422；`strict_fields=true`：未知字段与 SHACL/复合唯一违规均 `422 VALIDATION_ERROR`。
+- 更新响应新增 `warnings`、`rdf_sync_deferred`、`stale_marked`、`affected_capabilities`；批量响应另含 `updated/ids/errors/ontologies_synced/stale_by_instance`。
+- `defer_rdf_sync=true` 时，调用方可显式触发既有 `POST /api/graph/{ontology_id}/rdf-sync?project_id=...`。文件模式无法可靠单实例 patch，`sync_instance()` 会回退 `sync_ontology()` 全量重写并在结果中标注 `incremental=false` / `fallback="file_mode_full_rewrite"`。
+
+### 22.2 复合唯一、lookup 与 ontology_id 范围
+
+- `modeling_translator` 生成 `sh:uniqueKey` RDF list 用于模型导出/兼容；该属性不是标准 SHACL 约束组件，pyshacl 不执行。实例级复合唯一由 `ingestion.composite_unique_violations()` / `validate_instance()` 按 `constraint.scope == object_type` 业务层兜底：候选审批、已入库实例、REST 更新同源。
+- 能力记录可选 `ontology_id`；`do_lookup()` 与 `execute_batch()` 按该字段过滤实例池/记录，缓存键为 `(object_type, ontology_id)`。能力未指定 `ontology_id` 时保持历史兼容不过滤；历史实例缺 `ontology_id` 视为当前本体。
+- `trace.lookups` 保持既有 6 字段兼容，追加 `matched_count` / `selection_rule`；`lookup_first` 的 `matched_count` 是排序前全部命中数，不是选中后的 1。
+
+### 22.3 基线改动失效通知
+
+| 方法 / 路径 | query | 返回要点 |
+|---|---|---|
+| `GET /api/capabilities/{cap_id}/affected-instances` | `project_id`, `instance_id`（基线实例 id） | `capability_id`, `baseline_instance_id`, `total`, `stale`, `items[]`；每项含 `instance_id/object_type/value/source_fingerprint/current_fingerprint/stale/matched_lookups` |
+
+- 能力写回实例时记录 `source_fingerprint`、`stale=false`、`result_freshness="fresh"`；PUT/PATCH/批量更新/DELETE 基线实例后，平台对命中结果执行 `invalidate_for_baseline()` 并物理写入 `stale=true`、`result_freshness="stale"`、`stale_detected_at`，响应带 `stale_marked` 统计。
+- 失效通知不等于自动重算：平台不编造新值，也不自动替换结果；重新计算需显式调用既有能力执行端点。
+
+### 22.4 验收与边界
+
+- `scripts/verify_hotfix_hf01_hf07.py` **PASS=47/FAIL=0**：临时 DATA_DIR＋合成实例，覆盖定义期静态校验、REST/服务层、表达式、lookup 回退、`ontology_id` 过滤、复合唯一、变更日志、stale、RDF 文件降级、前端 PATCH 静态检查。
+- 回归：L5 `backend/tests` **93/93**；M1-A **75/75**、M1-B **50/50（SKIP=1）**、M1-C **33/33**、M1-E **26/26**、M2-A **67/67** 全绿。
+- **如实标注**：HF-07 的 Excel/业务对象/业务数值（如 `209.83`）属于外部数据资产，不在本接口验收范围；本轮只证明平台具备受限声明式 `sum/map/filter/group_by` 能力。远程 Fuseki 增量 SPARQL update 语法未在无外部服务环境下做真实 remote 往返，后续现场启用 Fuseki 时需补 remote smoke。

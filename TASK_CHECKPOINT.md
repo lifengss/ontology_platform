@@ -660,3 +660,25 @@
 3. §21.5 已如实登记已知边界：`mode=bearer` token 由调用方保管、审计/撤销名单 JsonStore 全量读写、资源级授权按 project_id（M2-C 才做租户隔离）、跨进程 REST 回归脚本需携带 Bearer token。
 4. 文档既有不一致：§3 responseExample 响应字段 `pageSize` vs 全平台 `page_size`，待统一修正（仅文档，不改代码）。
 5. 每切片脚本继续在 wiki `source-V2-测试用例` 登记区登记；每次交互结束追加本文件 checkpoint。
+
+## 28. 2026-11-11：Hotfix HF-01~HF-07 修复完成（合成验收 47/47；L5/M1/M2-A 回归全绿）
+
+> 用户「继续，先完成hotfix修复」→ 从上次 `router_ingest.py` PUT/PATCH/批量更新改造暂停点恢复；按 `hotfix/hotfix.md` 完成 HF-01~HF-07。**非 V2 里程碑切片**，M2-A ✅ 但 M2 未退出。
+
+### 28.1 当前进展
+- 平台源码修复、合成数据验收、L5/M1/M2-A 全量回归、项目文档/项目 wiki/用户级 wiki/checkpoint 同步均已完成。
+- 未执行 `git commit`（提交须用户明确指示）；M2-B（V2-14i 身份联邦）仍待用户明确指示。
+
+### 28.2 已完成
+- **HF-01/02**：PUT/PATCH/批量实例更新统一 SHACL＋字段白名单＋复合唯一校验；变更日志 before/after/diff/operator/reason/operation/warnings；前端 `saveInstanceEdit()` 改 PATCH；`rdf_sync.sync_instance()` 单实例增量同步/删除，文件模式回退全量重写；批量按本体末尾同步一次，`defer_rdf_sync=true` 可延迟。
+- **HF-03/04**：`approve()`、`validate_instance()`、`composite_unique_violations()` 按 `scope == object_type` 业务层兜底并检查已入库实例；新增 `lookup_first/coalesce_lookup/lookup_all`，默认 `lookup` 仍严格；`source_fingerprint`＋`GET /api/capabilities/{cap_id}/affected-instances`＋`invalidate_for_baseline()` 物理标记 stale；PUT/PATCH/批量/DELETE 返回 `stale_marked`。
+- **HF-05/06/07**：`do_lookup()`/`execute_batch()` 按能力 `ontology_id` 过滤且兼容历史缺字段实例；新增字符串/日期内置与 `sum/map/filter/group_by`；新内置同步定义期静态校验，不引入 lambda/数组字面量。
+- **真实问题修复**：`capabilities` 误用 `expr_eval._is_num`、`E_SYNTAX` 漏导入、`lookup_first` 字典序排序与 `matched_count` 失真、`sh:uniqueKey` 注释口径错误、复合唯一约束未按 scope 过滤、合成脚本误用 `data_type="number"`。
+- **验收**：`scripts/verify_hotfix_hf01_hf07.py` **PASS=47/FAIL=0**；L5 `backend/tests` **93 passed / 0 failed**（104.23s）；M1-A **75/75**、M1-B **50/50（SKIP=1）**、M1-C **33/33**、M1-E **26/26**、M2-A **67/67**；`compileall`、app import smoke、`git diff --check`、lints 0。
+- **登记**：`hotfix/hotfix.md` §9；`docs/API-INTERFACE-DOC.md` §2/§15/§18.2/§22；`docs/V2-开发里程碑.md` Hotfix 节；项目 wiki 4 页（含 `source-V2-测试用例` 脚本登记）；用户级 wiki raw 快照 `2026-11-11-Hotfix-HF01-HF07修复.md`、实体页/进展与测试/对话历史/开发工作流与经验/log/index；本 checkpoint。
+
+### 28.3 已知边界 / 未完成下一步
+1. HF-07 的 Excel/业务对象/业务数值属于外部数据资产；本轮只用合成数据验收平台声明式能力，**不宣称** `209.83` 等业务数值通过。若要业务数值验收，需先冻结外部数据资产与规则。
+2. 远程 Fuseki 增量 SPARQL update 未在无外部服务环境下做真实 remote 往返；后续若启用 Fuseki，需补一次 remote 增量 smoke。
+3. 如需入库，请用户明确指示执行 git commit；当前工作树含源码、脚本、文档、项目 wiki、checkpoint 修改及用户侧既有未跟踪内容。
+4. M2-B 启动仍需用户明确指示；M2 退出仍待 V2-14i / V2-06 / V2-09 / V2-07 / TCE2E-05/06。

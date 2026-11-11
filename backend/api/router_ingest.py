@@ -5,13 +5,14 @@
 """
 from __future__ import annotations
 
+import copy
 import io
 import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 
 from api.dependencies import project_id_param
 from core.instance_store import get_instance_store
@@ -20,6 +21,7 @@ from core.storage import JsonStore
 from ai_helper.client import call_llm
 from ingestion import approve as approve_candidate_logic
 from ingestion import preview as preview_candidate
+from ingestion import validate_instance
 from jena_adapter import rdf_sync
 from logging_setup import get_logger
 from modeling_translator import blocking_violations
@@ -33,14 +35,82 @@ def _store_for(project_id: str) -> JsonStore:
     return JsonStore("ingest_candidates", project_id=project_id)
 
 
-def _sync_rdf(project_id: str, ontology_id: str | None) -> None:
-    """重建本体全量图（schema+实例）写入 RDF 存储；失败仅告警，不阻断主流程。"""
+def _sync_rdf(project_id: str, ontology_id: str | None, *,
+              instance_id: str | None = None, deleted: bool = False) -> None:
+    """写入 RDF 存储；失败仅告警，不阻断主流程（L5 依赖此语义）。
+
+    HF-02：传入 instance_id 时走单实例增量同步，否则保持全量重建。
+    """
     if not ontology_id:
         return
     try:
-        rdf_sync.sync_ontology(project_id, ontology_id)
+        if instance_id:
+            rdf_sync.sync_instance(project_id, ontology_id, instance_id, deleted=deleted)
+        else:
+            rdf_sync.sync_ontology(project_id, ontology_id)
     except Exception as e:  # noqa: BLE001
         logger.warning("RDF 同步失败（不影响主流程） ontology_id=%s: %s", ontology_id, e)
+
+
+def _change_log_store(project_id: str) -> JsonStore:
+    return JsonStore("instance_change_logs", project_id=project_id)
+
+
+def _write_change_log(project_id: str, rec: dict, before: dict, after: dict,
+                      reason: str | None, operator: str, operation: str,
+                      warnings: list[str] | None = None) -> None:
+    """HF-01：字段级变更审计（before/after/diff/操作人/原因）。"""
+    diff = {
+        k: {"before": before.get(k), "after": after.get(k)}
+        for k in sorted(set(before) | set(after))
+        if before.get(k) != after.get(k)
+    }
+    _change_log_store(project_id).insert({
+        "id": uuid.uuid4().hex,
+        "ts": _now(),
+        "instance_id": rec.get("id"),
+        "object_type": rec.get("object_type"),
+        "operation": operation,
+        "operator": operator,
+        "reason": reason or "",
+        "before": before,
+        "after": after,
+        "diff": diff,
+        "changed_fields": sorted(diff),
+        "warnings": warnings or [],
+    })
+
+
+def _validate_for_update(store, project_id: str, rec: dict, new_instance: dict,
+                         strict_fields: bool) -> list[str]:
+    """HF-01：PUT/PATCH/批量共用同一校验链路（与 approve 同源，避免逻辑分叉）。"""
+    ontology_id = rec.get("ontology_id")
+    if not ontology_id:
+        return []
+    ontology = _load_ontology(ontology_id, project_id)
+    rows = store.find(object_type=rec.get("object_type"), limit=None)
+    existing = [r for r in rows
+                if r.get("ontology_id") in (None, "", ontology_id)]
+    checked = validate_instance(
+        ontology, new_instance, rec.get("object_type"),
+        existing=existing, exclude_id=rec.get("id"), strict_fields=strict_fields,
+    )
+    if checked["violations"]:
+        raise ApiError("VALIDATION_ERROR", "实例更新校验未通过", http_status=422,
+                       details={"violations": checked["violations"]})
+    return checked["warnings"]
+
+
+def _invalidate_capability_results(project_id: str,
+                                   baseline_instance_id: str) -> dict:
+    """HF-04：基线实例变更后，把命中的能力写回结果显式标记为 stale。"""
+    try:
+        from capabilities import CapabilityService
+        return CapabilityService(project_id).invalidate_for_baseline(baseline_instance_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("能力结果失效标记失败（不影响实例更新） instance_id=%s: %s",
+                       baseline_instance_id, e)
+        return {"marked": 0, "capabilities": [], "instance_ids": [], "error": str(e)}
 
 
 def _instance_store_for(project_id: str):
@@ -826,12 +896,80 @@ def get_instance(instance_id: str, project_id: str = Depends(project_id_param)):
     raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
 
 
+@router.put("/instances/batch")
+def update_instances_batch(
+    payload: dict,
+    request: Request,
+    project_id: str = Depends(project_id_param),
+    reason: str | None = Query(default=None),
+    strict_fields: bool = Query(default=False),
+    defer_rdf_sync: bool = Query(default=False),
+):
+    """HF-02：批量更新，末尾只做一次 RDF 同步；defer_rdf_sync=true 时交给
+    `POST /api/graph/{ontology_id}/rdf-sync` 显式触发（该端点已存在）。"""
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        raise ApiError("VALIDATION_ERROR", "items 必须是非空数组", http_status=422)
+    store = _instance_store_for(project_id)
+    operator = (getattr(request.state, "auth_user", None) or {}).get("username", "api")
+    updated: list[str] = []
+    errors: list[dict] = []
+    touched: set[str] = set()
+    stale_marked = 0
+    stale_by_instance: dict[str, dict] = {}
+    for item in items:
+        iid = item.get("id") if isinstance(item, dict) else None
+        new_instance = item.get("instance") if isinstance(item, dict) else None
+        if not iid or not isinstance(new_instance, dict):
+            errors.append({"id": iid, "error": "id/instance 无效"})
+            continue
+        rec = store.get(iid)
+        if not rec:
+            errors.append({"id": iid, "error": "实例不存在"})
+            continue
+        try:
+            warnings = _validate_for_update(store, project_id, rec, new_instance, strict_fields)
+        except ApiError as e:
+            errors.append({"id": iid, "error": e.message})
+            continue
+        before = copy.deepcopy(rec.get("instance") or {})
+        rec["instance"] = new_instance
+        rec["updated_at"] = _now()
+        store.update(iid, rec)
+        _write_change_log(project_id, rec, before, new_instance,
+                          item.get("reason") or reason, operator, "BATCH", warnings)
+        stale_info = _invalidate_capability_results(project_id, iid)
+        stale_marked += int(stale_info.get("marked") or 0)
+        if stale_info.get("marked"):
+            stale_by_instance[iid] = stale_info
+        updated.append(iid)
+        if rec.get("ontology_id"):
+            touched.add(rec["ontology_id"])
+    if not defer_rdf_sync:
+        for oid in touched:
+            _sync_rdf(project_id, oid)
+    return success({
+        "updated": len(updated),
+        "ids": updated,
+        "errors": errors,
+        "rdf_sync_deferred": defer_rdf_sync,
+        "ontologies_synced": [] if defer_rdf_sync else sorted(touched),
+        "stale_marked": stale_marked,
+        "stale_by_instance": stale_by_instance,
+    })
+
+
 @router.put("/instances/{instance_id}")
 def update_instance(
     instance_id: str,
     payload: dict,
+    request: Request,
     project_id: str = Depends(project_id_param),
+    reason: str | None = Query(default=None),
+    strict_fields: bool = Query(default=False),
+    defer_rdf_sync: bool = Query(default=False),
 ):
+    """HF-01/02：整体替换前走统一校验 + 字段审计；默认单实例增量 RDF 同步。"""
     store = _instance_store_for(project_id)
     rec = store.get(instance_id)
     if not rec:
@@ -840,13 +978,82 @@ def update_instance(
     new_instance = payload.get("instance")
     if not isinstance(new_instance, dict):
         raise ApiError("VALIDATION_ERROR", "instance 必须是对象", http_status=422)
+    warnings = _validate_for_update(store, project_id, rec, new_instance, strict_fields)
 
+    before = copy.deepcopy(rec.get("instance") or {})
     rec["instance"] = new_instance
     rec["updated_at"] = _now()
     store.update(instance_id, rec)
-    _sync_rdf(project_id, rec.get("ontology_id"))
+    stale_info = _invalidate_capability_results(project_id, instance_id)
+    if not defer_rdf_sync:
+        _sync_rdf(project_id, rec.get("ontology_id"), instance_id=instance_id)
+    operator = (getattr(request.state, "auth_user", None) or {}).get("username", "api")
+    _write_change_log(project_id, rec, before, new_instance, reason, operator, "PUT", warnings)
     logger.info("update_instance id=%s project_id=%s", instance_id, project_id)
-    return success(rec)
+    return success({
+        **rec,
+        "warnings": warnings,
+        "rdf_sync_deferred": defer_rdf_sync,
+        "stale_marked": stale_info.get("marked", 0),
+        "affected_capabilities": stale_info.get("capabilities", []),
+    })
+
+
+@router.patch("/instances/{instance_id}")
+def patch_instance(
+    instance_id: str,
+    payload: dict,
+    request: Request,
+    project_id: str = Depends(project_id_param),
+    reason: str | None = Query(default=None),
+    strict_fields: bool = Query(default=False),
+    defer_rdf_sync: bool = Query(default=False),
+):
+    """HF-01：字段级局部更新，避免整体替换丢失 `_source` / `__capability__` 血缘。"""
+    patch = payload.get("patch")
+    if patch is None:
+        patch = payload.get("instance")
+    if not isinstance(patch, dict) or not patch:
+        raise ApiError("VALIDATION_ERROR", "patch 必须是非空对象", http_status=422)
+    store = _instance_store_for(project_id)
+    rec = store.get(instance_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
+    before = copy.deepcopy(rec.get("instance") or {})
+    merged = dict(before)
+    merged.update(patch)
+    warnings = _validate_for_update(store, project_id, rec, merged, strict_fields)
+
+    rec["instance"] = merged
+    rec["updated_at"] = _now()
+    store.update(instance_id, rec)
+    stale_info = _invalidate_capability_results(project_id, instance_id)
+    if not defer_rdf_sync:
+        _sync_rdf(project_id, rec.get("ontology_id"), instance_id=instance_id)
+    operator = (getattr(request.state, "auth_user", None) or {}).get("username", "api")
+    _write_change_log(project_id, rec, before, merged, reason, operator, "PATCH", warnings)
+    return success({
+        **rec,
+        "warnings": warnings,
+        "rdf_sync_deferred": defer_rdf_sync,
+        "stale_marked": stale_info.get("marked", 0),
+        "affected_capabilities": stale_info.get("capabilities", []),
+    })
+
+
+@router.get("/instances/{instance_id}/change-logs")
+def list_instance_change_logs(
+    instance_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200, alias="pageSize"),
+    project_id: str = Depends(project_id_param),
+):
+    """HF-01：查询某实例的字段级变更审计。"""
+    rows = [r for r in _change_log_store(project_id).all() if r.get("instance_id") == instance_id]
+    rows.sort(key=lambda r: r.get("ts") or "", reverse=True)
+    page, page_size = parse_pagination(page, page_size)
+    start = (page - 1) * page_size
+    return success(list_payload(rows[start: start + page_size], len(rows), page, page_size))
 
 
 @router.delete("/instances/{instance_id}")
@@ -855,6 +1062,11 @@ def delete_instance(instance_id: str, project_id: str = Depends(project_id_param
     rec = store.get(instance_id)
     if rec is None or not store.delete(instance_id):
         raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
-    _sync_rdf(project_id, rec.get("ontology_id"))
+    stale_info = _invalidate_capability_results(project_id, instance_id)
+    _sync_rdf(project_id, rec.get("ontology_id"), instance_id=instance_id, deleted=True)
     logger.info("delete_instance id=%s project_id=%s", instance_id, project_id)
-    return success({"deleted": True})
+    return success({
+        "deleted": True,
+        "stale_marked": stale_info.get("marked", 0),
+        "affected_capabilities": stale_info.get("capabilities", []),
+    })

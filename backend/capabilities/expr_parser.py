@@ -414,6 +414,24 @@ WHITELIST_FUNCTIONS: dict[str, tuple[int, int]] = {
     "str": (1, 1),
     "contains": (2, 2),
     "starts_with": (2, 2),
+    # HF-06：受限字符串 / 日期内置（只读、无副作用）
+    "len": (1, 1),
+    "split": (2, 3),
+    "regex_match": (2, 2),
+    "upper": (1, 1),
+    "lower": (1, 1),
+    "date_add": (3, 3),
+    "date_diff": (2, 2),
+    # HF-07：受限声明式集合能力。刻意不引入 lambda / 数组字面量语法，
+    # 聚合维度一律用字符串字段名传参，便于定义期静态校验与运行期审计。
+    "sum": (1, 1),
+    "map": (2, 2),
+    "filter": (3, 3),
+    "group_by": (3, 4),
+    # HF-03：lookup 优先级回退 / 多命中列表（默认 lookup() 仍为严格模式）
+    "lookup_first": (3, 5),
+    "coalesce_lookup": (3, -1),
+    "lookup_all": (2, 3),
 }
 
 
@@ -459,6 +477,29 @@ def validate(program: Program, input_names: Optional[set[str]] = None) -> list[d
             lo, hi = WHITELIST_FUNCTIONS[func]
             if len(node.args) < lo or (hi != -1 and len(node.args) > hi):
                 issue(E_ARG_COUNT, f"函数 {func} 参数个数 {len(node.args)} 超出范围", node.line)
+            # HF-06/07/03：新增内置涉及字段名/排序/聚合口径时，要求静态可判定，
+            # 避免通过动态标识符绕过定义期引用治理与审计。
+            if func in ("map", "filter", "group_by"):
+                field_args = [1] if func in ("map", "filter") else [1, 2]
+                for idx in field_args:
+                    if idx < len(node.args) and not isinstance(node.args[idx], Str):
+                        issue(E_TYPE, f"{func}() 第 {idx + 1} 个参数必须是字符串字段名", node.line)
+                if func == "group_by" and len(node.args) > 3:
+                    agg = node.args[3]
+                    if not isinstance(agg, Str) or agg.value not in ("sum", "count"):
+                        issue(E_TYPE, "group_by() 第 4 个参数必须是字符串字面量 'sum'/'count'", node.line)
+            if func in ("lookup_first", "lookup_all"):
+                if len(node.args) > 1 and not isinstance(node.args[1], DictLit):
+                    issue(E_TYPE, f"{func}() 维度参数必须是字典字面量", node.line)
+            if func == "lookup_first":
+                if len(node.args) > 3 and not isinstance(node.args[3], (Str, Null)):
+                    issue(E_TYPE, "lookup_first() 排序字段必须是字符串字面量或 null", node.line)
+                if len(node.args) > 4 and not isinstance(node.args[4], Bool):
+                    issue(E_TYPE, "lookup_first() descending 必须是布尔字面量", node.line)
+            if func == "coalesce_lookup":
+                for idx, arg in enumerate(node.args[2:], start=3):
+                    if not isinstance(arg, DictLit):
+                        issue(E_TYPE, f"coalesce_lookup() 第 {idx} 个参数起每组维度必须是字典字面量", node.line)
             if func == "ref":
                 if not node.args or not isinstance(node.args[0], Str):
                     issue(E_REF_BAD_ARG, "ref() 第一个参数必须是字符串字面量（能力名）", node.line)

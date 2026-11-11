@@ -147,6 +147,53 @@ def sync_ontology(project_id: str, ontology_id: str) -> dict:
     return result
 
 
+def sync_instance(project_id: str, ontology_id: str, instance_id: str,
+                  deleted: bool = False) -> dict:
+    """HF-02：单实例增量 RDF 同步（按稳定 subject URI 删除后重插）。
+
+    - Fuseki 可达：只更新该实例的三元组，避免 2297 实例全量重建（实测 6~7s/次）。
+    - 文件降级：Turtle 单文件无法按 subject 局部改写，回退到该本体的全量重写，
+      保证正确性优先；调用方可用 defer_rdf_sync 在批次末尾做一次全量同步。
+    """
+    store = JsonStore("ontologies", project_id=project_id)
+    rec = store.get(ontology_id)
+    if not rec:
+        raise ValueError(f"本体不存在: {ontology_id}")
+    subject = f"http://ontology.local/inst_{instance_id}"
+    graph_uri = graph_uri_for(ontology_id)
+
+    if not _is_reachable():
+        result = sync_ontology(project_id, ontology_id)
+        result.update({"incremental": False, "fallback": "file_mode_full_rewrite",
+                       "instance_id": instance_id})
+        return result
+
+    delete = f"DELETE WHERE {{ GRAPH <{graph_uri}> {{ <{subject}> ?p ?o . }} }}"
+    insert = ""
+    if not deleted:
+        inst_rec = JsonlInstanceStore(project_id=project_id).get(instance_id)
+        if inst_rec:
+            triples = build_instance_triples(rec, [inst_rec]).serialize(format="nt").strip()
+            if triples:
+                insert = f" ;\nINSERT DATA {{ GRAPH <{graph_uri}> {{\n{triples}\n}} }}"
+    update = delete + insert
+    settings = get_settings()
+    url = f"{settings.jena_base_url.rstrip('/')}/{settings.jena_dataset}/update"
+    req = urllib.request.Request(
+        url, data=update.encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/sparql-update"},
+    )
+    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        if resp.status >= 400:
+            raise RuntimeError(f"Fuseki 增量更新失败 status={resp.status}")
+    logger.info("rdf_sync incremental ontology_id=%s instance_id=%s deleted=%s",
+                ontology_id, instance_id, deleted)
+    return {
+        "mode": REMOTE_MODE, "graph": graph_uri, "instance_id": instance_id,
+        "incremental": True, "deleted": deleted,
+    }
+
+
 def delete_ontology(project_id: str, ontology_id: str) -> dict:
     """删除本体在 RDF 存储中的全量图（本体删除时调用，防止残留幽灵三元组）。
 

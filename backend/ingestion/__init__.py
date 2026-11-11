@@ -17,12 +17,27 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from core.instance_store import get_instance_store
 from core.responses import ApiError
 from jena_adapter.client import shacl_validate
 from logging_setup import get_logger
 from modeling_translator import build_instance_graph, translate_to_shacl
 
 logger = get_logger("ingestion")
+
+
+def _existing_records_for_composite(candidate: dict[str, Any],
+                                    project_id: str | None) -> list[dict[str, Any]]:
+    """HF-03：取同对象、同本体（含历史无 ontology_id）的已入库实例，供复合唯一兜底。"""
+    ontology_id = candidate.get("ontology_id")
+    pid = project_id or candidate.get("project_id")
+    rows = get_instance_store(project_id=pid).find(
+        object_type=candidate.get("object_type"), limit=None,
+    )
+    if not ontology_id:
+        return rows
+    return [r for r in rows
+            if r.get("ontology_id") in (None, "", ontology_id)]
 
 
 def _now() -> str:
@@ -302,6 +317,29 @@ def approve(candidate: dict[str, Any], ontology: dict[str, Any], project_id: str
             "neo_tx_id": None,
         }
 
+    # HF-03：sh:uniqueKey 非标准 SHACL 约束组件，pyshacl 不执行；复合唯一在业务层兜底。
+    # 仅当存在 scope 匹配当前对象且 params.attributes 的复合约束时才生效，
+    # 历史单属性 unique 用例与其他对象类型不受影响。
+    composite: list[dict[str, Any]] = []
+    has_composite = any(
+        isinstance(c, dict) and c.get("rule") == "unique"
+        and c.get("scope") == object_type
+        and (c.get("params") or {}).get("attributes")
+        for c in (ontology.get("constraints") or [])
+    )
+    if has_composite:
+        composite = composite_unique_violations(
+            ontology, instances, object_type,
+            existing=_existing_records_for_composite(candidate, project_id),
+        )
+    if composite:
+        return {
+            "imported": 0,
+            "rejected": 0,
+            "violations": composite,
+            "neo_tx_id": None,
+        }
+
     # SHACL 通过 → 落库（Neo4j 或本地 JSONL 降级）
     from neo4j_sync import Neo4jSync
 
@@ -329,3 +367,113 @@ def approve(candidate: dict[str, Any], ontology: dict[str, Any], project_id: str
         "neo_tx_id": tx_id,
         "relation_tx_id": relation_tx_id,
     }
+
+
+# ---------------------------------------------------------------------------
+# HF-01 / HF-03：实例更新校验（复用 approve 的 SHACL 三段式，不改 approve 返回结构）
+# ---------------------------------------------------------------------------
+
+_PLATFORM_INSTANCE_KEYS = {
+    "object_type", "_source", "__capability__", "id", "updated_at",
+    "imported_at", "ontology_id", "project_id", "key_migrated_at",
+}
+
+
+def _object_of(ontology: dict[str, Any], object_type: str) -> dict[str, Any] | None:
+    return next((o for o in ontology.get("objects", [])
+                 if isinstance(o, dict) and o.get("id") == object_type), None)
+
+
+def composite_unique_violations(
+    ontology: dict[str, Any],
+    instances: list[dict[str, Any]],
+    object_type: str,
+    existing: list[dict[str, Any]] | None = None,
+    exclude_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """按 constraints[].params.attributes 做真正的组合键去重。
+
+    生成器（modeling_translator）已能把 attributes 编译进 sh:uniqueKey RDF list，
+    但该谓词不是 SHACL 标准约束组件，pyshacl/Fuseki 不会执行；故在业务层补上。
+    """
+    constraints = [c for c in (ontology.get("constraints") or [])
+                   if isinstance(c, dict) and c.get("rule") == "unique"
+                   and c.get("scope") == object_type
+                   and (c.get("params") or {}).get("attributes")]
+    if not constraints:
+        return []
+    obj = _object_of(ontology, object_type)
+    if not obj:
+        return []
+    valid_attrs = {a.get("id") for a in obj.get("attributes", []) if isinstance(a, dict)}
+    rows: list[tuple[str, dict]] = []
+    for src in (existing or []):
+        if src.get("object_type") and src.get("object_type") != object_type:
+            continue
+        if exclude_id and src.get("id") == exclude_id:
+            continue
+        rows.append((str(src.get("id")), src.get("instance") or {}))
+    for i, inst in enumerate(instances or []):
+        rows.append((f"new#{i}", inst if isinstance(inst, dict) else {}))
+
+    violations: list[dict[str, Any]] = []
+    for cst in constraints:
+        attrs = list((cst.get("params") or {}).get("attributes") or [])
+        missing = [a for a in attrs if a not in valid_attrs]
+        if missing:
+            violations.append({
+                "severity": "error", "path": ",".join(attrs),
+                "message": f"复合唯一约束引用未定义属性: {missing}",
+            })
+            continue
+        seen: dict[tuple, str] = {}
+        for rid, inst in rows:
+            vals = tuple(inst.get(a) for a in attrs)
+            if any(v is None for v in vals):
+                continue
+            if vals in seen:
+                violations.append({
+                    "severity": "error", "path": ",".join(attrs), "focus_node": rid,
+                    "message": f"复合唯一冲突 ({','.join(attrs)})={vals}，已存在 {seen[vals]}",
+                })
+            else:
+                seen[vals] = rid
+    return violations
+
+
+def validate_instance(
+    ontology: dict[str, Any],
+    instance: dict[str, Any],
+    object_type: str,
+    existing: list[dict[str, Any]] | None = None,
+    exclude_id: str | None = None,
+    strict_fields: bool = False,
+) -> dict[str, Any]:
+    """实例更新前的统一校验：SHACL + 字段白名单 + 复合唯一。
+
+    返回 {"violations", "warnings", "unknown_fields"}。
+    默认对未知字段只告警（兼容模型层派生维度字段）；strict_fields=True 才 422。
+    """
+    violations: list[dict[str, Any]] = []
+    shapes = translate_to_shacl(ontology)
+    data = build_instance_graph(ontology, [instance])
+    shacl_result = shacl_validate(data, shapes)
+    if shacl_result is None:
+        violations.append({"severity": "error", "message": "SHACL 校验引擎不可用"})
+    elif not shacl_result["valid"]:
+        violations.extend(shacl_result["violations"])
+
+    obj = _object_of(ontology, object_type)
+    defined = {a.get("id") for a in (obj or {}).get("attributes", []) if isinstance(a, dict)}
+    rels = {r.get("id") for r in (obj or {}).get("relations", []) if isinstance(r, dict)}
+    allowed = defined | rels | _PLATFORM_INSTANCE_KEYS
+    unknown = [k for k in instance if k not in allowed]
+    warnings = [f"未知字段 {k}（不在本体属性定义中，已保留）" for k in unknown]
+    if strict_fields and unknown:
+        violations.append({
+            "severity": "error", "message": f"字段白名单拒绝未知字段: {unknown}",
+        })
+    violations.extend(composite_unique_violations(
+        ontology, [instance], object_type, existing=existing, exclude_id=exclude_id,
+    ))
+    return {"violations": violations, "warnings": warnings, "unknown_fields": unknown}

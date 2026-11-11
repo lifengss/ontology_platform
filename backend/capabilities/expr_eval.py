@@ -11,11 +11,14 @@
 """
 from __future__ import annotations
 
+import calendar
+import re
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Optional
 
 from .expr_parser import (
-    BinOp, Bool, Call, DictLit, E_TYPE, E_DIV_ZERO, E_MISSING_ATTR,
+    BinOp, Bool, Call, DictLit, E_TYPE, E_DIV_ZERO, E_MISSING_ATTR, E_SYNTAX,
     ExprError, Ident, Member, Null, Num, Program, Str, Unary,
 )
 
@@ -48,9 +51,10 @@ class TraceCollector:
         }
 
 
-# lookup(object_type, dims, attr, trace) 与 ref(name, version) 由执行层注入；
+# lookup(object_type, dims, attr, trace, **mode) 与 ref(name, version) 由执行层注入；
 # 命中元数据（matched_record_id/matched_code）由执行层闭包写入 trace。
-LookupFn = Callable[[str, dict[str, Any], Optional[str], "TraceCollector"], Any]
+# HF-03：mode 支持 strict(默认)/first/all/coalesce，均为可选关键字，兼容旧 4 参调用。
+LookupFn = Callable[..., Any]
 RefFn = Callable[[str, Optional[str]], Any]
 
 
@@ -248,7 +252,46 @@ def _eval_call(node: Call, ctx: EvalContext) -> Any:
             raise
         ctx.trace.refs.append({"name": name, "version": version, "value": value})
         return value
-    if func in ("abs", "round", "min", "max", "str", "contains", "starts_with"):
+    # HF-03：lookup 优先级回退 / 多命中列表。lookup() 本身保持严格模式不变。
+    if func in ("lookup_first", "lookup_all", "coalesce_lookup"):
+        otype = _eval(node.args[0], ctx)
+        if not isinstance(otype, str):
+            raise ExprError(E_TYPE, f"{func}() 对象类型必须是字符串", line)
+        if func == "coalesce_lookup":
+            attr = _eval(node.args[1], ctx)
+            dims_list: list[dict[str, Any]] = []
+            for a in node.args[2:]:
+                d = _eval(a, ctx)
+                if not isinstance(d, dict):
+                    raise ExprError(E_TYPE, "coalesce_lookup() 每组维度必须是字典", line)
+                dims_list.append(d)
+            if not dims_list:
+                raise ExprError(E_TYPE, "coalesce_lookup() 至少需要一组维度", line)
+            if attr is not None and not isinstance(attr, str):
+                raise ExprError(E_TYPE, "coalesce_lookup() 属性名必须是字符串或 null", line)
+            return ctx.lookup(otype, dims_list[0], attr, ctx.trace,
+                              mode="coalesce", dims_list=dims_list)
+        dims_raw = _eval(node.args[1], ctx)
+        if not isinstance(dims_raw, dict):
+            raise ExprError(E_TYPE, f"{func}() 维度参数必须是字典", line)
+        attr = _eval(node.args[2], ctx) if len(node.args) > 2 else None
+        if attr is not None and not isinstance(attr, str):
+            raise ExprError(E_TYPE, f"{func}() 属性名必须是字符串或 null", line)
+        if func == "lookup_all":
+            return ctx.lookup(otype, dims_raw, attr, ctx.trace, mode="all")
+        order_by = _eval(node.args[3], ctx) if len(node.args) > 3 else None
+        descending = _eval(node.args[4], ctx) if len(node.args) > 4 else False
+        if order_by is not None and not isinstance(order_by, str):
+            raise ExprError(E_TYPE, "lookup_first() 排序字段必须是字符串或 null", line)
+        if not isinstance(descending, bool):
+            raise ExprError(E_TYPE, "lookup_first() descending 必须是布尔值", line)
+        return ctx.lookup(otype, dims_raw, attr, ctx.trace,
+                          mode="first", order_by=order_by, descending=descending)
+    if func in {
+        "abs", "round", "min", "max", "str", "contains", "starts_with",
+        "len", "split", "regex_match", "upper", "lower", "date_add", "date_diff",
+        "sum", "map", "filter", "group_by",
+    }:
         return _builtin(func, node.args, ctx, line)
     raise ExprError(E_SYNTAX, f"函数不在白名单: {func}", line)
 
@@ -279,10 +322,156 @@ def _builtin(func: str, args: list, ctx: EvalContext, line: int) -> Any:
         s, sub = _eval(args[0], ctx), _eval(args[1], ctx)
         if s is None or sub is None:
             return None
+        if not isinstance(s, str) or not isinstance(sub, str):
+            raise ExprError(E_TYPE, "contains() 要求两个字符串", line)
         return sub in s
     if func == "starts_with":
         s, pre = _eval(args[0], ctx), _eval(args[1], ctx)
         if s is None or pre is None:
             return None
+        if not isinstance(s, str) or not isinstance(pre, str):
+            raise ExprError(E_TYPE, "starts_with() 要求两个字符串", line)
         return s.startswith(pre)
+
+    # ---- HF-06：受限字符串与日期内置 ----
+    if func == "len":
+        v = _eval(args[0], ctx)
+        if v is None:
+            return None
+        if not isinstance(v, (str, list, tuple, dict)):
+            raise ExprError(E_TYPE, "len() 要求字符串/列表/字典", line)
+        return len(v)
+    if func == "split":
+        s, sep = _eval(args[0], ctx), _eval(args[1], ctx)
+        if s is None or sep is None:
+            return None
+        if not isinstance(s, str) or not isinstance(sep, str):
+            raise ExprError(E_TYPE, "split() 要求两个字符串", line)
+        if sep == "":
+            raise ExprError(E_TYPE, "split() 分隔符不能为空", line)
+        parts = s.split(sep)
+        if len(args) > 2:
+            idx = _eval(args[2], ctx)
+            if idx is None:
+                return None
+            if not _is_num(idx):
+                raise ExprError(E_TYPE, "split() 索引必须是数值", line)
+            i = int(idx)
+            return parts[i] if -len(parts) <= i < len(parts) else None
+        return parts
+    if func == "regex_match":
+        s, pat = _eval(args[0], ctx), _eval(args[1], ctx)
+        if s is None or pat is None:
+            return None
+        if not isinstance(s, str) or not isinstance(pat, str):
+            raise ExprError(E_TYPE, "regex_match() 要求两个字符串", line)
+        try:
+            return re.search(pat, s) is not None
+        except re.error as e:
+            raise ExprError(E_TYPE, f"regex_match() 正则非法: {e}", line) from e
+    if func in ("upper", "lower"):
+        s = _eval(args[0], ctx)
+        if s is None:
+            return None
+        if not isinstance(s, str):
+            raise ExprError(E_TYPE, f"{func}() 要求字符串", line)
+        return s.upper() if func == "upper" else s.lower()
+
+    def _as_date(v: Any) -> date:
+        if isinstance(v, datetime):
+            return v.date()
+        if isinstance(v, date):
+            return v
+        if isinstance(v, str):
+            try:
+                return date.fromisoformat(v[:10])
+            except ValueError as e:
+                raise ExprError(E_TYPE, f"日期格式应为 YYYY-MM-DD: {v}", line) from e
+        raise ExprError(E_TYPE, "日期参数必须是 ISO 日期字符串", line)
+
+    def _add_months(d: date, months: int) -> date:
+        m = d.month - 1 + months
+        y = d.year + m // 12
+        m = m % 12 + 1
+        return date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
+
+    if func == "date_add":
+        d = _eval(args[0], ctx)
+        n = _eval(args[1], ctx)
+        unit = _eval(args[2], ctx)
+        if d is None or n is None or unit is None:
+            return None
+        if not _is_num(n) or not isinstance(unit, str):
+            raise ExprError(E_TYPE, "date_add(date, n, unit) 参数类型不符", line)
+        base = _as_date(d)
+        num = int(n)
+        if unit in ("day", "days"):
+            out = base + timedelta(days=num)
+        elif unit in ("week", "weeks"):
+            out = base + timedelta(weeks=num)
+        elif unit in ("month", "months"):
+            out = _add_months(base, num)
+        elif unit in ("year", "years"):
+            out = _add_months(base, num * 12)
+        else:
+            raise ExprError(E_TYPE, f"date_add() 不支持单位 {unit}", line)
+        return out.isoformat()
+    if func == "date_diff":
+        a, b = _eval(args[0], ctx), _eval(args[1], ctx)
+        if a is None or b is None:
+            return None
+        return (_as_date(a) - _as_date(b)).days
+
+    # ---- HF-07：受限声明式集合能力（无 lambda，维度均用字符串字段名） ----
+    if func == "sum":
+        v = _eval(args[0], ctx)
+        if v is None:
+            return None
+        if not isinstance(v, (list, tuple)):
+            raise ExprError(E_TYPE, "sum() 要求列表（split/map/filter/lookup_all 产生）", line)
+        vals = [x for x in v if x is not None]
+        if any(not _is_num(x) for x in vals):
+            raise ExprError(E_TYPE, "sum() 列表含非数值", line)
+        return sum(vals)
+    if func == "map":
+        v, attr = _eval(args[0], ctx), _eval(args[1], ctx)
+        if v is None or attr is None:
+            return None
+        if not isinstance(v, (list, tuple)) or not isinstance(attr, str):
+            raise ExprError(E_TYPE, "map(list, attr) 参数类型不符", line)
+        return [x.get(attr) if isinstance(x, dict) else None for x in v]
+    if func == "filter":
+        v, attr, want = _eval(args[0], ctx), _eval(args[1], ctx), _eval(args[2], ctx)
+        if v is None or attr is None:
+            return None
+        if not isinstance(v, (list, tuple)) or not isinstance(attr, str):
+            raise ExprError(E_TYPE, "filter(list, attr, value) 参数类型不符", line)
+        return [x for x in v if isinstance(x, dict) and x.get(attr) == want]
+    if func == "group_by":
+        v, key_attr, val_attr = _eval(args[0], ctx), _eval(args[1], ctx), _eval(args[2], ctx)
+        agg = _eval(args[3], ctx) if len(args) > 3 else "sum"
+        if v is None or key_attr is None or val_attr is None:
+            return None
+        if not isinstance(v, (list, tuple)) or not isinstance(key_attr, str) or not isinstance(val_attr, str):
+            raise ExprError(E_TYPE, "group_by(list, key_attr, value_attr, agg?) 参数类型不符", line)
+        groups: dict[str, list[Any]] = {}
+        for x in v:
+            if not isinstance(x, dict):
+                continue
+            k = x.get(key_attr)
+            # 红线：「机型未装配的厂商分组留空」是合法状态，聚合时跳过而不是判为 lookup 失败
+            if k is None:
+                continue
+            groups.setdefault(str(k), []).append(x.get(val_attr))
+        if agg == "count":
+            return {k: len(vals) for k, vals in groups.items()}
+        if agg != "sum":
+            raise ExprError(E_TYPE, f"group_by() 不支持聚合 {agg}（仅 sum/count）", line)
+        out: dict[str, Any] = {}
+        for k, vals in groups.items():
+            nums = [y for y in vals if y is not None]
+            if any(not _is_num(y) for y in nums):
+                raise ExprError(E_TYPE, f"group_by() 分组 {k} 含非数值", line)
+            out[k] = sum(nums)
+        return out
     raise ExprError(E_SYNTAX, f"函数不在白名单: {func}", line)

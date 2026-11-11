@@ -2763,17 +2763,20 @@ async function saveInstanceEdit() {
   const inst = state.selectedInstance;
   if (!inst) return;
   const inputs = document.querySelectorAll('#instanceEditTable input[data-attr]');
-  const newInstance = { ...(inst.instance || inst.props || inst) };
+  const current = { ...(inst.instance || inst.props || inst) };
+  const patch = {};
   inputs.forEach(input => {
     const attrId = input.dataset.attr;
     const val = input.value.trim();
-    if (val === '') delete newInstance[attrId];
-    else newInstance[attrId] = val;
+    const oldVal = current[attrId];
+    const old = (oldVal === undefined || oldVal === null) ? '' : String(oldVal);
+    if (val !== old) patch[attrId] = val === '' ? null : val;
   });
+  if (!Object.keys(patch).length) { toast('无字段变更', 'ok'); return; }
   try {
     const j = await api('/api/ingest/instances/' + (inst.id || inst.node_id), {
-      method: 'PUT',
-      body: JSON.stringify({ instance: newInstance })
+      method: 'PATCH',
+      body: JSON.stringify({ patch, reason: '前端字段级编辑' })
     });
     state.selectedInstance = j.data;
     renderInstanceDetail(j.data);

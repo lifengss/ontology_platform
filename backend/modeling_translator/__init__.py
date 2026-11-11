@@ -169,8 +169,10 @@ def _build_shapes(g: Graph, objects, obj_by_id, ontology) -> None:
                 g.add((shape_lit, SH["datatype"], sk_dt))
                 g.add((list1, RDF.rest, RDF.nil))
 
-    # 全局约束（仅处理 unique 规则）：编译为标准 SHACL sh:uniqueKey ( attr1 attr2 ... )
-    # （pyshacl/Fuseki 原生支持，实例级唯一性校验真正生效；支持 params.attribute 或 params.attributes）
+    # 全局约束（仅处理 unique 规则）：把 uniqueKey 编译为 RDF list 供模型导出/兼容。
+    # 注意 sh:uniqueKey 不是 SHACL 标准约束组件，pyshacl 不会执行；实例级唯一性由
+    # ingestion.validate_instance / composite_unique_violations 在业务层兜底。
+    # 支持 params.attribute 或 params.attributes。
     for cst in ontology.get("constraints", []):
         if cst.get("rule") == "unique" and cst.get("scope") in obj_by_id:
             node_shape = URIRef(BASE + _local(cst["scope"]) + "Shape")

@@ -136,6 +136,20 @@ def api_list_dependents(cap_id: str, project_id: str = Depends(project_id_param)
     return success(list_payload(items, len(items), 1, len(items)))
 
 
+@router.get("/{cap_id}/affected-instances")
+def api_affected_instances(
+    cap_id: str,
+    instance_id: str = Query(..., description="被修改的基线实例 ID"),
+    project_id: str = Depends(project_id_param),
+):
+    """HF-04：反查哪些结果实例的计算曾命中这条基线，并标记 stale（基线变更后未重算）。"""
+    try:
+        res = _svc(project_id).affected_instances(cap_id, instance_id)
+    except CapabilityApiError as e:
+        _raise_api(e)
+    return success(res)
+
+
 # --------------------------------------------------------------------------- #
 # 执行（单实例 / 批量 + 四要素溯源 + 写回）
 # --------------------------------------------------------------------------- #
