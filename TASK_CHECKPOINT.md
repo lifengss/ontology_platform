@@ -748,4 +748,4 @@
 2. 跨租户上传内容经开放的读取随 V2-15 开放接口落地；legacy 无 owner/sharing 存量本体按 department 级处理。
 3. 凭据映射管理 UI（前端页面）仍未做（M2-B 遗留，可随 M2-D/M4 补）。
 4. **M2 剩余**：V2-09 权限审计与治理（M2-D）、V2-07 能力注册与发现（M2-E）、TCE2E-05/06；下一步切片启动需用户明确指示。
-5. `git commit` 待执行（用户已授权可 commit）。
+5. **已执行 `git commit`：`9a75cb0`（main，23 files +1225/-44）**——M2-C 源码（tenant.py＋9 路由＋schemas）＋`scripts/verify_m2c_multitenant.py`＋docs（API §24、里程碑 M2-C ✅）＋前端（index.html/app.js）＋项目 wiki 4 页＋checkpoint；排除预存无关项（`cost_baseline_kit/`、`docs/备份/`、`docs/成本核算*.md`、`docs/数据缺口*.md`）。
