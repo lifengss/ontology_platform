@@ -717,7 +717,7 @@
 - 回归：M2-B 验收 **19/19** 复跑全绿；L5 **93/93**；lints 0；临时验收数据与测试 secret 已清理。
 
 ### 30.2 git commit
-- 用户明确授权提交。范围：M2-B 源码（`identity_federation/`、`router_identity.py`、`mcp_client`、`main.py`）＋两个验收脚本＋docs（API §23、里程碑）＋项目 wiki 5 页＋checkpoint；**排除**预存无关未跟踪项（`cost_baseline_kit/`、`docs/备份/`、`docs/成本核算*.md`、`docs/数据缺口*.md` 既有改动）。
+- 已提交 **`225a93e`**（main，14 files changed +1002/-20）：M2-B 源码（`identity_federation/`、`router_identity.py`、`mcp_client`、`main.py`）＋两个验收脚本＋docs（API §23、里程碑）＋项目 wiki 5 页＋checkpoint；**排除**预存无关未跟踪项（`cost_baseline_kit/`、`docs/备份/`、`docs/成本核算*.md`、`docs/数据缺口*.md` 既有改动）。
 
 ### 30.3 下一步
 - **M2-C（V2-06 多租户隔离＋共享等级，8–12 人日）已获用户指示启动**：tenant_id 全链路过滤（API＋UI＋MCP）→ 四级共享（私有/项目组/部门/公开，schema 只读）→ 实例永不共享（INV-2）→ 上传型内容显式开放 → 共享降级即时收口 → 共享不授写；验收 TP-06-01~08/EP-06-01~03（TC-06-06 已提前联验）；凭据映射管理 UI 随 M2-C 一并补。
