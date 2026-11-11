@@ -308,5 +308,5 @@ git status --short
 - **HF-06** ✅：字符串与日期内置 `len/split/regex_match/upper/lower/date_add/date_diff`；新增内置同步定义期静态校验。
 - **HF-07** ✅：声明式 `sum/map/filter/group_by`；`lookup_all` 0 命中返回 `[]`，未装配分组是合法状态；不引入 lambda/数组字面量。
 - **验收**：`scripts/verify_hotfix_hf01_hf07.py` PASS=47/FAIL=0；L5 `backend/tests` 93/93；M1-A 75/75、M1-B 50/50(SKIP=1)、M1-C 33/33、M1-E 26/26、M2-A 67/67 全绿。
-- **边界**：本轮使用合成数据验证平台能力，**不宣称**成本清单 Excel 的 `209.83` 等业务数值通过；远程 Fuseki 增量 SPARQL update 未在无外部服务环境下做真实 remote 往返。
-- **提交**：未执行 `git commit`，按工具约束提交需用户明确指示。
+- **边界**：本轮使用合成数据验证平台能力，**不宣称**成本清单 Excel 的 `209.83` 等业务数值通过（HF-07 业务数据验收仍待冻结外部数据资产）；远程 Fuseki 增量 SPARQL update **已完成真实 remote 往返**（Fuseki 5.1.0 本地：单实例新增/更新/删除全绿，见 `scripts/_smoke_fuseki_remote.py`）。
+- **提交**：已提交 `b0b779a`（main，14 files changed +1961/-54）；`scripts/_smoke_fuseki_remote.py` 为临时诊断脚本（被 `.gitignore` 忽略，不入库）。

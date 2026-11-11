@@ -680,5 +680,6 @@
 ### 28.3 已知边界 / 未完成下一步
 1. HF-07 的 Excel/业务对象/业务数值属于外部数据资产；本轮只用合成数据验收平台声明式能力，**不宣称** `209.83` 等业务数值通过。若要业务数值验收，需先冻结外部数据资产与规则。
 2. 远程 Fuseki 增量 SPARQL update 未在无外部服务环境下做真实 remote 往返；后续若启用 Fuseki，需补一次 remote 增量 smoke。
-3. 如需入库，请用户明确指示执行 git commit；当前工作树含源码、脚本、文档、项目 wiki、checkpoint 修改及用户侧既有未跟踪内容。
+3. 已执行 `git commit`：`b0b779a`（main，14 files changed +1961/-54；仅含 hotfix 相关源码/脚本/文档，排除 `cost_baseline_kit/`、`docs/备份/` 与无关 `docs/数据缺口...md`）。
+4. 边界补全：远程 Fuseki 增量 SPARQL update 已做真实 remote 往返（Fuseki 5.1.0 本地，`scripts/_smoke_fuseki_remote.py` 新增/更新/删除全绿）；HF-07 业务 Excel 数值验收仍待冻结外部数据资产，未宣称通过。
 4. M2-B 启动仍需用户明确指示；M2 退出仍待 V2-14i / V2-06 / V2-09 / V2-07 / TCE2E-05/06。

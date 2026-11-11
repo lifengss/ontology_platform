@@ -951,4 +951,4 @@
 
 - `scripts/verify_hotfix_hf01_hf07.py` **PASS=47/FAIL=0**：临时 DATA_DIR＋合成实例，覆盖定义期静态校验、REST/服务层、表达式、lookup 回退、`ontology_id` 过滤、复合唯一、变更日志、stale、RDF 文件降级、前端 PATCH 静态检查。
 - 回归：L5 `backend/tests` **93/93**；M1-A **75/75**、M1-B **50/50（SKIP=1）**、M1-C **33/33**、M1-E **26/26**、M2-A **67/67** 全绿。
-- **如实标注**：HF-07 的 Excel/业务对象/业务数值（如 `209.83`）属于外部数据资产，不在本接口验收范围；本轮只证明平台具备受限声明式 `sum/map/filter/group_by` 能力。远程 Fuseki 增量 SPARQL update 语法未在无外部服务环境下做真实 remote 往返，后续现场启用 Fuseki 时需补 remote smoke。
+- **如实标注**：HF-07 的 Excel/业务对象/业务数值（如 `209.83`）属于外部数据资产，不在本接口验收范围；本轮只证明平台具备受限声明式 `sum/map/filter/group_by` 能力。远程 Fuseki 增量 SPARQL update **已完成真实 remote 往返**（Fuseki 5.1.0 本地：单实例新增→更新→删除，命名图内三元组随增量更新正确变化，`scripts/_smoke_fuseki_remote.py` 全绿）；文件模式降级分支仍按 §22.1 回退全量重写。
