@@ -2,10 +2,20 @@
 title: 操作日志
 type: log
 created: 2026-10-20
-updated: 2026-11-10
+updated: 2026-11-11
 ---
 
 # 操作日志
+
+## [2026-11-11] feat | M2-A（V2-05 登录鉴权＋RBAC）交付：验收 67/67，L5 回归 93/93
+- 后端：`backend/auth/`（PBKDF2 密码哈希、标准库 HS256 JWT 固定 alg/恒定时间比较、用户/角色/grants/审计/撤销名单）＋`backend/api/router_auth.py`（login/logout/me/roles/users/audit/sso 预留 10 端点）＋`backend/api/auth_middleware.py` 全局过滤器（未登录 401/越权 403＋审计）；`main.py` 注册过滤器、CORS 改为凭据模式（本机任意端口正则＋`allow_credentials`）。
+- **关键决策**：JWT 只带身份与过期，权限每次实时查库 → 角色调整免重登即时生效、过期/篡改 token 不残留权限；过滤器放行 `/mcp/*`（沿用项目静态 token）、`/health`、静态资源、OPTIONS，且不改中间件层级（避免 M1-B legacy SSE 双响应复发）；`ONTOLOGY_AUTH_ENABLED=false` 仅作 L5/M1 回归测试态豁免，**默认启用、生产严禁设置**。
+- 前端：`index.html` 登录层（自定义 `.op-hidden`，离线可用）＋用户与授权页；`app.js` 统一 `credentials:'include'`、401 回登录、权限矩阵隐藏菜单/禁用写按钮、用户角色/grants 编辑与审计展示。
+- 安全口径：httpOnly＋SameSite=Lax Cookie 为主，Bearer `?mode=bearer` 供 API 客户端；密码错误/账号不存在/锁定统一文案防枚举＋5 次失败锁 300s；SSO 预留接口存在但未启用；初始管理员密码随机落 `secrets/bootstrap_admin.txt`，不硬编码。
+- **本轮修复**：① 用户列表信封断言误用 `pageSize`，平台 `list_payload` 实为 snake_case `page_size`（文档 §3 有历史笔误，已登记待统一）；② Playwright `page.evaluate` 裸 `return` 语法错误 → 改箭头函数；③ M1-C 浏览器段被新登录层挡住（31/33、SKIP=1）→ 等待登录态完成后解除 `op-hidden`，恢复 33/33；④ M1 四个验收脚本加测试态豁免，避免 93 项 L5 与全链回归被鉴权打断。
+- 验收：`scripts/verify_m2a_auth_rbac.py` **PASS=67/FAIL=0/SKIP=0**；回归 L5 **93/93**、M1-A **75/75**、M1-B **50/50（SKIP=1）**、M1-C **33/33**、M1-E **26/26**。
+- 登记：`docs/API-INTERFACE-DOC.md` §21（＋§1.3/§15 同步，纠正历史"平台自身不鉴权"口径）、`docs/V2-开发里程碑.md` M2-A ✅、[[source-V2-测试用例]]、[[V2开发里程碑]]、[[index]]、`TASK_CHECKPOINT.md` §27。
+- 下一步：M2-B（V2-14i 身份联邦）启动需用户明确指示；M2 未退出。
 
 ## [2026-11-10] feat | M1-E（TCE2E-01 全链 / M1 里程碑退出）交付：验收 26/26，L5 回归 93/93，M1 退出标准达成
 - 分工边界（INV-3）：平台只做工具提供方（`term_lookup`＋`capability_call`＋REST/MCP＋审计/版本），外部 Agent 负责提问解析、工具编排与带 citations 回答组装；平台**未新增** `/api/ask|qa|chat|answer`，MCP 工具清单仍为 6 个（无回答类工具）。

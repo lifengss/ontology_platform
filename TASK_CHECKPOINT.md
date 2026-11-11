@@ -615,3 +615,48 @@
 2. TP-04-06 / EP-04-03 源连接型渠道（批量联邦读＋派生图＋fetched_at 溯源）按偏差决策 D2 随 **M4-A** 交付（依赖 V2-02 实例数据模型）。
 3. 用户级跨会话 wiki **已定位**：`C:\Users\lif_lc\.workbuddy\wiki-knowledge`（结构见 WIKI-SCHEMA.md），本轮起补登记 raw 快照与项目详情页；§24.5/§25.5 中「目录未定位」的记录至此关闭。
 4. 每切片脚本继续在 wiki `source-V2-测试用例` 登记区登记；每次交互结束追加本文件 checkpoint。
+
+---
+
+## 27. 2026-11-11：M2-A（V2-05 登录鉴权＋RBAC）切片交付（验收 67/67；L5 回归 93/93）
+
+> 本次交互用户指示「开始下一步吧」→ 启动 M2-A（M1 已退出）。**M2 里程碑未退出**，仅首片完成。
+
+### 27.1 前置评估（先做，避免返工）
+- 主要矛盾：全局鉴权会打断 93 项 L5 回归、M1 四个验收脚本与前端请求（全部无 REST Authorization 头）；MCP 段另有项目静态 Bearer token；`main.py` 最外层 ASGI 中间件层级是 M1-B legacy SSE 双响应修复的关键，不可调整。
+- 处置：过滤器只覆盖 `/api/*` 与页面，放行 `/mcp/*`、`/health`、静态资源、`/api/client-logs`、OPTIONS、登录/SSO 预留；显式测试态开关 `ONTOLOGY_AUTH_ENABLED`（默认启用）供 L5/M1 回归；M2-A 验收在启用态用真实 JWT 覆盖全部 8 个测试点。
+
+### 27.2 交付
+- 后端：`backend/auth/__init__.py`（PBKDF2-HMAC-SHA256 密码哈希、标准库 HS256 JWT 固定 alg/恒定时间比较、用户/角色/grants/审计/撤销名单、权限矩阵与资源级判定）＋`backend/schemas/auth.py`＋`backend/api/router_auth.py`（10 端点）＋`backend/api/auth_middleware.py`；`main.py` 注册过滤器与 auth_router、CORS 改 `allow_credentials=True`＋本机任意端口正则；`backend/conftest.py` 测试态豁免。
+- 会话：httpOnly＋SameSite=Lax Cookie 为主；`POST /api/auth/login?mode=bearer` 供 API 客户端；`ONTOLOGY_COOKIE_SECURE` 控制 Secure；初始管理员密码取 env 或随机写入 `secrets/bootstrap_admin.txt`（不硬编码默认口令）。
+- **JWT 只带 sub/jti/iat/exp，不带角色与权限**；每次请求实时查库 → 角色调整免重登即时生效、过期/篡改/登出 token 不残留权限。
+- RBAC：4 角色 admin/modeler/reviewer/viewer；动作 read/write/review/admin；资源级 grant（ontology 级 > project 级 > 角色默认，`level=none` 显式拒绝）；只读/计算型 POST 白名单避免误伤；资源键只从 query/path 取（中间件不读 body，避免消费请求流）。
+- 安全与审计：密码错误/账号不存在/锁定/disabled 统一 `401 INVALID_CREDENTIALS`「账号或密码错误」；连续 5 次失败锁 300s；SSO 预留 `enabled=false` + `403 SSO_NOT_ENABLED`；审计事件 login_success/login_failed/logout/user_created/permission_change/permission_denied/auth_missing/auth_invalid。
+- 前端：`index.html` 登录层（自定义 `.op-hidden` 不依赖 CDN）＋顶栏用户/登出＋用户与授权页；`app.js` 统一 `credentials:'include'`、401 回登录、权限矩阵隐藏菜单/禁用写按钮、角色/grants 编辑与审计展示；`loadSession()` 与 `bootApp()` 解耦（业务页失败不把已认证用户踢回登录页）。
+- 验收脚本 `scripts/verify_m2a_auth_rbac.py`：鉴权启用态＋临时 DATA_DIR＋真实 JWT＋REST 全端点＋真实 Chromium DOM（stub fetch 驱动登录流程）＋MCP 独立体系＋默认启用断言；**PASS=67/FAIL=0/SKIP=0**。
+
+### 27.3 本轮修复的真实问题
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | 用户列表信封断言写 `pageSize`，平台 `list_payload` 实为 snake_case `page_size`；文档 §3 responseExample 有历史笔误 | 断言按代码契约改 `page_size`；§21.4 明确「查询参数 pageSize / 响应字段 page_size」，§15 登记文档统一待补，不因文档笔误改全局代码 |
+| 2 | Playwright `page.evaluate("window.__x=...; return ...")` 报 `SyntaxError: Illegal return statement` | 改箭头函数 `() => { ...; return loadSession(); }` |
+| 3 | M1-C 回归退化 31/33、SKIP=1：新登录层使 `#objectForms` 落在 `op-hidden` 祖先内，`select_option` 超时 | 浏览器段等待 init 登录态完成后解除 `op-hidden` 并隐藏登录层；恢复 33/33 |
+| 4 | M1 四个验收脚本与 93 项 L5 无 token，启用鉴权后会被 401 打断 | `backend/conftest.py` 与四个脚本显式 `ONTOLOGY_AUTH_ENABLED=false`（测试态豁免，默认仍启用且有断言） |
+
+### 27.4 验证结果（提交前复核全绿）
+- `python scripts/verify_m2a_auth_rbac.py`：**PASS=67/FAIL=0/SKIP=0**。
+- L5 `backend/tests` **93 passed / 0 failed**（103.98s）；M1-A **75/75**、M1-B **50/50 SKIP=1**、M1-C **33/33**、M1-E **26/26**。
+- 既有噪声：M1-A 输出里 `backend/mocks/v2_external.py` 故障注入的 `Traceback` 是被捕获的预期异常打印，非鉴权引入，结论仍 75/0。
+
+### 27.5 当前进展
+- **M1 ✅ 已退出；M2-A ✅ 完成，M2 未退出**（剩余 V2-14i / V2-06 / V2-09 / V2-07 / E2E）。
+- 文档/登记：`docs/API-INTERFACE-DOC.md` §21（＋§1.3 错误码表、§15 状态段，纠正历史「平台自身不鉴权」口径）、`docs/V2-开发里程碑.md` M2-A ✅、项目 wiki 4 页（含 `source-V2-测试用例` 脚本登记）、用户级 wiki raw 快照与详情页、本 checkpoint。
+- git 提交：见本节后续提交号回写。
+- 未纳入提交的用户侧未跟踪内容：`cost_baseline_kit/`、`hotfix/`、`docs/备份/`、`docs/成本硬基准-*.md`。
+
+### 27.6 未完成 / 下一步
+1. **M2-B（V2-14i 身份联邦，P0）**：按约定启动需用户明确指示；本轮不启动。
+2. M2 退出需 V2-06（多租户隔离）/V2-09/V2-07 与 TCE2E-05/06；TP-04-06/EP-04-03 仍按偏差决策 D2 随 M4-A。
+3. §21.5 已如实登记已知边界：`mode=bearer` token 由调用方保管、审计/撤销名单 JsonStore 全量读写、资源级授权按 project_id（M2-C 才做租户隔离）、跨进程 REST 回归脚本需携带 Bearer token。
+4. 文档既有不一致：§3 responseExample 响应字段 `pageSize` vs 全平台 `page_size`，待统一修正（仅文档，不改代码）。
+5. 每切片脚本继续在 wiki `source-V2-测试用例` 登记区登记；每次交互结束追加本文件 checkpoint。

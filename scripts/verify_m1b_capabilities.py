@@ -36,6 +36,8 @@ import time
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _TMP_DATA = tempfile.mkdtemp(prefix="m1b_data_")
 os.environ["DATA_DIR"] = _TMP_DATA
+# V2-05：M1 回归基线不面向鉴权；M2-A 验收脚本在启用态单独验证 TP-05/EP-05
+os.environ.setdefault("ONTOLOGY_AUTH_ENABLED", "false")
 sys.path.insert(0, os.path.join(REPO, "backend"))
 
 import openpyxl  # noqa: E402

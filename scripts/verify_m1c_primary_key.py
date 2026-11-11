@@ -27,6 +27,8 @@ import tempfile
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="m1c_data_")
+# V2-05：M1 回归基线不面向鉴权；M2-A 验收脚本在启用态单独验证 TP-05/EP-05
+os.environ.setdefault("ONTOLOGY_AUTH_ENABLED", "false")
 sys.path.insert(0, os.path.join(REPO, "backend"))
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -147,10 +149,15 @@ def ui_contract(no_ui: bool) -> None:
                            else r.continue_())
                 page.goto("file:///" + index.replace("\\", "/"), wait_until="domcontentloaded", timeout=15000)
                 page.wait_for_function("typeof renderObjectForms === 'function'", timeout=15000)
+                # V2-05：离线页面无后端，init 会停在登录页；等待其完成后再解除登录层/主界面隐藏
+                page.wait_for_function(
+                    "document.getElementById('loginOverlay').classList.contains('op-hidden') === false",
+                    timeout=10000)
                 page.evaluate("""() => {
-                  // 建模页/编辑器默认隐藏，逐个祖先解除隐藏以便真实 select_option 交互
+                  document.getElementById('loginOverlay').classList.add('op-hidden');
+                  // 建模页/编辑器默认隐藏，逐个祖先解除隐藏（含 V2-05 的 op-hidden）以便真实 select_option 交互
                   let el = document.getElementById('objectForms');
-                  while (el) { el.classList.remove('hidden'); el.style.display = 'block'; el = el.parentElement; }
+                  while (el) { el.classList.remove('hidden'); el.classList.remove('op-hidden'); el.style.display = 'block'; el = el.parentElement; }
                   state.formObjects = [{
                     id: 'obj_customer', name: '客户', description: '', parent: null,
                     stable_key: null, stable_key_explicit: false,

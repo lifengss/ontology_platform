@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import os
 import time
 import uuid
 
@@ -15,7 +16,9 @@ from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from api.auth_middleware import auth_filter
 from api.router_actions import router as actions_router
+from api.router_auth import router as auth_router  # V2-05 登录鉴权与 RBAC（M2-A）
 from api.router_capabilities import router as capabilities_router
 from api.router_dictionary import router as dictionary_router
 from api.router_graph import router as graph_router
@@ -39,9 +42,14 @@ logger = get_logger("api.main")
 
 app = FastAPI(title=settings.app_name, version=settings.version)
 
+# V2-05：httpOnly Cookie 会话要求 allow_credentials=True，此时不能用 allow_origins=["*"]。
+# 仅放行本机任意端口（离线安装器会动态重分配端口），外部来源需显式加入 ONTOLOGY_CORS_ORIGINS。
+_extra_origins = [o.strip() for o in os.getenv("ONTOLOGY_CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_extra_origins,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -60,6 +68,13 @@ async def request_logging(request: Request, call_next):
     elapsed_ms = int((time.time() - start) * 1000)
     log_event(logger, 20, "request_end", req_id=req_id, status=response.status_code, elapsed_ms=elapsed_ms)
     return response
+
+
+@app.middleware("http")
+async def authentication(request: Request, call_next):
+    # V2-05 全局鉴权过滤器。定义在 request_logging 之后 → 位于其外层；
+    # 最外层仍是 McpStreamableMiddleware（M1-B legacy SSE 单响应修复，勿调整层级）。
+    return await auth_filter(request, call_next)
 
 
 @app.exception_handler(ApiError)
@@ -106,6 +121,7 @@ app.include_router(actions_router)
 app.include_router(templates_router)
 app.include_router(llm_router)
 app.include_router(system_router)
+app.include_router(auth_router)  # V2-05 登录鉴权与 RBAC（M2-A）
 
 
 # VS6: 由 mcp_server 模块按项目挂载 /mcp/{project_id}，双传输（2026-10-28 MCP 接入层修复）：

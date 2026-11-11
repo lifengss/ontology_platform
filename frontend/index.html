@@ -7,6 +7,12 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <style>
+    /* ---------- V2-05 登录与权限矩阵（不依赖 Tailwind CDN，离线可用） ---------- */
+    .op-hidden { display: none !important; }
+    .op-login-wrap { position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background: radial-gradient(circle at 30% 20%, #1c2b52 0%, #0b1020 60%); }
+    .op-login-card { width: 370px; background: #121a2e; border: 1px solid #2a365e; border-radius: 14px; padding: 28px; box-shadow: 0 24px 70px rgba(0,0,0,.5); }
+    .op-login-input { width: 100%; background: #0f1627; border: 1px solid #2a365e; border-radius: 8px; padding: 9px 11px; color: #e6ecff; font-size: 13px; margin-top: 6px; }
+    .op-login-label { font-size: 12px; color: #94a3b8; display: block; margin-top: 14px; }
     :root { --bg:#0b1020; --panel:#121a2e; --card:#161f36; --border:#2a365e; --accent:#4f8cff; --ok:#34d399; --bad:#f87171; --text:#e6ecff; --muted:#94a3b8; }
     body { background: var(--bg); color: var(--text); font-family: system-ui, "PingFang SC", sans-serif; }
     .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
@@ -84,7 +90,7 @@
   </style>
 </head>
 <body class="h-screen overflow-hidden flex flex-col">
-  <header class="panel mx-4 mt-4 px-5 py-3 flex items-center justify-between">
+  <header id="appHeader" class="panel mx-4 mt-4 px-5 py-3 flex items-center justify-between op-hidden">
     <div class="flex items-center gap-3">
       <img id="brandLogo" src="assets/logo-inspur.png" alt="浪潮信息" class="h-7 w-auto select-none" draggable="false" />
       <span class="w-px h-5 bg-slate-700/60"></span>
@@ -102,11 +108,31 @@
       <span id="healthDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
       <span id="healthText" class="text-slate-400 cursor-pointer hover:text-slate-200 whitespace-nowrap" onclick="toggleHealthDetails()">检查中…</span>
       <span id="ver" class="text-slate-500"></span>
+      <span class="w-px h-4 bg-slate-700/60"></span>
+      <span id="currentUserLabel" class="text-slate-300 whitespace-nowrap"></span>
+      <button id="logoutBtn" class="btn secondary" onclick="logoutUser()">退出登录</button>
     </div>
   </header>
   <div id="healthDetails" class="hidden mx-4 mt-2 px-5 py-3 panel text-xs text-slate-300"></div>
 
-  <div class="flex-1 flex overflow-hidden">
+  <!-- V2-05 未登录时只呈现登录页（不依赖 Tailwind CDN 的 .hidden） -->
+  <div id="loginOverlay" class="op-login-wrap">
+    <form class="op-login-card" onsubmit="submitLogin(); return false;">
+      <div class="text-lg font-semibold">格物 Lattice · 登录</div>
+      <div class="text-xs text-slate-400 mt-2">V2-05 平台自身登录鉴权与 RBAC</div>
+      <label class="op-login-label">账号
+        <input id="loginUsername" class="op-login-input" autocomplete="username" />
+      </label>
+      <label class="op-login-label">密码
+        <input id="loginPassword" type="password" class="op-login-input" autocomplete="current-password" />
+      </label>
+      <div id="loginError" class="text-xs mt-3" style="color:#f87171;min-height:18px"></div>
+      <button id="loginSubmitBtn" type="submit" class="btn" style="width:100%;margin-top:8px">登录</button>
+      <div class="text-xs text-slate-500 mt-4">SSO 对接预留，当前仅支持账号密码登录</div>
+    </form>
+  </div>
+
+  <div id="appShell" class="flex-1 flex overflow-hidden op-hidden">
   <nav class="w-36 shrink-0 border-r border-slate-700/50 py-3 px-2 overflow-auto">
     <div class="tab active" data-tab="home" onclick="switchTab('home')">首页</div>
     <div class="tab" data-tab="modeling" onclick="switchTab('modeling')">建模</div>
@@ -119,6 +145,7 @@
     <div class="tab" data-tab="mcp" onclick="switchTab('mcp')">MCP</div>
     <div class="tab" data-tab="logs" onclick="switchTab('logs')">日志</div>
     <div class="tab" data-tab="settings" onclick="switchTab('settings')">设置</div>
+    <div id="tabUsers" data-tab="users" class="tab op-hidden" onclick="switchTab('users')">用户与授权</div>
     <div class="border-t border-slate-700/50 mt-2 pt-2 mb-1"></div>
     <div class="tab" data-tab="tutorial" onclick="switchTab('tutorial')">使用教程</div>
   </nav>
@@ -973,6 +1000,39 @@
     </section>
 
     <!-- 使用教程（frontend/tutorial/ 独立数据 + 独立版本号，规则参考 knowledgeOS） -->
+    <!-- V2-05 用户与授权（仅管理员可见） -->
+    <section id="users" class="tab-content hidden grid grid-cols-12 gap-4">
+      <div class="col-span-12 lg:col-span-7 card p-4">
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-sm font-semibold">用户与角色授权</div>
+          <button class="btn secondary" onclick="loadAuthUsers()">刷新</button>
+        </div>
+        <div class="text-xs text-slate-500 mb-2">角色调整即时生效（无需重新登录）；资源级授权按项目 ID 生效，选择「显式拒绝」即不授权。</div>
+        <div class="overflow-auto">
+          <table class="w-full text-xs">
+            <thead><tr class="text-slate-400">
+              <th class="text-left py-2">账号</th><th>角色</th><th>项目授权</th><th>级别</th><th>操作</th>
+            </tr></thead>
+            <tbody id="authUserTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="col-span-12 lg:col-span-5 card p-4">
+        <div class="text-sm font-semibold mb-3">新增用户</div>
+        <label class="op-login-label">账号<input id="newAuthUsername" class="op-login-input" /></label>
+        <label class="op-login-label">初始密码（至少 8 位）<input id="newAuthPassword" type="password" class="op-login-input" /></label>
+        <label class="op-login-label">角色
+          <select id="newAuthRole" class="op-login-input">
+            <option value="viewer">只读</option><option value="modeler">建模人</option>
+            <option value="reviewer">审核人</option><option value="admin">管理员</option>
+          </select>
+        </label>
+        <button id="createAuthUserBtn" class="btn mt-4" onclick="createAuthUser()">创建用户</button>
+        <div class="text-sm font-semibold mt-6 mb-2">授权与鉴权审计</div>
+        <div id="authAuditBody" class="text-xs text-slate-400" style="max-height:260px;overflow:auto"></div>
+      </div>
+    </section>
+
     <section id="tutorial" class="tab-content hidden">
       <div class="flex gap-4 items-start">
         <div class="w-56 shrink-0 card p-3 sticky top-0" style="max-height: calc(100vh - 120px); overflow: auto;">

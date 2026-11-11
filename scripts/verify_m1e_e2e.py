@@ -40,6 +40,8 @@ os.environ["DATA_DIR"] = _TMP_DATA
 os.environ["MCP_MAX_RETRIES"] = "0"
 os.environ["MCP_TIMEOUT_SECONDS"] = "1"   # 外部系统故障快速失败（零重试）
 os.environ["M1E_MOCK_TOKEN"] = "tok-full"  # mock 默认全量 token（build_default_tokens）
+# V2-05：M1 全链回归基线不面向鉴权；M2-A 验收脚本在启用态单独验证 TP-05/EP-05
+os.environ.setdefault("ONTOLOGY_AUTH_ENABLED", "false")
 sys.path.insert(0, os.path.join(REPO, "backend"))
 
 import requests  # noqa: E402

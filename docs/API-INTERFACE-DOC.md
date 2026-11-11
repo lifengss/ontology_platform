@@ -50,9 +50,13 @@
 | `CONFLICT` | 409 | 冲突（如重复创建、幂等键已存在） |
 | `UPSTREAM_UNAVAILABLE` | 502 | 外部依赖（Jena/Neo4j/外部 MCP）不可达 |
 | `FORBIDDEN_WRITE` | 403 | 受控写操作被护栏拦截（如 LLM 直落库、未确认回写） |
+| `UNAUTHORIZED` | 401 | 未登录 / 会话失效（V2-05 全局过滤器；MCP 段同名码见 §11.1） |
+| `INVALID_CREDENTIALS` | 401 | 登录失败统一文案（防账号枚举） |
+| `FORBIDDEN` | 403 | 角色或资源级授权不足 |
+| `SSO_NOT_ENABLED` | 403 | SSO 预留接口未启用 |
 | `INTERNAL_ERROR` | 500 | 未预期内部错误 |
 
-> 注意：`FORBIDDEN_WRITE`(403) 用于语义护栏（如归化候选未审核不得落库、Action 未确认不得回写），与鉴权无关（平台自身不鉴权，见 PRD §12）。
+> 注意：`FORBIDDEN_WRITE`(403) 用于**语义护栏**（如归化候选未审核不得落库、Action 未确认不得回写），与鉴权无关；鉴权类 403 使用 `FORBIDDEN`。平台自 M2-A（V2-05，2026-11-11）起**已启用自身登录鉴权与 RBAC**，见 §21；此前"平台自身不鉴权"的注记已废止。`/mcp/*` 仍沿用项目静态 Bearer token 独立体系（§11.1）。
 
 ### 1.4 列表 / 分页信封（强制）
 凡"列表/分页"类接口，`data` **必须**为对象：
@@ -586,7 +590,8 @@
 - 用户友好建模/逆向生成见 §14。
 - 待增强：Fuseki 远程推理开关、SHACL 在 Jena 侧执行、MCP stdio transport 完整 JSON-RPC。
 - Action 回写健壮性（指数退避重试 + 按端点熔断）已完成（2026-10-23，见 §6.2 与 TASK_CHECKPOINT §19；`test_action_resilience.py` 7/7）。
-- V2 切片进展：**VS2-00 ✅**、**M1-A（§17 字典/联邦查询）✅**、**M1-B（§18 能力层/公式引擎）✅**、**M1-C（§19 显式业务主键）✅**、**M1-E（§20 里程碑退出 / TCE2E-01 全链）✅**（均为 2026-11-09~10 交付，验收脚本见各章节）。
+- V2 切片进展：**VS2-00 ✅**、**M1-A（§17 字典/联邦查询）✅**、**M1-B（§18 能力层/公式引擎）✅**、**M1-C（§19 显式业务主键）✅**、**M1-E（§20 里程碑退出 / TCE2E-01 全链）✅**（均为 2026-11-09~10 交付，验收脚本见各章节）、**M2-A（§21 登录鉴权与 RBAC）✅**（2026-11-11，验收 67/67）。
+- 待补（M2-A 登记）：§3 responseExample 中曾把响应分页字段写作 `pageSize`，与全平台 `list_payload` 的 snake_case `page_size` 不一致，后续统一修正文档（代码不改名）；跨进程直连 REST 的回归脚本在启用鉴权的部署上需携带 Bearer token。
 
 ## 16. 项目管理（projects）
 
@@ -830,3 +835,72 @@
 ### 20.5 验收
 
 `scripts/verify_m1e_e2e.py`：3 mock + 临时 DATA_DIR + 真实 MCP SSE 客户端 + REST 同口径 + 事后审计/版本核查 + INV-3 负向；**PASS=26/FAIL=0**。M1 退出回归：L5 `backend/tests` **93/93**（含 MVP 34 项基线），M1-A **75/75**、M1-B **50/50**（SKIP=1 按 D2 挂 M4-A）、M1-C **33/33** 全绿。
+
+---
+
+## 21. 登录鉴权与 RBAC（V2-05 / M2-A，2026-11-11）
+
+> 平台自本切片起**自身启用鉴权**（§1.3 原先"平台自身不鉴权"的注记已废止）。
+> 关键约束：JWT 只携带身份与过期，**权限每次请求实时查库**；`/mcp/*` 沿用项目静态 Bearer token 独立体系（§11.1），不受本过滤器管辖。
+
+### 21.1 会话与凭据
+
+| 项 | 口径 |
+|---|---|
+| 登录 | `POST /api/auth/login`，body `{username,password}` |
+| 主凭据 | `Set-Cookie: op_session=<JWT>; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800`（JS 不接触 token） |
+| API 客户端 | `POST /api/auth/login?mode=bearer` 额外返回 `data.token`；请求带 `Authorization: Bearer <token>` |
+| HTTPS 部署 | 设 `ONTOLOGY_COOKIE_SECURE=true` 使 Cookie 带 `Secure` |
+| 初始管理员 | 首次启动自动创建 `admin`；密码取 `ONTOLOGY_BOOTSTRAP_ADMIN_PASSWORD`，未设置则随机生成写入 `secrets/bootstrap_admin.txt`（不硬编码默认口令） |
+| 过期/篡改/登出 | 固定 HS256（拒绝 `alg=none`）+ 恒定时间签名比较 + exp/iat/jti 校验；登出把 jti 写入撤销名单 → 401 |
+
+密码 PBKDF2-HMAC-SHA256（`ONTOLOGY_PBKDF2_ITERATIONS` 默认 600000，可用 env 调整）；JWT HS256 仅用标准库实现，无新增第三方依赖（离线安装包友好）。
+
+### 21.2 全局过滤器与放行清单
+
+`backend/api/auth_middleware.py` 覆盖所有 `/api/*` 与后端页面路径：
+
+- 未登录/会话失效 → `401 UNAUTHORIZED`；权限不足 → `403 FORBIDDEN`（统一信封）；并写 `auth_audit`（`auth_missing`/`auth_invalid`/`permission_denied`）。
+- 放行：`OPTIONS` 预检、`/health`、`/api/client-logs`、静态资源（`/`、`/index.html`、`/app.js`、`/styles.css`、`/tutorial/*`、`/assets/*`、`/favicon.ico`）、`/docs`、`/openapi.json`、`/redoc`、`/mcp/*`、`/api/auth/login|logout|sso/config|sso/start`。
+- CORS 改为 `allow_credentials=True` + 本机任意端口正则（离线安装器动态端口），外部来源经 `ONTOLOGY_CORS_ORIGINS` 追加；401/403 由过滤器直接回显 CORS 头，避免浏览器读不到正文。
+- **测试态豁免**：`ONTOLOGY_AUTH_ENABLED=false` 时过滤器跳过，仅供 L5 基线（`backend/conftest.py`）与 M1 切片回归脚本使用。**默认启用；生产严禁设置该变量**——这是自动化测试开关，不是安全特性。M2-A 验收脚本在启用态用真实 JWT 验证全部测试点。
+- **未登录访问页面** → 前端 `/api/auth/me` 返回 401 时只呈现登录页（`#loginOverlay`），主界面 `#appShell`/`#appHeader` 隐藏（自定义 `.op-hidden`，不依赖 Tailwind CDN）。
+
+### 21.3 角色与资源级授权
+
+| 角色 | 默认动作 |
+|---|---|
+| `admin` | read / write / review / admin |
+| `modeler` | read / write |
+| `reviewer` | read / review |
+| `viewer` | read |
+
+- 动作映射：GET/HEAD → `read`；写方法 → `write`；`/api/ingest/.../approve|reject|revert|batch-*` → `review`；`/api/auth/users|roles|audit` → `admin`。只读/计算型 POST（validate / export / term-lookup / nl-query / preview / connections test|read / actions execute / llm test）白名单归 `read`，避免误伤只读与审核角色。
+- 资源键从 query `project_id` 与路径 `/api/projects/{pid}`、`/api/ontologies/{oid}`、`/api/graph/{oid}` 提取（中间件不读 body，避免消费请求流）。
+- 授权优先级：**本体级 grant > 项目级 grant > 角色默认**；`level ∈ read|write|review|none`（`none` 为显式拒绝）。未显式授权的资源沿用角色默认，管理员创建用户时应按项目显式收敛。
+- 权限矩阵由 `GET /api/auth/me` 返回 `data.permissions.{role,actions,tabs,grants}`，前端据此隐藏菜单/禁用操作按钮；**服务端每次请求重新判定**，不信任前端矩阵。
+
+### 21.4 端点清单
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| POST | `/api/auth/login` | 放行 | 账号密码登录（Cookie 或 `?mode=bearer`） |
+| POST | `/api/auth/logout` | 放行 | 撤销 jti + 清 Cookie |
+| GET | `/api/auth/me` | 登录 | 实时身份/权限矩阵（角色调整免重登即时生效） |
+| GET | `/api/auth/roles` | admin | 角色定义 |
+| GET | `/api/auth/users` | admin | 用户列表，`{items,total,page,page_size}` |
+| POST | `/api/auth/users` | admin | 创建用户 `{username,password,role,grants}`（201） |
+| PUT | `/api/auth/users/{id}` | admin | 改 role/grants/disabled/password，写 `permission_change` 审计（含 before/after） |
+| GET | `/api/auth/audit` | admin | 审计列表，支持 `event`/`actor`/`page`/`pageSize` |
+| GET | `/api/auth/sso/config` | 放行 | SSO 预留：`{enabled:false,providers:[],reserved:true}` |
+| POST | `/api/auth/sso/start` | 放行 | 未启用显式 `403 SSO_NOT_ENABLED`（不回落匿名） |
+
+> 字段命名口径：查询参数按平台约定用 `pageSize`，响应信封沿用 `core.responses.list_payload` 的 **snake_case `page_size`**（§1.4/§18/§19 同口径）。文档 §3 responseExample 中曾出现响应字段 `pageSize` 的写法，属历史笔误，后续统一修正文档；代码不因文档笔误改名。
+
+### 21.5 安全口径与已知边界
+
+- 防枚举：密码错误 / 账号不存在 / 账号锁定 / disabled 一律 `401 INVALID_CREDENTIALS`，文案统一「账号或密码错误」；连续 5 次失败锁定 300 秒（服务端审计可查，不向客户端暴露账号状态）。
+- 会话不残留权限：JWT 不含角色/权限，登出撤销，用户禁用/锁定即时拒绝。
+- 审计事件：`login_success`、`login_failed`、`logout`、`user_created`、`permission_change`、`permission_denied`、`auth_missing`、`auth_invalid`；含 `ts/actor/target/detail`。
+- **已知边界（如实标注）**：① httpOnly Cookie 降低 XSS 窃取 token 风险，但 `mode=bearer` 返回的 token 由调用方自行保管，浏览器端不应持久化；生产建议配合 CSP 与 HTTPS。② 审计/撤销名单当前用 `JsonStore` 全量读写，适合单部门规模，多部门高并发前需换存储。③ 资源级授权按 `project_id` 判定，M2-C 多租户隔离（V2-06）与 M2-B 身份联邦（V2-14i）尚未实现。④ 直连 REST 的既有回归脚本在启用鉴权的部署上需携带 `Authorization: Bearer <token>`（由 `?mode=bearer` 登录获取）；测试态豁免不适用于跨进程服务。
+- 验收：`scripts/verify_m2a_auth_rbac.py` **PASS=67/FAIL=0/SKIP=0**（TP-05-01~05、EP-05-01~03、TC/TCE-05、真实 Chromium DOM、MCP 体系不受影响、默认启用断言）；回归 L5 **93/93**、M1-A **75/75**、M1-B **50/50（SKIP=1）**、M1-C **33/33**、M1-E **26/26**。

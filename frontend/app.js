@@ -114,11 +114,13 @@ async function api(path, opts = {}) {
   if (namespace) url += '&namespace=' + encodeURIComponent(namespace);
   clientLog('info', `API ${opts.method || 'GET'} ${path}`, { project_id: projectId, namespace });
   try {
-    const r = await fetch(url, { headers, ...opts });
+    // V2-05：httpOnly Cookie 会话（跨域须 credentials:include）；Bearer 由后端兼容 API 客户端
+    const r = await fetch(url, { headers, credentials: 'include', ...opts });
     const j = await r.json().catch(() => ({}));
     const elapsed = Math.round(performance.now() - start);
     if (!r.ok) {
       clientLog('error', `API ${opts.method || 'GET'} ${path} failed`, { status: r.status, message: j.error?.message, elapsed_ms: elapsed });
+      if (r.status === 401 && !opts.skipAuthRedirect) showLogin('登录状态已失效，请重新登录');
       const err = new Error(j.error?.message || `HTTP ${r.status}`);
       err.status = r.status;
       err.code = j.error?.code || null;
@@ -780,6 +782,7 @@ function switchTab(name) {
   if (name === 'mcp') { loadMcpOntologies(1); loadMcpTools(); loadMcpToken(); }
   if (name === 'logs') { loadServerLogs(); }
   if (name === 'settings') { loadLLMSettings(); }
+  if (name === 'users') { loadAuthUsers(); loadAuthAudit(); }
   if (name === 'tutorial') loadTutorial();
   _lastTab = name;
 }
@@ -4305,8 +4308,11 @@ window.addEventListener('unhandledrejection', e => {
 });
 
 // ---- init ----
-(async function init() {
-  clientLog('info', 'app init');
+let _booted = false;
+async function bootApp() {
+  if (_booted) return;
+  _booted = true;
+  clientLog('info', 'app boot');
   // 推理页业务影响推理：两行式下拉（主行语义 label，次行小字 id）
   impactInstanceLS = bindLabeledSelect({
     boxId: 'impactInstanceBox', triggerId: 'impactInstanceTrigger', panelId: 'impactInstancePanel',
@@ -4327,6 +4333,12 @@ window.addEventListener('unhandledrejection', e => {
   }
   switchTab('home');
   setInterval(checkHealth, 10000);
+}
+
+// V2-05：先校验会话再加载业务页面；未登录只呈现登录页
+(async function init() {
+  clientLog('info', 'app init');
+  await loadSession();
 })();
 
 // ===================== 数据字典（M1-A / V2-01：词条 + 联邦查询 + 审计） =====================
@@ -5069,4 +5081,148 @@ function renderTutorialMarkdown(src) {
   }
   closeList();
   return html.replace(/\u0000B(\d+)\u0000/g, (m, n) => '<pre><code>' + esc(blocks[+n]) + '</code></pre>');
+}
+
+// ===================== V2-05 登录鉴权与 RBAC（M2-A） =====================
+// 会话凭据为 httpOnly Cookie：JS 不接触 token；角色/授权由后端每次请求实时判定。
+const WRITE_BUTTON_ACTIONS = [
+  'toggleProjectForm()', 'submitNewProject()', 'startCreate()', 'saveOntology()',
+  'publishCurrent()', 'deleteCurrentOntology()', 'uploadIngestFile()', 'previewIngest()',
+  'openDictTermEditor()', 'openCapEditor()', 'openConnEditor()', 'saveLLMSettings()',
+  "batchCandidates('delete')", 'saveAction()', 'startCreateAction()',
+];
+const REVIEW_BUTTON_ACTIONS = ["batchCandidates('approve')", "batchCandidates('reject')", "batchCandidates('restore')"];
+
+function showLogin(message) {
+  $('loginOverlay')?.classList.remove('op-hidden');
+  $('appShell')?.classList.add('op-hidden');
+  $('appHeader')?.classList.add('op-hidden');
+  if (message) $('loginError').textContent = message;
+}
+
+function hideLogin() {
+  $('loginOverlay')?.classList.add('op-hidden');
+  $('appShell')?.classList.remove('op-hidden');
+  $('appHeader')?.classList.remove('op-hidden');
+}
+
+async function loadSession() {
+  try {
+    const j = await api('/api/auth/me', { skipAuthRedirect: true });
+    state.session = j.data;
+    applyPermissionMatrix(j.data.permissions || {});
+    $('loginError').textContent = '';
+    hideLogin();
+    // 业务页加载失败不应把已认证用户踢回登录页
+    try { await bootApp(); } catch (e2) { clientLog('error', 'app boot failed', { message: e2.message }); }
+  } catch (e) {
+    state.session = null;
+    showLogin(e.status === 401 ? '' : (e.message || '无法连接后端'));
+  }
+}
+
+function applyPermissionMatrix(perms) {
+  const tabs = new Set(perms.tabs || []);
+  document.querySelectorAll('.tab[data-tab]').forEach(el => {
+    el.classList.toggle('op-hidden', tabs.size > 0 && !tabs.has(el.dataset.tab));
+  });
+  const actions = new Set(perms.actions || []);
+  document.querySelectorAll('button[onclick]').forEach(btn => {
+    const act = btn.getAttribute('onclick');
+    let need = null;
+    if (WRITE_BUTTON_ACTIONS.includes(act)) need = 'write';
+    else if (REVIEW_BUTTON_ACTIONS.includes(act)) need = 'review';
+    if (!need) return;
+    btn.dataset.permission = need;
+    const allowed = actions.has(need);
+    btn.disabled = !allowed;
+    btn.title = allowed ? '' : '当前角色无此操作权限';
+  });
+  const u = state.session?.user;
+  $('currentUserLabel').textContent = u ? `${u.username}（${perms.role_label || u.role}）` : '';
+}
+
+async function submitLogin() {
+  const username = $('loginUsername').value.trim();
+  const password = $('loginPassword').value;
+  $('loginError').textContent = '';
+  if (!username || !password) { $('loginError').textContent = '请输入账号与密码'; return; }
+  $('loginSubmitBtn').disabled = true;
+  try {
+    await api('/api/auth/login', {
+      method: 'POST', body: JSON.stringify({ username, password }), skipAuthRedirect: true,
+    });
+    $('loginPassword').value = '';
+    await loadSession();
+  } catch (e) {
+    $('loginError').textContent = e.message || '登录失败';
+  } finally {
+    $('loginSubmitBtn').disabled = false;
+  }
+}
+
+async function logoutUser() {
+  try { await api('/api/auth/logout', { method: 'POST', skipAuthRedirect: true }); } catch (e) { /* ignore */ }
+  state.session = null;
+  showLogin('');
+}
+
+async function loadAuthUsers() {
+  try {
+    const j = await api('/api/auth/users?pageSize=200');
+    const rows = j.data.items || [];
+    const labels = { viewer: '只读', modeler: '建模人', reviewer: '审核人', admin: '管理员' };
+    const levels = { read: '只读', write: '可写', review: '可审核', none: '显式拒绝' };
+    $('authUserTableBody').innerHTML = rows.map(u => {
+      const g = (u.grants || []).find(x => x.scope === 'project') || {};
+      return `<tr class="border-t border-slate-700/40">
+        <td class="py-2">${esc(u.username)}</td>
+        <td><select id="role_${u.id}" class="bg-[#0f1627] border border-slate-700/60 rounded px-1 py-1">
+          ${Object.keys(labels).map(r => `<option value="${r}" ${r === u.role ? 'selected' : ''}>${labels[r]}</option>`).join('')}
+        </select></td>
+        <td><input id="grantProject_${u.id}" class="bg-[#0f1627] border border-slate-700/60 rounded px-1 py-1 w-28" value="${esc(g.target || '')}" placeholder="项目 ID" /></td>
+        <td><select id="grantLevel_${u.id}" class="bg-[#0f1627] border border-slate-700/60 rounded px-1 py-1">
+          ${Object.keys(levels).map(l => `<option value="${l}" ${l === (g.level || 'read') ? 'selected' : ''}>${levels[l]}</option>`).join('')}
+        </select></td>
+        <td><button class="btn secondary" onclick="saveAuthUser('${u.id}')">保存</button></td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="5" class="text-slate-500 py-3">暂无用户</td></tr>';
+  } catch (e) { toast('加载用户失败：' + e.message, 'err'); }
+}
+
+async function saveAuthUser(id) {
+  const role = $('role_' + id).value;
+  const target = $('grantProject_' + id).value.trim();
+  const level = $('grantLevel_' + id).value;
+  const grants = target ? [{ scope: 'project', target, level }] : [];
+  try {
+    await api('/api/auth/users/' + id, { method: 'PUT', body: JSON.stringify({ role, grants }) });
+    toast('授权已保存，目标用户无需重新登录即生效', 'ok');
+    await loadAuthUsers();
+    await loadAuthAudit();
+  } catch (e) { toast('保存失败：' + e.message, 'err'); }
+}
+
+async function createAuthUser() {
+  const username = $('newAuthUsername').value.trim();
+  const password = $('newAuthPassword').value;
+  const role = $('newAuthRole').value;
+  if (!username || !password) { toast('请填写账号与初始密码', 'err'); return; }
+  try {
+    await api('/api/auth/users', { method: 'POST', body: JSON.stringify({ username, password, role }) });
+    $('newAuthUsername').value = ''; $('newAuthPassword').value = '';
+    toast('用户已创建', 'ok');
+    await loadAuthUsers();
+    await loadAuthAudit();
+  } catch (e) { toast('创建失败：' + e.message, 'err'); }
+}
+
+async function loadAuthAudit() {
+  try {
+    const j = await api('/api/auth/audit?pageSize=30');
+    $('authAuditBody').innerHTML = (j.data.items || []).map(a =>
+      `<div class="border-b border-slate-700/40 py-1"><span class="text-slate-500">${esc((a.ts || '').slice(0, 19))}</span>
+       <span class="text-slate-300">${esc(a.event)}</span> · ${esc(a.actor)} · ${esc(a.target || '')}</div>`
+    ).join('') || '<div class="text-slate-500">暂无审计记录</div>';
+  } catch (e) { /* 非管理员不展示 */ }
 }
