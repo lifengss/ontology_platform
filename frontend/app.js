@@ -756,6 +756,7 @@ function switchTab(name) {
   $(name).classList.remove('hidden');
   clientLog('info', 'switch tab', { tab: name });
   if (name === 'home') loadHome();
+  if (name === 'credentials') loadCredentials();
   if (name === 'mcp') { loadConnections(); }
   if (name === 'modeling') loadOntologies();
   if (name === 'ingest') {
@@ -783,6 +784,8 @@ function switchTab(name) {
   if (name === 'logs') { loadServerLogs(); }
   if (name === 'settings') { loadLLMSettings(); }
   if (name === 'users') { loadAuthUsers(); loadAuthAudit(); }
+  if (name === 'approvals') loadChangesets();
+  if (name === 'audit') loadAuditLog();
   if (name === 'tutorial') loadTutorial();
   _lastTab = name;
 }
@@ -872,6 +875,16 @@ function _meUser() {
   return state.session?.user || null;
 }
 
+function _parseVer(v) {
+  const m = String(v || '1.0').split('.');
+  return { major: parseInt(m[0] || '1', 10) || 1, minor: parseInt(m[1] || '0', 10) || 0 };
+}
+
+function _nextMajorVersion(o) {
+  const p = _parseVer(o?.published_version || o?.version);
+  return (p.major + 1) + '.0';
+}
+
 function _isOntologyOwner(o) {
   const me = _meUser();
   if (!me) return true; // dev/未启用鉴权：不限制
@@ -890,9 +903,16 @@ function renderOntologySharing(o) {
     + '<span class="badge">' + esc(SHARING_LABELS[sharing] || sharing) + '</span>';
   if (sharing === 'project' && members) html += '<span class="text-slate-500">成员：' + esc(members) + '</span>';
   if (o.owner) html += '<span class="text-slate-500">建模人：' + esc(o.owner) + '</span>';
+  if (o.status === 'active') {
+    html += '<span class="text-slate-500">已发布版本：' + esc(o.published_version || o.version || '-') + '</span>';
+  }
   html += '<span class="text-slate-600" title="共享仅授 schema 只读；实例永不共享（INV-2）；上传型实例内容默认仅上传者可读">仅 schema 只读</span>';
   if (canManage) {
     html += '<button class="btn secondary text-xs" onclick="showSharingEditor()">调整</button>';
+  }
+  if (canManage && o.status === 'active') {
+    // V2-07：进入表单编辑；已发布本体直编被后端 409 拦截，修改经表单内「提交变更」走变更提案
+    html += '<button class="btn secondary text-xs" onclick="editCurrentOntology()">提交变更（V2-07）</button>';
   }
   html += '</div>';
   html += '<div id="sharingEditor" class="hidden mt-2 p-2 rounded border border-slate-700 bg-slate-900/60 space-y-2">'
@@ -905,6 +925,16 @@ function renderOntologySharing(o) {
     + '<div class="flex gap-2"><button class="btn text-xs" onclick="saveOntologySharing()">保存</button>'
     + '<button class="btn secondary text-xs" onclick="hideSharingEditor()">取消</button></div>'
     + '<p class="text-[11px] text-slate-500">私有=仅本人可见；项目组=指定成员（可跨部门）；部门=本部门全员；公开=全部用户。变更即时生效并留审计。</p>'
+    + '</div>';
+  html += '<div id="changesetEditor" class="hidden mt-2 p-2 rounded border border-slate-700 bg-slate-900/60 space-y-2">'
+    + '<p class="text-[11px] text-slate-400">将当前加载的模型提交为变更提案（V2-07）：兼容变更（新增可选属性/放宽取值范围/新增对象等）自动直接升小版本发布；不兼容变更（删属性/改类型/主键变化/收窄范围/删对象等）须填写目标大版本并进入审批，通过前对外仍是旧版本。</p>'
+    + '<div class="flex items-center gap-2 text-xs"><span class="text-slate-400">目标版本</span>'
+    + '<input id="csTargetVersion" class="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs" placeholder="不兼容变更必填，如 ' + esc(_nextMajorVersion(o)) + '" />'
+    + '<span class="text-slate-500">当前版本 ' + esc(o.version || '-') + '</span></div>'
+    + '<div class="flex items-center gap-2 text-xs"><span class="text-slate-400">备注</span>'
+    + '<input id="csNote" class="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs" placeholder="变更说明（可选）" /></div>'
+    + '<div class="flex gap-2"><button class="btn text-xs" onclick="submitChangeset()">提交</button>'
+    + '<button class="btn secondary text-xs" onclick="showChangesetEditor()">取消</button></div>'
     + '</div>';
   el.innerHTML = html;
   $('sharingLevel').value = sharing;
@@ -940,6 +970,296 @@ async function saveOntologySharing() {
   } catch (e) {
     const inv = e.details?.invalid_users;
     toast('共享调整失败: ' + e.message + (inv ? '（无效账号: ' + inv.join(', ') + '）' : ''), 'err', 6000);
+  }
+}
+
+// ---- V2-07 / M2-E：变更审批（changeset）----
+const CS_STATUS_LABELS = { pending: '待审批', approved: '已通过', rejected: '已拒绝', withdrawn: '已撤回', abandoned: '已放弃', archived: '已归档' };
+const CS_KIND_LABELS = {
+  object_added: '新增对象', object_removed: '删除对象', stable_key_changed: '主键(stable_key)变化',
+  parent_changed: '父对象变化', attribute_added: '新增属性', attribute_removed: '删除属性',
+  attribute_type_changed: '属性类型变化', attribute_required_changed: '必填性变化',
+  constraint_widened: '取值范围放宽', constraint_narrowed: '取值范围收窄',
+  relation_added: '新增关系', relation_removed: '删除关系', relation_changed: '关系变化',
+  constraint_added: '新增业务约束', constraint_removed: '删除业务约束', constraint_modified: '业务约束修改',
+  function_added: '新增函数', function_removed: '删除函数',
+};
+
+function _csKindLabel(kind) { return CS_KIND_LABELS[kind] || kind; }
+
+async function loadChangesets() {
+  const el = $('csList');
+  if (!el) return;
+  const status = $('csFilterStatus') ? $('csFilterStatus').value : '';
+  try {
+    const j = await api('/api/changesets' + (status ? '?status=' + encodeURIComponent(status) : ''));
+    const items = (j.data && j.data.items) || [];
+    $('csDetail').classList.add('hidden');
+    if (!items.length) { el.innerHTML = '<p class="text-xs text-slate-500">暂无变更审批记录</p>'; return; }
+    let html = '<table class="w-full text-xs"><thead><tr class="text-slate-400 border-b border-slate-800">'
+      + '<th class="text-left py-1 pr-2">ID</th><th class="text-left pr-2">本体</th><th class="text-left pr-2">目标版本</th>'
+      + '<th class="text-left pr-2">兼容性</th><th class="text-left pr-2">状态</th><th class="text-left pr-2">提交人</th>'
+      + '<th class="text-left pr-2">提交时间</th><th class="text-left pr-2">处理人</th><th class="text-left pr-2">备注/拒绝原因</th><th></th></tr></thead><tbody>';
+    for (const c of items) {
+      const verdict = c.diff?.compatible ? '<span class="text-emerald-400">兼容</span>' : '<span class="text-rose-400">不兼容</span>';
+      const who = c.status === 'approved' ? (c.approved_by || '-') : c.status === 'rejected' ? (c.rejected_by || '-') : '-';
+      const why = c.reject_reason ? '<span class="text-rose-300">' + esc(c.reject_reason) + '</span>' : esc(c.note || '');
+      html += '<tr class="border-b border-slate-800/60 hover:bg-slate-900/40">'
+        + '<td class="py-1 pr-2 font-mono">' + esc(c.id) + '</td>'
+        + '<td class="pr-2">' + esc(c.ontology_name || c.ontology_id) + '</td>'
+        + '<td class="pr-2">' + esc(c.target_version || '-') + '</td>'
+        + '<td class="pr-2">' + verdict + '（' + (c.diff?.changes?.length || 0) + ' 项变更）</td>'
+        + '<td class="pr-2"><span class="badge">' + esc(CS_STATUS_LABELS[c.status] || c.status) + '</span></td>'
+        + '<td class="pr-2">' + esc(c.submitted_by) + '</td>'
+        + '<td class="pr-2">' + esc(c.submitted_at || '') + '</td>'
+        + '<td class="pr-2">' + esc(who) + '</td>'
+        + '<td class="pr-2 max-w-[220px] truncate" title="' + esc(c.reject_reason || c.note || '') + '">' + why + '</td>'
+        + '<td class="whitespace-nowrap"><button class="btn secondary text-[11px]" onclick="showChangeset(\'' + c.id + '\')">详情</button></td>'
+        + '</tr>';
+    }
+    el.innerHTML = html + '</tbody></table>';
+  } catch (e) {
+    toast('加载变更审批失败: ' + e.message, 'err');
+  }
+}
+
+let _csOpenId = null;
+
+async function showChangeset(cid) {
+  const box = $('csDetail');
+  if (!box) return;
+  _csOpenId = cid;
+  box.classList.remove('hidden');
+  box.innerHTML = '<p class="text-xs text-slate-500">加载中…</p>';
+  let c;
+  try {
+    const j = await api('/api/changesets/' + cid);
+    c = j.data;
+  } catch (e) { box.innerHTML = '<p class="text-xs text-rose-400">' + esc(e.message) + '</p>'; return; }
+  const ch = (c.diff?.changes || []);
+  let rows = '';
+  for (const x of ch) {
+    const cls = x.compatible ? 'text-emerald-400' : 'text-rose-400';
+    rows += '<tr class="border-b border-slate-800/60"><td class="py-1 pr-2"><span class="' + cls + '">'
+      + (x.compatible ? '兼容' : '不兼容') + '</span></td><td class="pr-2">' + esc(_csKindLabel(x.kind)) + '</td>'
+      + '<td class="pr-2 font-mono">' + esc(x.object_id || '') + '</td><td class="pr-2 font-mono">' + esc(x.attribute_id || '') + '</td>'
+      + '<td class="pr-2 text-slate-400">' + esc(x.detail || '') + '</td></tr>';
+  }
+  const me = _meUser() || {};
+  const canReview = me.role === 'admin' || me.role === 'reviewer';
+  const isSubmitter = me.username === c.submitted_by;
+  let acts = '';
+  if (c.status === 'pending') {
+    if (canReview && me.username !== c.submitted_by) {
+      acts += '<button class="btn text-xs" onclick="csAct(\'' + c.id + '\',\'approve\')">通过</button> '
+        + '<button class="btn secondary text-xs" onclick="csAskReject(\'' + c.id + '\')">拒绝（须理由）</button>';
+    }
+    if (isSubmitter) {
+      acts += ' <button class="btn secondary text-xs" onclick="csAct(\'' + c.id + '\',\'withdraw\')">撤回</button> '
+        + '<button class="btn secondary text-xs" onclick="csAct(\'' + c.id + '\',\'abandon\')">放弃</button>';
+    }
+  }
+  const proc = c.status === 'approved' ? ('审批通过：' + (c.approved_by || '-') + ' @ ' + (c.approved_at || '-'))
+    : c.status === 'rejected' ? ('审批拒绝：' + (c.rejected_by || '-') + ' @ ' + (c.rejected_at || '-') + '，理由：' + (c.reject_reason || '-'))
+    : c.status === 'archived' ? ('已归档：' + (c.archived_reason || '')) : '';
+  box.innerHTML = '<div class="p-3 rounded border border-slate-700 bg-slate-900/60 text-xs space-y-2">'
+    + '<div class="flex items-center gap-2 flex-wrap"><span class="badge">' + esc(CS_STATUS_LABELS[c.status] || c.status) + '</span>'
+    + '<span>本体：<b>' + esc(c.ontology_name || c.ontology_id) + '</b></span>'
+    + '<span>基线版本：' + esc(c.base_version || '-') + ' → 目标版本：<b>' + esc(c.target_version || '-') + '</b></span>'
+    + '<span>提交：' + esc(c.submitted_by) + ' @ ' + esc(c.submitted_at || '') + '</span>'
+    + (proc ? '<span>' + esc(proc) + '</span>' : '')
+    + (c.note ? '<span>备注：' + esc(c.note) + '</span>' : '')
+    + '</div>'
+    + '<div class="overflow-x-auto"><table class="w-full text-xs"><thead><tr class="text-slate-400 border-b border-slate-800">'
+    + '<th class="text-left py-1 pr-2">兼容性</th><th class="text-left pr-2">变更</th><th class="text-left pr-2">对象</th><th class="text-left pr-2">属性</th><th class="text-left pr-2">说明</th></tr></thead><tbody>'
+    + (rows || '<tr><td colspan="5" class="py-1 text-slate-500">无变更项</td></tr>') + '</tbody></table></div>'
+    + (acts ? '<div class="flex gap-2 pt-1">' + acts + '</div>' : '')
+    + '</div>';
+}
+
+function csAskReject(cid) {
+  const reason = prompt('拒绝理由（必填，TC-07-02）：');
+  if (reason === null) return;
+  csAct(cid, 'reject', reason.trim());
+}
+
+async function csAct(cid, act, reason) {
+  try {
+    const body = {};
+    if (act === 'reject') body.reason = reason;
+    await api('/api/changesets/' + cid + '/' + act, { method: 'POST', body: JSON.stringify(body) });
+    toast(act === 'approve' ? '审批通过，已发布大版本' : act === 'reject' ? '已拒绝（整组驳回）' : act === 'withdraw' ? '已撤回' : '已放弃', 'ok');
+    await loadChangesets();
+    if (_csOpenId === cid) showChangeset(cid).catch(() => {});
+  } catch (e) {
+    toast('操作失败: ' + e.message, 'err', 6000);
+  }
+}
+
+// 建模页：提交变更（V2-07）——以当前加载的本体模型为提案
+function showChangesetEditor() {
+  const el = $('changesetEditor');
+  if (!el) return;
+  el.classList.toggle('hidden');
+}
+// 表单内打开变更提案编辑器（editCurrentOntology 对已发布本体已把编辑器移入表单卡片；
+// 提案模型由 submitChangeset 从表单编辑收集，而非已加载模型）
+function openChangesetFromForm() {
+  const el = $('changesetEditor');
+  if (!el) return;
+  el.classList.remove('hidden');
+  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+async function submitChangeset() {
+  const o = state.currentOntology;
+  if (!o) return;
+  const note = ($('csNote') || {}).value ? $('csNote').value.trim() : '';
+  const targetVersion = ($('csTargetVersion') || {}).value ? $('csTargetVersion').value.trim() : '';
+  let model;
+  if (!$('editorCard').classList.contains('hidden')) {
+    // V2-07：表单内提交（已发布本体直编被 409 拦截，唯一修改通道）——
+    // 提案模型取表单编辑结果；否则不兼容变更永远无法进入变更单（TCE2E-06 联测缺口修复）
+    model = Object.assign(collectFormOntology(), { functions: o.functions || [] });
+  } else {
+    model = {
+      name: o.name, description: o.description || '',
+      objects: o.objects || [], constraints: o.constraints || [], functions: o.functions || [],
+    };
+  }
+  try {
+    const j = await api('/api/ontologies/' + o.id + '/changesets', {
+      method: 'POST', body: JSON.stringify({ model, note, target_version: targetVersion || null }),
+    });
+    const r = j.data || {};
+    if (r.status === 'published') {
+      toast('兼容变更已直接发布：v' + r.version + '（' + (r.diff?.changes?.length || 0) + ' 项变更）', 'ok', 6000);
+      const fresh = await api('/api/ontologies/' + o.id);
+      state.currentOntology = fresh.data;
+      const idx = state.ontologies.findIndex(x => x.id === o.id);
+      if (idx >= 0) state.ontologies[idx] = fresh.data;
+      renderOntologyList();
+      selectOntology(fresh.data);
+    } else {
+      toast('不兼容变更：已提交 v' + (r.target_version || '?') + ' 大版本审批（' + (r.diff?.changes?.length || 0) + ' 项变更），通过前对外仍是旧版本', 'warn', 8000);
+      if (!$('editorCard').classList.contains('hidden')) {
+        // 表单内提交后回到详情面板：展示当前对外仍是旧版本，变更单待审批
+        $('changesetEditor').classList.add('hidden');
+        closeEditor();
+        const idx = state.ontologies.findIndex(x => x.id === o.id);
+        if (idx >= 0) selectOntology(state.ontologies[idx]);
+      }
+    }
+  } catch (e) {
+    const d = e.details || {};
+    const br = (d.breaking_changes || []).map(x => _csKindLabel(x.kind) + (x.attribute_id ? ':' + x.attribute_id : '')).join('，');
+    toast('提交失败: ' + e.message + (br ? '（不兼容项：' + br + '）' : ''), 'err', 8000);
+  }
+}
+
+// ---- V2-09 / M2-D：审计日志页（admin）----
+let auditPage = 1;
+let auditPageSize = 30;
+
+function _auditQuery(withPage) {
+  const q = new URLSearchParams();
+  const g = id => { const el = $(id); return el ? el.value.trim() : ''; };
+  const actor = g('auditActor'); if (actor) q.set('actor', actor);
+  const action = g('auditAction'); if (action) q.set('action', action);
+  const target = g('auditTarget'); if (target) q.set('target', target);
+  const start = g('auditStart'); if (start) q.set('start', start + 'T00:00:00');
+  const end = g('auditEnd'); if (end) q.set('end', end + 'T23:59:59');
+  if (withPage) { q.set('page', String(auditPage)); q.set('page_size', String(auditPageSize)); }
+  return q;
+}
+
+async function loadAuditLog(page) {
+  if (page) auditPage = page;
+  const table = $('auditTable');
+  if (!table) return;
+  try {
+    const j = await api('/api/audit?' + _auditQuery(true).toString());
+    const d = j.data || {};
+    const items = d.items || [];
+    $('auditSummary').textContent = '共 ' + (d.total || 0) + ' 条（第 ' + (d.page || 1) + ' 页）· 点击行查看前值/后值';
+    if (!items.length) { table.innerHTML = '<p class="text-xs text-slate-500">无匹配记录</p>'; $('auditPager').innerHTML = ''; $('auditDetail').classList.add('hidden'); return; }
+    let html = '<table class="w-full text-xs"><thead><tr class="text-slate-400 border-b border-slate-800">'
+      + '<th class="text-left py-1 pr-2">时间</th><th class="text-left pr-2">操作者</th><th class="text-left pr-2">角色</th>'
+      + '<th class="text-left pr-2">动作</th><th class="text-left pr-2">对象</th><th class="text-left pr-2">项目</th><th class="text-left pr-2">前值/后值</th></tr></thead><tbody>';
+    for (const r of items) {
+      const hasBA = (r.before !== null && r.before !== undefined) || (r.after !== null && r.after !== undefined);
+      html += '<tr class="border-b border-slate-800/60 hover:bg-slate-900/40 cursor-pointer" onclick="showAuditRow(\'' + r.id + '\')">'
+        + '<td class="py-1 pr-2 whitespace-nowrap">' + esc(r.ts || '') + '</td>'
+        + '<td class="pr-2">' + esc(r.actor) + '</td>'
+        + '<td class="pr-2">' + esc(r.actor_role || '-') + '</td>'
+        + '<td class="pr-2 font-mono">' + esc(r.action) + '</td>'
+        + '<td class="pr-2">' + esc(r.target_type ? r.target_type + '/' : '') + esc(r.target_id || r.target_name || '') + '</td>'
+        + '<td class="pr-2">' + esc(r.project_id || '-') + '</td>'
+        + '<td class="pr-2">' + (hasBA ? '<span class="text-sky-400">查看 diff</span>' : '-') + '</td>'
+        + '</tr>';
+    }
+    table.innerHTML = html + '</tbody></table>';
+    _auditItemsCache = items;
+    const pages = Math.max(1, Math.ceil((d.total || 0) / auditPageSize));
+    let pg = '';
+    if (pages > 1) {
+      pg += '<button class="btn secondary text-[11px]" ' + (auditPage <= 1 ? 'disabled' : '') + ' onclick="loadAuditLog(' + (auditPage - 1) + ')">上一页</button>';
+      pg += '<span>第 ' + auditPage + ' / ' + pages + ' 页</span>';
+      pg += '<button class="btn secondary text-[11px]" ' + (auditPage >= pages ? 'disabled' : '') + ' onclick="loadAuditLog(' + (auditPage + 1) + ')">下一页</button>';
+    }
+    $('auditPager').innerHTML = pg;
+  } catch (e) {
+    table.innerHTML = '<p class="text-xs text-rose-400">加载审计日志失败: ' + esc(e.message) + '</p>';
+  }
+}
+
+let _auditItemsCache = [];
+
+async function showAuditRow(id) {
+  const box = $('auditDetail');
+  if (!box) return;
+  let r = (_auditItemsCache || []).find(x => x.id === id);
+  if (!r) {
+    try {
+      const j = await api('/api/audit?target_id=' + encodeURIComponent(id) + '&page_size=1');
+      r = ((j.data && j.data.items) || [])[0];
+    } catch (e) { /* ignore */ }
+  }
+  if (!r) { box.innerHTML = '<p class="text-xs text-rose-400">未找到该记录</p>'; return; }
+  box.classList.remove('hidden');
+  const pre = v => v === null || v === undefined ? '<i class="text-slate-600">（空）</i>'
+    : '<pre class="text-[11px] overflow-x-auto p-2 rounded bg-slate-950/70 max-h-64 overflow-y-auto">' + esc(JSON.stringify(v, null, 2)) + '</pre>';
+  box.innerHTML = '<div class="p-3 rounded border border-slate-700 bg-slate-900/60 text-xs space-y-2">'
+    + '<div class="flex items-center gap-3 flex-wrap text-slate-400">'
+    + '<span>' + esc(r.ts) + '</span><span>操作者：<b class="text-slate-200">' + esc(r.actor) + '</b>（' + esc(r.actor_role || '-') + '）</span>'
+    + '<span>动作：<span class="font-mono text-sky-300">' + esc(r.action) + '</span></span>'
+    + '<span>对象：' + esc(r.target_type || '-') + '/' + esc(r.target_id || r.target_name || '') + '</span>'
+    + '<span>项目：' + esc(r.project_id || '-') + '</span>'
+    + (r.tenant_id ? '<span>租户：' + esc(r.tenant_id) + '</span>' : '')
+    + '</div>'
+    + '<div class="grid grid-cols-2 gap-2"><div><div class="text-slate-400 mb-1">前值（before）</div>' + pre(r.before) + '</div>'
+    + '<div><div class="text-slate-400 mb-1">后值（after）</div>' + pre(r.after) + '</div></div>'
+    + (r.detail && Object.keys(r.detail).length ? '<div class="text-slate-400 mb-1">detail</div>' + pre(r.detail) : '')
+    + '</div>';
+}
+
+async function exportAudit(fmt) {
+  try {
+    const url = API_BASE + '/api/audit/export?' + _auditQuery(false).toString() + '&format=' + fmt;
+    const r = await fetch(url, { credentials: 'include' });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.error?.message || ('HTTP ' + r.status));
+    }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'audit-export.' + (fmt === 'jsonl' ? 'jsonl' : 'csv');
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    toast('已导出 ' + (fmt === 'jsonl' ? 'JSONL' : 'CSV') + '（与检索页同条件）', 'ok');
+  } catch (e) {
+    toast('导出失败: ' + e.message, 'err');
   }
 }
 
@@ -1589,6 +1909,17 @@ function editCurrentOntology() {
   if (!state.currentOntology) return;
   const o = state.currentOntology;
   state.editingId = o.id;
+  // V2-07：已发布本体直编会被后端 409 PUBLISHED_IMMUTABLE 拒绝——
+  // 表单内显示「提交变更」入口，并把变更提案编辑器移入表单卡片（模型取自表单编辑）
+  const publishedEditing = (o.status || 'active') === 'active';
+  $('btnFormChangeset').style.display = publishedEditing ? '' : 'none';
+  const ce = $('changesetEditor');
+  ce.classList.add('hidden');
+  if (publishedEditing) {
+    $('editorCard').appendChild(ce);
+  } else if (ce.parentElement === $('editorCard')) {
+    $('detailSharing').insertAdjacentElement('afterend', ce);
+  }
   $('editorCard').classList.remove('hidden');
   $('detailPanel').classList.add('hidden');
   $('editorTitle').textContent = '编辑本体';
@@ -2398,18 +2729,36 @@ function renderCandidateTable() {
     const isPending = c.status === 'pending';
     const isRejected = c.status === 'rejected';
     const isImported = c.status === 'imported';
+    // V2-05 RBAC（API-INTERFACE-DOC §21.3）：批准入库/驳回/恢复待审核属 review 动作（admin/reviewer）；
+    // 编辑/删除候选属 write 动作（admin/modeler）。与后端 REVIEW_POST_RE 强制一致，
+    // 越权操作无入口（TCE2E-06 负向断言）；dev/未启用鉴权（无会话）不限制。
+    const me = _meUser();
+    const canReview = !me || me.role === 'admin' || me.role === 'reviewer';
+    const canWrite = !me || me.role === 'admin' || me.role === 'modeler';
     let actions = '';
     if (isPending) {
-      actions = '<button class="btn text-xs" onclick="approveCandidate(\'' + cid + '\')">批准入库</button>' +
-        '<button class="btn secondary text-xs" onclick="startReviewCandidate(\'' + cid + '\')">编辑</button>' +
-        '<button class="btn secondary text-xs" onclick="rejectCandidate(\'' + cid + '\')">驳回</button>';
+      if (canReview) {
+        actions += '<button class="btn text-xs" onclick="approveCandidate(\'' + cid + '\')">批准入库</button>';
+      }
+      if (canWrite) {
+        actions += '<button class="btn secondary text-xs" onclick="startReviewCandidate(\'' + cid + '\')">编辑</button>';
+      }
+      if (canReview) {
+        actions += '<button class="btn secondary text-xs" onclick="rejectCandidate(\'' + cid + '\')">驳回</button>';
+      }
     } else if (isRejected) {
-      actions = '<button class="btn secondary text-xs" onclick="startReviewCandidate(\'' + cid + '\')">查看</button>' +
-        '<button class="btn secondary text-xs" onclick="revertCandidate(\'' + cid + '\')">恢复待审核</button>' +
-        '<button class="btn secondary text-xs" style="background:#991b1b" onclick="deleteCandidateRow(\'' + cid + '\')">删除</button>';
+      actions = '<button class="btn secondary text-xs" onclick="startReviewCandidate(\'' + cid + '\')">查看</button>';
+      if (canReview) {
+        actions += '<button class="btn secondary text-xs" onclick="revertCandidate(\'' + cid + '\')">恢复待审核</button>';
+      }
+      if (canWrite) {
+        actions += '<button class="btn secondary text-xs" style="background:#991b1b" onclick="deleteCandidateRow(\'' + cid + '\')">删除</button>';
+      }
     } else if (isImported) {
-      actions = '<button class="btn secondary text-xs" onclick="startReviewCandidate(\'' + cid + '\')">查看</button>' +
-        '<button class="btn secondary text-xs" style="background:#991b1b" onclick="deleteCandidateRow(\'' + cid + '\')">删除</button>';
+      actions = '<button class="btn secondary text-xs" onclick="startReviewCandidate(\'' + cid + '\')">查看</button>';
+      if (canWrite) {
+        actions += '<button class="btn secondary text-xs" style="background:#991b1b" onclick="deleteCandidateRow(\'' + cid + '\')">删除</button>';
+      }
     }
     html += '<tr class="border-b border-slate-800">' +
       '<td class="p-1"><input type="checkbox" class="cand-check" value="' + cid + '" /></td>' +
@@ -5221,6 +5570,8 @@ const WRITE_BUTTON_ACTIONS = [
   'publishCurrent()', 'deleteCurrentOntology()', 'uploadIngestFile()', 'previewIngest()',
   'openDictTermEditor()', 'openCapEditor()', 'openConnEditor()', 'saveLLMSettings()',
   "batchCandidates('delete')", 'saveAction()', 'startCreateAction()',
+  // M2-B 遗留收口：凭据映射新建（建/删属 write 动作，viewer 只读）
+  'openCredEditor()',
 ];
 const REVIEW_BUTTON_ACTIONS = ["batchCandidates('approve')", "batchCandidates('reject')", "batchCandidates('restore')"];
 
@@ -5356,4 +5707,203 @@ async function loadAuthAudit() {
        <span class="text-slate-300">${esc(a.event)}</span> · ${esc(a.actor)} · ${esc(a.target || '')}</div>`
     ).join('') || '<div class="text-slate-500">暂无审计记录</div>';
   } catch (e) { /* 非管理员不展示 */ }
+}
+
+// ===================== V2-14i 凭据映射管理 UI（M2-B 遗留收口） =====================
+// 后端契约见 docs/API-INTERFACE-DOC.md §23：/api/identity/mappings* ＋ /auth-types。
+// 安全口径：secret 明文仅提交时传入一次，本地加密存储，页面/接口永不回显；
+// 列表只展示 resolve-status 的 has_secret（已加密存储 / 缺失）。
+// RBAC：本 tab 各角色可见（账号级能力）；建/删为 write 动作（viewer 只读），
+// admin 可额外指定管理其他用户（后端 _check_owner 校验）。
+let credAuthTypes = ['bearer_token', 'api_key', 'oauth2_client_credentials', 'basic'];
+let credList = [];
+let credStatusMap = {};   // mapping_id -> resolve-status 数据
+
+function _credPerms() { return state.session?.permissions?.actions || []; }
+function _credCanWrite() { return _credPerms().includes('write'); }
+function _credIsAdmin() { return _credPerms().includes('admin'); }
+function _credMeId() { return state.session?.user?.id || ''; }
+function _credTargetUserId() {
+  const sel = $('credUser');
+  return (sel && sel.value) ? sel.value : _credMeId();
+}
+
+async function loadCredentials() {
+  const me = state.session?.user;
+  if (!me) return;
+  const summary = $('credSummary');
+  try {
+    // 数据源连接（映射的绑定对象）
+    let conns = connList;
+    if (!conns.length) {
+      try { await loadConnections(); conns = connList; } catch (e) { /* 连接加载失败不阻断映射列表 */ }
+    }
+    // 凭据类型下拉
+    try {
+      const tj = await api('/api/identity/auth-types');
+      credAuthTypes = (tj.data.items && tj.data.items.length ? tj.data.items : credAuthTypes);
+    } catch (e) { /* 回退内置列表 */ }
+    // admin：可切换管理目标用户；非 admin 只能管理自己
+    const userBox = $('credUserBox');
+    if (_credIsAdmin()) {
+      userBox.classList.remove('hidden');
+      userBox.classList.add('flex');
+      const sel = $('credUser');
+      const prev = sel.value;
+      let users = [];
+      try {
+        const uj = await api('/api/auth/users?pageSize=200');
+        users = uj.data.items || [];
+      } catch (e) { users = [me]; }
+      sel.innerHTML = users.map(u =>
+        `<option value="${esc(u.id)}" ${u.id === me.id ? 'selected' : ''}>${esc(u.username)}${u.id === me.id ? '（我）' : ''}</option>`
+      ).join('');
+      if (prev) sel.value = prev;
+    } else {
+      userBox.classList.add('hidden');
+      userBox.classList.remove('flex');
+    }
+    const uid = _credTargetUserId();
+    const j = await api('/api/identity/mappings' + (uid === me.id ? '' : '?user_id=' + encodeURIComponent(uid)));
+    credList = j.data.items || [];
+    // 逐行凭据状态（has_secret，无明文返回）
+    const statuses = await Promise.all(credList.map(m =>
+      api('/api/identity/mappings/' + m.id + '/resolve-status')
+        .then(sj => [m.id, sj.data || {}])
+        .catch(() => [m.id, {}])
+    ));
+    credStatusMap = Object.fromEntries(statuses);
+    renderCredentials(conns);
+  } catch (e) {
+    if (summary) summary.textContent = '加载失败：' + e.message;
+  }
+}
+
+function renderCredentials(conns) {
+  const box = $('credTable');
+  if (!box) return;
+  const meId = _credMeId();
+  const uid = _credTargetUserId();
+  const isSelf = uid === meId;
+  const summary = $('credSummary');
+  if (summary) {
+    summary.textContent = '共 ' + credList.length + ' 条映射' + (isSelf ? '（本人）' : '（目标用户）') +
+      ' · 凭据列仅显示存储状态，不回显明文';
+  }
+  if (!credList.length) {
+    box.innerHTML = '<div class="p-3 text-center text-slate-500 text-xs">暂无凭据映射。请先在 MCP 页创建数据源连接，再点「＋ 新建映射」。</div>';
+    return;
+  }
+  const canWrite = _credCanWrite();
+  const rows = credList.map(m => {
+    const c = (conns || connList || []).find(x => x.connection_id === m.connection_id);
+    const st = credStatusMap[m.id] || {};
+    const badge = st.has_secret === undefined
+      ? '<span class="text-slate-500">…（查询中）</span>'
+      : (st.has_secret
+        ? '<span class="text-emerald-400">● 已加密存储</span>'
+        : '<span class="text-rose-400">● 缺失/无法解密（删除重建）</span>');
+    return '<tr class="border-b border-slate-700/40 hover:bg-slate-800/30 align-top">' +
+      '<td class="p-1.5">' + esc(c ? (c.display_name || c.connection_id) : (m.connection_id || '-')) +
+        '<div class="text-slate-500 font-mono text-[11px]">' + esc(String(m.connection_id || '').slice(0, 14)) + '…</div></td>' +
+      '<td class="p-1.5 font-mono text-xs text-slate-400">' + esc(m.auth_type || '-') + '</td>' +
+      '<td class="p-1.5 text-xs">' + esc(m.principal || '—') + '</td>' +
+      '<td class="p-1.5 text-xs whitespace-nowrap">' + badge + '</td>' +
+      '<td class="p-1.5 text-xs text-slate-500 whitespace-nowrap">' + esc(String(m.created_at || '').replace('T', ' ').slice(0, 16)) + '</td>' +
+      '<td class="p-1.5 whitespace-nowrap">' +
+        '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="credCheckStatus(\'' + m.id + '\')">查状态</button> ' +
+        (canWrite
+          ? '<button class="btn danger" style="padding:2px 8px;font-size:12px" onclick="deleteCredMapping(\'' + m.id + '\')">删除</button>'
+          : '<span class="text-slate-600 text-xs" title="只读角色不可删除（需建模及以上）">—</span>') +
+      '</td></tr>';
+  }).join('');
+  box.innerHTML = '<table class="w-full text-left text-xs"><thead class="text-slate-500"><tr>' +
+    '<th class="p-1.5">数据源连接</th><th class="p-1.5">凭据类型</th><th class="p-1.5">principal（外部账号）</th>' +
+    '<th class="p-1.5">凭据状态</th><th class="p-1.5">创建时间</th><th class="p-1.5">操作</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function openCredEditor() {
+  if (!_credCanWrite()) { toast('当前角色无映射管理权限（需建模及以上）', 'err'); return; }
+  const box = $('credEditor');
+  if (!box.classList.contains('hidden')) return;  // 已打开：保留用户输入
+  let conns = connList;
+  const doRender = () => {
+    const connOpts = (conns.length ? conns : []).map(c =>
+      '<option value="' + esc(c.connection_id) + '">' + esc(c.display_name || c.connection_id) + '</option>').join('');
+    const typeOpts = credAuthTypes.map(t => '<option value="' + esc(t) + '">' + esc(t) + '</option>').join('');
+    const sel = $('credUser');
+    const targetLabel = (sel && sel.selectedOptions && sel.selectedOptions[0]) ? sel.selectedOptions[0].textContent : '本人';
+    box.innerHTML = '<div class="border border-slate-700 rounded p-3 grid grid-cols-12 gap-2 text-sm">' +
+      '<div class="col-span-4"><label class="text-xs text-slate-400">数据源连接 *</label>' +
+        '<select id="credConn" class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs">' +
+        (connOpts || '<option value="">（暂无连接，请先在 MCP 页创建）</option>') + '</select></div>' +
+      '<div class="col-span-3"><label class="text-xs text-slate-400">凭据类型 *</label>' +
+        '<select id="credAuthType" class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs">' + typeOpts + '</select></div>' +
+      '<div class="col-span-2"><label class="text-xs text-slate-400">principal（外部账号）</label>' +
+        '<input id="credPrincipal" class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs" placeholder="可选，如 alice@crm"></div>' +
+      '<div class="col-span-3"><label class="text-xs text-slate-400">凭据（一次性）*</label>' +
+        '<input id="credSecret" type="password" class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs" placeholder="token / api_key / 密码"></div>' +
+      '<div class="col-span-12 flex items-center gap-3 flex-wrap">' +
+        '<span class="text-[11px] text-slate-500">目标用户：' + esc(targetLabel) + ' · 明文仅本次保存使用，加密存储、永不回显</span>' +
+        '<button class="btn text-xs" onclick="saveCredMapping()">保存</button>' +
+        '<button class="btn secondary text-xs" onclick="closeCredEditor()">取消</button>' +
+      '</div></div>';
+    box.classList.remove('hidden');
+    $('credSecret')?.focus();
+  };
+  if (!conns.length) {
+    loadConnections().then(() => { conns = connList; doRender(); }).catch(() => doRender());
+  } else {
+    doRender();
+  }
+}
+
+function closeCredEditor() {
+  const box = $('credEditor');
+  box.classList.add('hidden');
+  box.innerHTML = '';
+}
+
+async function saveCredMapping() {
+  const connection_id = $('credConn')?.value;
+  const auth_type = $('credAuthType')?.value;
+  const principal = ($('credPrincipal')?.value || '').trim();
+  const secret = $('credSecret')?.value || '';
+  if (!connection_id) { toast('请选择数据源连接（先在 MCP 页创建）', 'err'); return; }
+  if (!auth_type) { toast('请选择凭据类型', 'err'); return; }
+  if (!secret) { toast('凭据必填（仅提交一次，之后不回显）', 'err'); return; }
+  try {
+    await api('/api/identity/mappings', {
+      method: 'POST',
+      body: JSON.stringify({
+        user_id: _credTargetUserId(),
+        connection_id,
+        auth_type,
+        principal: principal || null,
+        secret,
+      }),
+    });
+    closeCredEditor();
+    toast('凭据映射已保存（凭据已本地加密存储）', 'ok');
+    await loadCredentials();
+  } catch (e) { toast('保存失败：' + e.message, 'err'); }
+}
+
+async function deleteCredMapping(id) {
+  if (!confirm('删除该凭据映射？本地加密凭据将一并删除，此后对应系统的委托代查/联邦接入将被 403 拒绝（缺映射，不回退匿名）。')) return;
+  try {
+    await api('/api/identity/mappings/' + id, { method: 'DELETE' });
+    toast('凭据映射已删除', 'ok');
+    await loadCredentials();
+  } catch (e) { toast('删除失败：' + e.message, 'err'); }
+}
+
+async function credCheckStatus(id) {
+  try {
+    const sj = await api('/api/identity/mappings/' + id + '/resolve-status');
+    credStatusMap[id] = sj.data || {};
+    renderCredentials(connList);
+    const st = credStatusMap[id] || {};
+    toast(st.has_secret ? '凭据状态：已加密存储，可解析' : '凭据状态：缺失/无法解密，请删除后重建', st.has_secret ? 'ok' : 'err');
+  } catch (e) { toast('状态查询失败：' + e.message, 'err'); }
 }

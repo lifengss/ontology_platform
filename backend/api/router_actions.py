@@ -4,10 +4,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 
 from action_engine import ActionEngine, list_logs
 from api.dependencies import project_id_param
+import audit as audit_svc
 from core.responses import ApiError, list_payload, parse_pagination, success
 from core.storage import JsonStore
 from logging_setup import get_logger
@@ -86,21 +87,36 @@ def delete_action(action_id: str, project_id: str = Depends(project_id_param)):
 
 
 @router.post("/{action_id}/execute")
-def execute_action(action_id: str, req: ActionExecuteRequest, project_id: str = Depends(project_id_param)):
+def execute_action(action_id: str, req: ActionExecuteRequest, request: Request,
+                   project_id: str = Depends(project_id_param)):
     rec = _store_for(project_id).get(action_id)
     if not rec:
         raise ApiError("NOT_FOUND", "Action 不存在", http_status=404)
     result = _engine.execute(rec, req.model_dump(), project_id=project_id)
+    audit_svc.record_from_request(request, "action_execute", project_id=project_id,
+                                  target_type="action", target_id=action_id,
+                                  target_name=rec.get("name", ""),
+                                  after={"dry_run": result.get("dry_run"),
+                                         "target": rec.get("target_connection"),
+                                         "result_keys": sorted((result or {}).keys())})
     logger.info("execute action_id=%s project_id=%s dry_run=%s", action_id, project_id, result.get("dry_run"))
     return success(result)
 
 
 @router.post("/{action_id}/confirm")
-def confirm_action(action_id: str, req: ActionConfirmRequest, project_id: str = Depends(project_id_param)):
+def confirm_action(action_id: str, req: ActionConfirmRequest, request: Request,
+                   project_id: str = Depends(project_id_param)):
     rec = _store_for(project_id).get(action_id)
     if not rec:
         raise ApiError("NOT_FOUND", "Action 不存在", http_status=404)
     result = _engine.confirm(req.confirmation_token, {"action": rec, "project_id": project_id})
+    audit_svc.record_from_request(request, "action_writeback", project_id=project_id,
+                                  target_type="action", target_id=action_id,
+                                  target_name=rec.get("name", ""),
+                                  before={"target": rec.get("target_connection"),
+                                          "payload": (rec.get("payload") or {})},
+                                  after={"success": bool((result or {}).get("success")),
+                                         "written": (result or {}).get("written")})
     logger.info("confirm action_id=%s project_id=%s token=%s", action_id, project_id, req.confirmation_token)
     return success(result)
 

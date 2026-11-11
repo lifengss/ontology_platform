@@ -60,7 +60,7 @@ PUBLIC_EXACT_PATHS = {
 PUBLIC_PREFIXES = ("/mcp/", "/tutorial/", "/assets/", "/frontend/")
 
 # 登录与管理端点（/api/auth/* 除放行项外均要求 admin 或登录态）
-AUTH_ADMIN_PREFIXES = ("/api/auth/users", "/api/auth/roles", "/api/auth/audit")
+AUTH_ADMIN_PREFIXES = ("/api/auth/users", "/api/auth/roles", "/api/auth/audit", "/api/audit")
 
 # 只读/计算型 POST：按方法粗切成 write 会误伤只读角色与审核角色
 READ_ONLY_POST_RE = re.compile(
@@ -82,8 +82,13 @@ READ_ONLY_POST_RE = re.compile(
     r"|system/info"
     r")$"
 )
+# V2-07（M2-E）：变更单 approve/reject 属审批动作（review 角色可执行）；
+# withdraw/abandon 保持 write（仅提交人，路由内二次校验身份）。
 REVIEW_POST_RE = re.compile(
-    r"^/api/ingest/(?:candidates/[^/]+/(?:approve|reject|revert)|batch-approve|batch-reject)$"
+    r"^/api/(?:ingest/(?:candidates/[^/]+/(?:approve|reject|revert)|batch-approve|batch-reject)"
+    r"|changesets/[^/]+/(?:approve|reject)"
+    # V2-07（M2-E）：变更单审批/驳回为 review 动作（提交路径为 /api/ontologies/{id}/changesets/{csid}/...）
+    r"|ontologies/[^/]+/changesets/[^/]+/(?:approve|reject))$"
 )
 
 _secret_cache: str | None = None
@@ -311,6 +316,21 @@ def audit(event: str, actor: str = "-", target: str = "", detail: Any = None) ->
         "target": target,
         "detail": detail or {},
     })
+    # M2-D / V2-09：auth 域事件统一镜像到 append-only 审计日志（权限变更/登录/拒绝均入统一检索）
+    try:
+        import audit as audit_svc
+        d = detail if isinstance(detail, dict) else {}
+        audit_svc.record(
+            action=event,
+            actor=actor or "-",
+            target_type="auth",
+            target_id=str(target or "")[:120],
+            project_id=str(d.get("project_id") or ""),
+            tenant_id=str(d.get("tenant_id") or ""),
+            detail={"detail": detail} if not isinstance(detail, dict) else detail,
+        )
+    except Exception:  # noqa: BLE001 审计镜像失败不阻断主流程
+        pass
 
 
 def list_audit(event: str | None = None, actor: str | None = None,
@@ -422,14 +442,16 @@ def permission_matrix(user: dict[str, Any]) -> dict[str, Any]:
     """供前端渲染菜单/操作入口；资源级判定仍在每次请求时按 project_id/ontology_id 重算。"""
     role = user.get("role", "viewer")
     actions = list(ROLES.get(role, ROLES["viewer"])["actions"])
-    tabs_read = ["home", "graph", "inference", "logs", "settings", "tutorial"]
+    # credentials（凭据映射）为账号级能力：各角色均可见并可管理「自己的」映射
+    # （建/删仍受中间件 write 动作约束：viewer 只读，modeler+ 可操作）
+    tabs_read = ["home", "graph", "inference", "logs", "settings", "credentials", "tutorial"]
     tabs = list(tabs_read)
     if "write" in actions:
-        tabs += ["modeling", "ingest", "dictionary", "capability", "action", "mcp"]
+        tabs += ["modeling", "ingest", "dictionary", "capability", "action", "mcp", "approvals"]
     elif "review" in actions:
-        tabs += ["ingest"]
+        tabs += ["ingest", "approvals"]
     if "admin" in actions:
-        tabs += ["users"]
+        tabs += ["users", "audit"]
     return {
         "role": role,
         "role_label": ROLES.get(role, ROLES["viewer"])["label"],

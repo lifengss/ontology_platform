@@ -5,13 +5,14 @@ import io
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from rdflib import Graph
 
 from ai_helper import call_llm, extract_json, generate_ontology_from_document, generate_ontology_from_text
 from api.dependencies import namespace_param, project_id_param
+import audit as audit_svc
 from core.instance_store import get_instance_store
 from core.project_store import ProjectStore
 from core.responses import (
@@ -79,6 +80,24 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _model_view(rec: dict) -> dict:
+    """审计前值/后值：模型本体（name/version/status/objects/constraints/functions）。"""
+    return {k: rec.get(k) for k in ("name", "description", "version", "status",
+                                    "objects", "constraints", "functions") if k in rec}
+
+
+def _ensure_editable(rec: dict) -> None:
+    """V2-07（TCE-07-02）：已发布本体不可直编——一切 schema 变更须经 /changesets 提案
+    （兼容升小版本 / 不兼容升大版本＋审批）。"""
+    if rec.get("status") == "active":
+        raise ApiError(
+            "PUBLISHED_IMMUTABLE",
+            "已发布本体不可直接修改，请通过变更提案（POST /changesets）提交：兼容变更自动升小版本，"
+            "不兼容变更须升大版本并审批（V2-07）",
+            http_status=409,
+        )
+
+
 def _sync_rdf(project_id: str, ontology_id: str) -> None:
     """重建本体全量图（schema+实例）写入 RDF 存储；失败仅告警，不阻断主流程。"""
     try:
@@ -141,6 +160,9 @@ def create_ontology(
     store = _store_for(project_id)
     store.insert(record)
     _sync_rdf(project_id, record["id"])
+    audit_svc.record_from_request(request, "ontology_create", project_id=project_id,
+                                  target_type="ontology", target_id=record["id"],
+                                  target_name=record.get("name", ""), after=_model_view(record))
     logger.info("create_ontology id=%s project_id=%s name=%s", record["id"], project_id, record["name"])
     return success(record, http_status=201)
 
@@ -173,13 +195,20 @@ def list_ontologies(
 
 
 @router.get("/{ontology_id}")
-def get_ontology(ontology_id: str, request: Request, project_id: str = Depends(project_id_param)):
+def get_ontology(ontology_id: str, request: Request,
+                 version: Optional[str] = Query(default=None,
+                                                description="V2-07 固定版本引用（TC-07-06）；缺省=当前"),
+                 project_id: str = Depends(project_id_param)):
     rec = _store_for(project_id).get(ontology_id)
     if not rec:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
     ensure_schema_visible(request, project_id, rec)  # V2-06：不可见=404（不泄露存在性）
     rec = dict(rec)
     rec.setdefault("sharing", effective_sharing(rec))
+    if version:  # V2-07：旧版本持续可用，按快照覆盖模型字段
+        from api.router_changesets import resolve_versioned
+        _rec, override = resolve_versioned(rec, version)
+        rec = {**rec, **override, "version": version}
     return success(rec)
 
 
@@ -250,6 +279,7 @@ def update_ontology(
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
     ensure_schema_visible(request, project_id, existing)
     ensure_schema_write(request, project_id, existing)  # V2-06：共享只授 schema 只读（TC-06-08）
+    _ensure_editable(existing)  # V2-07（TCE-07-02）：已发布本体须经变更提案
     old_stable_keys = {o.get("id"): o.get("stable_key") for o in existing.get("objects", [])}
     patch = payload.model_dump(exclude_unset=True)
     patch.pop("id", None)
@@ -268,8 +298,13 @@ def update_ontology(
         if biz_errors:
             raise ApiError("VALIDATION_ERROR", "业务层校验未通过", http_status=422,
                            details={"violations": biz_errors})
+    before_view = _model_view(existing)
     updated = store.update(ontology_id, patch)
     _sync_rdf(project_id, ontology_id)
+    audit_svc.record_from_request(request, "ontology_update", project_id=project_id,
+                                  target_type="ontology", target_id=ontology_id,
+                                  target_name=existing.get("name", ""),
+                                  before=before_view, after=_model_view(updated))
     logger.info("update_ontology id=%s project_id=%s", ontology_id, project_id)
     # V2-03 EP-03-01：前端表单保存（PUT）走这条路，主键变更也要给出存量实例影响提示
     if "objects" in patch:
@@ -328,6 +363,7 @@ def patch_ontology_object(
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
     ensure_schema_visible(request, project_id, existing)
     ensure_schema_write(request, project_id, existing)
+    _ensure_editable(existing)  # V2-07（TCE-07-02）：已发布本体须经变更提案
     expected_updated_at = existing.get("updated_at")
     if if_match and if_match != expected_updated_at:
         raise ApiError("STALE_ONTOLOGY", "本体已被其它请求更新，请刷新后重试（后到者须基于最新状态提交）",
@@ -337,6 +373,7 @@ def patch_ontology_object(
     if idx is None:
         raise ApiError("NOT_FOUND", "对象不存在", http_status=404)
     old_key = objects[idx].get("stable_key")
+    old_obj = dict(objects[idx])  # M2-D：审计前值
 
     patch = payload.model_dump(exclude_unset=True)
     patch["id"] = object_id
@@ -386,6 +423,11 @@ def patch_ontology_object(
         raise ApiError("STALE_ONTOLOGY", "本体已被其它请求更新，请刷新后重试（并发主键变更未覆盖最新状态）",
                        http_status=409)
     _sync_rdf(project_id, ontology_id)
+    audit_svc.record_from_request(request, "ontology_object_update", project_id=project_id,
+                                  target_type="object", target_id=object_id,
+                                  target_name=patch.get("name", ""),
+                                  before=old_obj, after=dict(patch),
+                                  detail={"ontology_id": ontology_id})
     logger.info("patch_object id=%s object_id=%s project_id=%s stable_key=%s explicit=%s",
                 ontology_id, object_id, project_id, patch.get("stable_key"),
                 patch.get("stable_key_explicit"))
@@ -519,6 +561,12 @@ def delete_ontology(
 
     # 5) 本体记录
     store.delete(ontology_id)
+    audit_svc.record_from_request(request, "ontology_delete", project_id=project_id,
+                                  target_type="ontology", target_id=ontology_id,
+                                  target_name=rec.get("name", ""), before=_model_view(rec),
+                                  detail={"unpublished": unpublished, "force": force,
+                                          "instances_deleted": instances_deleted,
+                                          "candidates_deleted": candidates_deleted})
     logger.info(
         "delete_ontology id=%s project_id=%s force=%s unpublished=%s instances_deleted=%d candidates_deleted=%d",
         ontology_id, project_id, force, unpublished, instances_deleted, candidates_deleted,
@@ -556,6 +604,11 @@ def enrich_ontology(
     existing = store.get(ontology_id)
     if not existing:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    # V2-07（TCE-07-02）：已发布本体不可被 enrich 直接落库（可预览，须走变更提案）
+    if auto_save and existing.get("status") == "active":
+        raise ApiError("PUBLISHED_IMMUTABLE",
+                       "已发布本体不可直接增强落库，请通过变更提案（POST /changesets）提交（V2-07）",
+                       http_status=409)
 
     filename = (file.filename or "").lower()
     content = file.file.read()
@@ -637,14 +690,42 @@ def enrich_ontology(
 
 
 @router.post("/{ontology_id}/publish")
-def publish_ontology(ontology_id: str, project_id: str = Depends(project_id_param)):
+def publish_ontology(ontology_id: str, request: Request, project_id: str = Depends(project_id_param)):
     store = _store_for(project_id)
     rec = store.get(ontology_id)
     if not rec:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
     if rec.get("status") != "draft":
         raise ApiError("VALIDATION_ERROR", "只有 draft 状态的本体可以发布", http_status=422)
-    updated = store.update(ontology_id, {"status": "active", "updated_at": _now()})
+    # V2-07（TC-07-06）：首次发布写入基线版本快照——旧版本持续可用（REST ?version=1.0 /
+    # MCP version=1.0 / 版本清单），后续变更单以该基线做语义 diff
+    from api import router_changesets as _cs
+    import schemadiff as _sd
+    now = _now()
+    base_version = _sd.norm_version(rec.get("version"))
+    versions = list(rec.get("versions") or [])
+    if not any(v.get("version") == base_version for v in versions):
+        user = current_user(request) or {}
+        versions.append({
+            "version": base_version,
+            "published_at": now,
+            "published_by": user.get("username") or "dev",
+            "note": "初次发布（基线版本）",
+            "changes": [],
+            "model": _cs._model_of(rec),
+        })
+    updated = store.update(ontology_id, {
+        "status": "active",
+        "version": base_version,
+        "published_version": base_version,
+        "versions": versions,
+        "updated_at": now,
+    })
+    audit_svc.record_from_request(request, "ontology_publish", project_id=project_id,
+                                  target_type="ontology", target_id=ontology_id,
+                                  target_name=rec.get("name", ""),
+                                  before={"status": "draft", "version": rec.get("version")},
+                                  after={"status": "active", "version": base_version})
     logger.info("publish_ontology id=%s project_id=%s", ontology_id, project_id)
     return success(updated)
 

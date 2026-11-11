@@ -444,6 +444,19 @@ def _record_audit(project_id: str, payload: dict[str, Any]) -> None:
         _audit(project_id).insert({"created_at": _now(), **payload})
     except Exception as e:  # noqa: BLE001 审计失败不阻断查询
         logger.warning("dictionary.audit_error project=%s err=%s", project_id, e)
+    # M2-D / V2-09：字典域事件镜像到统一 append-only 审计日志
+    try:
+        import audit as audit_svc
+        audit_svc.record(
+            action=str(payload.get("event") or payload.get("action") or "dictionary_event"),
+            actor=str(payload.get("actor") or "-"),
+            project_id=project_id,
+            target_type="dictionary",
+            target_id=str(payload.get("term") or payload.get("target") or "")[:120],
+            detail=payload,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def list_audit(project_id: str, page: int = 1, page_size: int = 50) -> dict[str, Any]:

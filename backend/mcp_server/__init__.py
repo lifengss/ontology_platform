@@ -678,10 +678,11 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
     actions = owner._actions(project_id)
 
     @m.tool()
-    def ontology_query(ontology_id: str = "", query: str = "") -> str:
+    def ontology_query(ontology_id: str = "", query: str = "", version: str = "") -> str:
         """查询本体结构：返回对象、属性、关系摘要。ontology_id 接受本体名称或 32 位 ID（先名称解析再校验发布态）；
         留空则返回本项目已发布本体清单（ontology_id/name/object_count），供先枚举再精确查询。
         query 可填对象 id 或名称做子串过滤（可选）。
+        version 固定版本引用（如 1.0；缺省=当前稳定版，V2-07 TC-07-06 旧版本持续可用）。
         """
         oid = (ontology_id or "").strip()
         if not oid:
@@ -705,16 +706,29 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
         oid = _resolve_ontology_id(owner, project_id, oid)
         _require_published(owner, project_id, oid)
         rec = ontologies.get(oid) or {}
+        if version:  # V2-07：固定版本引用（旧版本持续可用）
+            from api.router_changesets import resolve_versioned
+            from core.responses import ApiError
+            try:
+                _rec, override = resolve_versioned(rec, version)
+                rec = {**rec, **override}
+            except ApiError as e:
+                raise _err(ERR_NOT_FOUND, e.message)
         objects = rec.get("objects", [])
         if query:
             objects = [o for o in objects if query in (o.get("id") or "") or query in (o.get("name") or "")]
         summary = {
             "ontology_id": oid,
             "name": rec.get("name"),
+            # V2-07：显式 version 时回显解析到的固定版本，便于外部 Agent 核对引用
+            "version": version or (rec.get("published_version") or rec.get("version") or ""),
             "objects": [
                 {
                     "id": o["id"],
                     "name": o.get("name"),
+                    # 属性/关系 id 清单：外部 Agent 投影实例字段（instance_get fields）的依据
+                    "attributes": [a.get("id") for a in o.get("attributes", []) if a.get("id")],
+                    "relations": [r.get("id") for r in o.get("relations", []) if r.get("id")],
                     "attribute_count": len(o.get("attributes", [])),
                     "relation_count": len(o.get("relations", [])),
                 }

@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 
 from api.dependencies import project_id_param
+import audit as audit_svc
 from core.instance_store import get_instance_store
 from core.responses import ApiError, list_payload, parse_pagination, success
 from core.storage import JsonStore
@@ -479,6 +480,11 @@ async def upload_instances(
     for rec in candidates:
         logger.info("upload_instances candidate_id=%s project_id=%s ontology_id=%s object_type=%s count=%d",
                     rec["id"], project_id, ontology_id, rec["object_type"], len(rec["instances"]))
+        audit_svc.record_from_request(request, "ingest_upload", project_id=project_id,
+                                      target_type="ingest_candidate", target_id=rec["id"],
+                                      target_name=rec.get("object_type", ""),
+                                      after={"ontology_id": ontology_id, "object_type": rec.get("object_type"),
+                                             "records": len(rec["instances"]), "filename": filename})
     return success({"candidates": candidates, "total": len(candidates)}, http_status=201)
 
 
@@ -757,7 +763,17 @@ def approve_candidate(request: Request, candidate_id: str, project_id: str = Dep
         return success(rec.get("approve_result") or ApproveResult(imported=0, rejected=0, violations=[], neo_tx_id=None).model_dump())
     if rec.get("status") == "rejected":
         raise ApiError("VALIDATION_ERROR", "已拒绝的候选不能重新审批", http_status=422)
-    return success(_approve_one(rec, candidate_id, project_id))
+    # V2-09（TC-09-02）：_approve_one 会原地改写 rec（status→imported 并整对象写回），
+    # before 必须在调用前捕获，否则审计前值被污染
+    before_status = rec.get("status")
+    result = _approve_one(rec, candidate_id, project_id)
+    audit_svc.record_from_request(request, "ingest_approve", project_id=project_id,
+                                  target_type="ingest_candidate", target_id=candidate_id,
+                                  target_name=rec.get("object_type", ""),
+                                  before={"status": before_status},
+                                  after={"status": "imported", "imported": result.get("imported"),
+                                         "violations": len(result.get("violations", []))})
+    return success(result)
 
 
 @router.post("/candidates/{candidate_id}/reject")
@@ -770,6 +786,10 @@ def reject_candidate(request: Request, candidate_id: str, project_id: str = Depe
     if rec.get("status") == "imported":
         raise ApiError("FORBIDDEN_WRITE", "已落库的候选不能拒绝", http_status=403)
     store.update(candidate_id, {"status": "rejected"})
+    audit_svc.record_from_request(request, "ingest_reject", project_id=project_id,
+                                  target_type="ingest_candidate", target_id=candidate_id,
+                                  target_name=rec.get("object_type", ""),
+                                  before={"status": rec.get("status")}, after={"status": "rejected"})
     logger.info("reject candidate_id=%s project_id=%s", candidate_id, project_id)
     return success({"status": "rejected"})
 
@@ -841,7 +861,15 @@ def batch_approve_candidates(request: Request, payload: dict, project_id: str = 
         if not rec or rec.get("status") != "pending":
             skipped += 1
             continue
+        # V2-09（TC-09-01）：批量审批逐条留痕；before 须在 _approve_one 前捕获（其原地改写 rec）
+        before_status = rec.get("status")
         result = _approve_one(rec, cid, project_id)
+        audit_svc.record_from_request(request, "ingest_approve", project_id=project_id,
+                                      target_type="ingest_candidate", target_id=cid,
+                                      target_name=rec.get("object_type", ""),
+                                      before={"status": before_status, "batch": True},
+                                      after={"status": "imported", "imported": result.get("imported"),
+                                             "violations": len(result.get("violations", []))})
         total_imported += result.get("imported", 0)
         all_violations.extend(result.get("violations", []))
         affected += 1
@@ -1232,6 +1260,10 @@ def delete_instance(instance_id: str, request: Request, project_id: str = Depend
         raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
     stale_info = _invalidate_capability_results(project_id, instance_id)
     _sync_rdf(project_id, rec.get("ontology_id"), instance_id=instance_id, deleted=True)
+    audit_svc.record_from_request(request, "instance_delete", project_id=project_id,
+                                  target_type="instance", target_id=instance_id,
+                                  target_name=rec.get("object_type", ""), before=rec,
+                                  detail={"stale_marked": stale_info.get("marked", 0)})
     logger.info("delete_instance id=%s project_id=%s", instance_id, project_id)
     return success({
         "deleted": True,

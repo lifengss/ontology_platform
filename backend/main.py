@@ -18,7 +18,9 @@ from fastapi.responses import JSONResponse
 
 from api.auth_middleware import auth_filter
 from api.router_actions import router as actions_router
+from api.router_audit import router as audit_router  # V2-09 完整审计（M2-D）
 from api.router_auth import router as auth_router  # V2-05 登录鉴权与 RBAC（M2-A）
+from api.router_changesets import router as changesets_router  # V2-07 变更审批流（M2-E）
 from api.router_capabilities import router as capabilities_router
 from api.router_dictionary import router as dictionary_router
 from api.router_graph import router as graph_router
@@ -124,6 +126,8 @@ app.include_router(llm_router)
 app.include_router(system_router)
 app.include_router(auth_router)  # V2-05 登录鉴权与 RBAC（M2-A）
 app.include_router(identity_router)  # V2-14i 身份联邦（M2-B）
+app.include_router(audit_router)  # V2-09 完整审计（M2-D）
+app.include_router(changesets_router)  # V2-07 变更审批流（M2-E）
 
 
 # VS6: 由 mcp_server 模块按项目挂载 /mcp/{project_id}，双传输（2026-10-28 MCP 接入层修复）：
