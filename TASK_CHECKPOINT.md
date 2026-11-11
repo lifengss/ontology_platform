@@ -811,3 +811,12 @@
 - 项目 wiki `source-V2-测试用例.md`「测试脚本链接登记」登记 TC-14-04 UI → `scripts/verify_m2b_mapping_ui.py`（22/22 通过＋option 可见性坑）；raw 快照 `2026-11-12-凭据映射管理UI收口.md` ＋ 进展与测试「凭据映射管理 UI」节 ＋ 实体页（状态行/sources/导航表）/log/对话历史 #33 同步 ＋ 本 checkpoint。
 - **M2-B 遗留清零**：M2 全量（A/B/C/D/E＋TCE2E-05/06）＋凭据映射 UI 全部收口。
 - **git commit 已执行 `f6636b1`（2026-11-12，M2 全量收口提交，与 M2-D/E、TCE2E 合并同一提交）**：本轮改动＝`frontend/index.html`＋`frontend/app.js`＋`backend/auth/__init__.py`（tabs_read 等，含 M2-D/E 累积）＋`scripts/verify_m2b_mapping_ui.py`（新）＋项目 wiki 登记。
+
+## 35. 推送远端（2026-11-12）
+
+### 35.1 指令与结果
+- 用户指令：**「push」**（明确推送指示）。
+- `git push origin main` **成功**：`ae88b4d..5e60b11 main -> main`（fast-forward，19 个提交——自 V2 基线 `ca1c21c` 起整个 V2 开发首次推送：VS2-00、M1-A/B/C/E、M2-A、Hotfix、M2-B/C/D/E、TCE2E、凭据 UI）。
+- 推送后 `main` 与 `origin/main` 完全同步（`[origin/main]` 无 ahead）。远端＝`https://github.com/lifengss/ontology_platform.git`。
+- 工作区仍有成本核算业务线未提交项（数据缺口文档/cost_baseline_kit/docs/备份/成本核算*.md）——与 M2 代码无关，**未推送、保留**。
+- 用户级 wiki 对话历史 #34 末句「git push 未执行」为当时时点记录，以本 §35 为准；项目记忆同步刷新。
