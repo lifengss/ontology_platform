@@ -38,10 +38,11 @@ class ProjectStore:
     def __init__(self) -> None:
         self._meta = JsonStore("projects")  # 项目列表存在 data_dir/projects.json
 
-    def create(self, payload: ProjectCreate) -> dict[str, Any]:
+    def create(self, payload: ProjectCreate, *, tenant_id: str | None = None) -> dict[str, Any]:
         rec = payload.model_dump()
         rec["id"] = Project.generate_id()
         rec["department"] = (rec.get("department") or "默认部门").strip() or "默认部门"
+        rec["tenant_id"] = tenant_id or "default"  # V2-06：项目即租户边界
         rec["created_at"] = _now()
         rec["updated_at"] = rec["created_at"]
         self._meta.insert(rec)

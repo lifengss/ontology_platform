@@ -1,7 +1,10 @@
-"""可视化路由（UC6 / VS4）：图谱数据、推理链路与自然语言查询。"""
+"""可视化路由（UC6 / VS4）：图谱数据、推理链路与自然语言查询。
+
+V2-06：本体级读路径统一执行 schema 可见性（不可见=404，不泄露存在性）。
+"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 
 from ai_helper import nl_to_sparql
 from api.dependencies import project_id_param
@@ -10,6 +13,7 @@ from core.storage import JsonStore
 from jena_adapter.client import sparql_query
 from logging_setup import get_logger
 from reasoning import inference_trace
+from tenant import ensure_schema_visible
 from viz import Viz
 
 router = APIRouter(prefix="/api", tags=["viz"])
@@ -24,6 +28,7 @@ def _store_for(project_id: str) -> JsonStore:
 @router.get("/graph/{ontology_id}")
 def graph_data(
     ontology_id: str,
+    request: Request,
     mode: str = Query(default="schema", pattern="^(schema|knowledge)$"),
     max_instances: int = Query(default=300, ge=0, description="knowledge 视图实例抽样上限，0=不限制（大图性能差）"),
     project_id: str = Depends(project_id_param),
@@ -31,6 +36,7 @@ def graph_data(
     rec = _store_for(project_id).get(ontology_id)
     if not rec:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    ensure_schema_visible(request, project_id, rec)
     return success(_viz.graph_data(ontology_id, rec, mode=mode, project_id=project_id, max_instances=max_instances))
 
 
@@ -40,10 +46,11 @@ def _inference_trace_response(ontology_id: str, rec: dict[str, Any], focus: str 
 
 
 @router.get("/ontologies/{ontology_id}/inference")
-def inference_trace_endpoint(ontology_id: str, focus: str | None = None, project_id: str = Depends(project_id_param)):
+def inference_trace_endpoint(ontology_id: str, request: Request, focus: str | None = None, project_id: str = Depends(project_id_param)):
     rec = _store_for(project_id).get(ontology_id)
     if not rec:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    ensure_schema_visible(request, project_id, rec)
     return success(_inference_trace_response(ontology_id, rec, focus))
 
 

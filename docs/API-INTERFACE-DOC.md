@@ -994,3 +994,39 @@
 - **TP-06-06 联合验收**（V2-06 × M2-B，2026-11-11）：`scripts/verify_tp0606_delegated_read.py` **PASS=13/FAIL=0**——同一源连接、访问者 A/B 各持独立映射，`federated_read()` 以访问者身份代查（mock 源系统按 Bearer 身份返回宽 8 行 / 窄 3 行且敏感字段掩码）；断言委托身份真实传递到源系统（alice→tok_alice、bob→tok_bob，连接自带 auth 被覆盖）、同一连接 A/B 返回范围不同、缺失映射用户拒绝且不产生源系统调用、审计 `identity_delegated_read` 无明文。
 - 回归：L5 `backend/tests` **93/93** 全绿。
 - 边界：范围"由业务端按访问者权限决定"中的平台侧租户/schema 过滤随 M2-C（V2-06）与 M4（V2-02）在 `federated_read()` 之上叠加；编排回写调用点（M3-F）后续接入 `delegated_auth_header()`。
+
+## 24. 多租户、部门隔离与本体共享（V2-06 / M2-C，2026-11-11）
+
+**项目（project）即租户边界**：项目归属租户（`tenant_id`，缺省 `default`），用户绑定租户（`/api/auth/users` 创建/更新支持 `tenant_id`）。跨租户访问项目级资源（连接/字典/候选审批等）一律 404，不泄露存在性。**本体共享等级只作用于 schema（对象/属性/关系/定义），只读**；**实例永不共享（INV-2）**；上传型实例内容默认仅上传者可读，可显式开放；共享变更即时生效并留审计。
+
+### 24.1 数据模型变更
+
+| 对象 | 新字段 | 说明 |
+|---|---|---|
+| project | `tenant_id` | 租户归属；创建时取创建人租户；存量项目视为 `default` |
+| user | `tenant_id` | 租户绑定；admin（平台治理）可跨租户 |
+| ontology | `owner` / `sharing` / `shared_with` | 建模人 / 共享等级（private \| project \| department \| public）/ 项目组共享成员（可跨租户）；**新建默认 private**，存量无 `sharing` 字段视为 department（不收紧既有同租户协作） |
+| ingest_candidate | `created_by` | 上传者归属（上传/预览落库） |
+| instance | `uploaded_by` / `content_open` | 上传者 / 内容开放范围 `{users:[], departments:[]}`（departments=租户 id） |
+
+### 24.2 端点
+
+| 方法 / 路径 | 说明 | 关键行为 |
+|---|---|---|
+| `PATCH /api/ontologies/{id}/sharing` | 调整共享等级（仅 owner/admin） | body `{"sharing": "...", "shared_with": [...]}`；project 级必须给 shared_with，**无效账号 422 指出无效项（TCE-06-01）**；审计 `sharing_change`（from/to，TC-06-04）；即时生效（TCE-06-03） |
+| `POST /api/ingest/instances/{id}/content-open` | 开放上传型实例内容到人/部门（仅上传者/admin） | body `{"users": [...], "departments": [租户id...]}`；无效账号/部门 422（TCE-06-01）；**超出共享等级可见范围 422（TCE-06-02，上限=schema 可见范围）**；审计 `content_open_grant` |
+| `POST /api/ingest/instances/{id}/content-revoke` | 收回开放 | 审计 `content_open_revoke` |
+
+### 24.3 可见性规则（服务端统一判定，404 不泄露存在性）
+
+- **schema**（`GET/PUT/PATCH/DELETE /api/ontologies/*`、`/api/graph/{id}`、`/api/ontologies/{id}/inference`）：owner / admin / 按等级——private=owner；project=shared_with（可跨租户）；department=本租户全员；public=全部用户。不可见＝不存在（404，与真实不存在同文案）。
+- **实例**（`/api/ingest/instances*`）：仅同租户且 schema 可见（跨共享范围仅可见 schema，实例列表空 / 详情 404，INV-2 / TC-06-05）。
+- **上传型内容**：上传者 / admin / `content_open` 范围内可读；否则字段值置空并显式标记 `content_restricted: true`（保留键/类型/关系元数据，TC-06-07）。
+- **写权限**（共享只授读，TC-06-08）：admin / owner / 同租户且 M2-A RBAC 允许 write；跨租户一律 403。
+- **源连接型实例内容**：以访问者身份联邦代查（§23 `federated_read()`，TC-06-06 联验通过）；平台侧存量读取同租户口径不变，V2-02 实例数据模型随 M4/D3 落地。
+
+### 24.4 验收
+
+- `scripts/verify_m2c_multitenant.py` **PASS=37/FAIL=0**（真实 JWT，鉴权启用态）：TC-06-01（项目/实例/连接/字典租户隔离）、TC-06-02（猜测 ID 同文案 404）、TC-06-03（四级共享可见矩阵）、TC-06-04（sharing_change 审计）、TC-06-05（实例永不共享）、TC-06-07（内容受限标记→开放→可读→收回，开放/收回审计）、TC-06-08（共享不授写）、TCE-06-01/02/03；**TC-06-06** 由 `scripts/verify_tp0606_delegated_read.py`（13/13）联验。
+- 前端：建模页本体详情共享等级控制（owner/admin 可调，project 级成员输入）；实例详情弹层内容受限提示＋内容开放管理（开放/收回）。
+- 边界（如实标注）：MCP 工具（/mcp/{project}）沿用项目静态 token（token 即租户边界），不携带访问者身份——访问者级代查走 §23 `federated_read()`（M4/V2-02 调用点）；跨租户上传内容经开放的读取随 V2-15 开放接口落地；legacy 无 owner/sharing 的存量本体按 department 级处理。

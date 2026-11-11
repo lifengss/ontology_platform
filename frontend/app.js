@@ -862,6 +862,85 @@ function selectOntology(o) {
   $('detailBody').textContent = JSON.stringify(o, null, 2);
   $('validateResult').classList.add('hidden');
   $('btnPublish').classList.toggle('hidden', status !== 'draft');
+  renderOntologySharing(o); // V2-06：共享等级（M2-C）
+}
+
+// ---- V2-06 / M2-C：本体共享等级（schema 只读共享，实例永不共享）----
+const SHARING_LABELS = { private: '私有（仅本人）', project: '项目组共享', department: '部门共享', public: '公开' };
+
+function _meUser() {
+  return state.session?.user || null;
+}
+
+function _isOntologyOwner(o) {
+  const me = _meUser();
+  if (!me) return true; // dev/未启用鉴权：不限制
+  return me.role === 'admin' || (o.owner || '') === me.username || !o.owner;
+}
+
+function renderOntologySharing(o) {
+  const el = $('detailSharing');
+  if (!el) return;
+  const sharing = o.sharing || 'department';
+  const me = _meUser();
+  const canManage = !me || me.role === 'admin' || (o.owner || '') === me.username || !o.owner;
+  const members = (o.shared_with || []).join(', ');
+  let html = '<div class="flex items-center gap-2 flex-wrap text-xs">'
+    + '<span class="text-slate-400">共享等级：</span>'
+    + '<span class="badge">' + esc(SHARING_LABELS[sharing] || sharing) + '</span>';
+  if (sharing === 'project' && members) html += '<span class="text-slate-500">成员：' + esc(members) + '</span>';
+  if (o.owner) html += '<span class="text-slate-500">建模人：' + esc(o.owner) + '</span>';
+  html += '<span class="text-slate-600" title="共享仅授 schema 只读；实例永不共享（INV-2）；上传型实例内容默认仅上传者可读">仅 schema 只读</span>';
+  if (canManage) {
+    html += '<button class="btn secondary text-xs" onclick="showSharingEditor()">调整</button>';
+  }
+  html += '</div>';
+  html += '<div id="sharingEditor" class="hidden mt-2 p-2 rounded border border-slate-700 bg-slate-900/60 space-y-2">'
+    + '<div class="flex items-center gap-2 text-xs"><span class="text-slate-400">等级</span>'
+    + '<select id="sharingLevel" class="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs" onchange="onSharingLevelChange()">'
+    + Object.keys(SHARING_LABELS).map(k => '<option value="' + k + '">' + SHARING_LABELS[k] + '</option>').join('')
+    + '</select></div>'
+    + '<div id="sharingMembersRow" class="flex items-center gap-2 text-xs hidden"><span class="text-slate-400">成员</span>'
+    + '<input id="sharingMembers" class="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs" placeholder="用户名，逗号分隔（可跨部门）" /></div>'
+    + '<div class="flex gap-2"><button class="btn text-xs" onclick="saveOntologySharing()">保存</button>'
+    + '<button class="btn secondary text-xs" onclick="hideSharingEditor()">取消</button></div>'
+    + '<p class="text-[11px] text-slate-500">私有=仅本人可见；项目组=指定成员（可跨部门）；部门=本部门全员；公开=全部用户。变更即时生效并留审计。</p>'
+    + '</div>';
+  el.innerHTML = html;
+  $('sharingLevel').value = sharing;
+  if (members) $('sharingMembers').value = members;
+  onSharingLevelChange();
+}
+
+function showSharingEditor() { $('sharingEditor').classList.remove('hidden'); }
+function hideSharingEditor() { $('sharingEditor').classList.add('hidden'); }
+function onSharingLevelChange() {
+  const row = $('sharingMembersRow');
+  if (row) row.classList.toggle('hidden', $('sharingLevel').value !== 'project');
+}
+
+async function saveOntologySharing() {
+  const o = state.currentOntology;
+  if (!o) return;
+  const sharing = $('sharingLevel').value;
+  const body = { sharing };
+  if (sharing === 'project') {
+    body.shared_with = ($('sharingMembers').value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
+    if (!body.shared_with.length) { toast('项目组共享必须指定至少一个成员', 'warn'); return; }
+  }
+  try {
+    await api('/api/ontologies/' + o.id + '/sharing', { method: 'PATCH', body: JSON.stringify(body) });
+    const j = await api('/api/ontologies/' + o.id);
+    state.currentOntology = j.data;
+    const idx = state.ontologies.findIndex(x => x.id === o.id);
+    if (idx >= 0) state.ontologies[idx] = j.data;
+    renderOntologyList();
+    selectOntology(j.data);
+    toast('共享等级已更新：' + (SHARING_LABELS[sharing] || sharing), 'ok');
+  } catch (e) {
+    const inv = e.details?.invalid_users;
+    toast('共享调整失败: ' + e.message + (inv ? '（无效账号: ' + inv.join(', ') + '）' : ''), 'err', 6000);
+  }
 }
 
 function startCreate() {
@@ -2727,6 +2806,13 @@ function renderInstanceDetail(inst) {
 
   let html = '';
 
+  // V2-06：上传型实例内容默认仅上传者可读——未开放者只见元数据，显式提示（不静默）
+  if (inst.content_restricted) {
+    html += '<div class="p-2 rounded border border-amber-700/50 bg-amber-900/20 text-xs text-amber-300">'
+      + '🔒 内容受限：该上传型实例的内容默认仅上传者可读；当前账号未被开放范围包含，仅展示键/类型等元数据。</div>';
+  }
+  html += renderContentOpenPanel(inst);
+
   // 可编辑属性
   const attrRows = (objDef.attributes || []).map(a => {
     const val = data[a.id];
@@ -2743,6 +2829,48 @@ function renderInstanceDetail(inst) {
   // 关系血缘
   html += renderLineage(inst, objDef, ontology);
   $('instanceDetailBody').innerHTML = html;
+}
+
+// ---- V2-06 / M2-C：上传型实例内容开放管理（仅上传者/admin 可见）----
+function renderContentOpenPanel(inst) {
+  const me = _meUser();
+  const canManage = !me || me.role === 'admin' || (inst.uploaded_by || '') === me.username || !inst.uploaded_by;
+  if (!canManage) {
+    const opened = (inst.content_open?.users || []).join(', ') || '';
+    return opened ? '<p class="text-[11px] text-slate-500">内容已开放给：' + esc(opened) + '</p>' : '';
+  }
+  if (!inst.uploaded_by && !(inst.instance && Object.keys(inst.instance).length)) return '';
+  const co = inst.content_open || {};
+  return '<div><label>内容开放管理（V2-06：默认仅上传者可读；上限=本体共享等级可见范围）</label>'
+    + '<div class="text-[11px] text-slate-500 mb-1">当前开放：用户 [' + esc((co.users || []).join(', ')) + '] 部门 [' + esc((co.departments || []).join(', ')) + '] · 上传者：' + esc(inst.uploaded_by || '-') + '</div>'
+    + '<div class="flex gap-2 items-center">'
+    + '<input id="contentOpenUsers" class="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs" placeholder="开放给用户名，逗号分隔" />'
+    + '<button class="btn text-xs" onclick="saveContentOpen(false)">开放</button>'
+    + '<button class="btn secondary text-xs" onclick="saveContentOpen(true)">收回</button>'
+    + '</div></div>';
+}
+
+async function saveContentOpen(revoke) {
+  const inst = state.selectedInstance;
+  if (!inst) return;
+  const users = ($('contentOpenUsers').value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
+  if (!users.length) { toast('请输入至少一个用户名', 'warn'); return; }
+  try {
+    const path = revoke ? 'content-revoke' : 'content-open';
+    await api('/api/ingest/instances/' + inst.id + '/' + path, { method: 'POST', body: JSON.stringify({ users }) });
+    toast(revoke ? '已收回内容开放' : '已开放内容给指定用户', 'ok');
+    // 重新拉取该实例并刷新弹层
+    const j = await api('/api/ingest/instances/' + inst.id);
+    const fresh = j.data;
+    const idx = (state.instances || []).findIndex(x => x.id === inst.id);
+    if (idx >= 0) state.instances[idx] = fresh;
+    renderInstanceDetail(fresh);
+  } catch (e) {
+    const d = e.details || {};
+    const extra = (d.out_of_cap_users?.length || d.invalid_users?.length)
+      ? '（无效/超范围: ' + [].concat(d.invalid_users || [], d.out_of_cap_users || []).join(', ') + '）' : '';
+    toast('操作失败: ' + e.message + extra, 'err', 6000);
+  }
 }
 
 function renderSourceLineage(inst) {

@@ -188,3 +188,11 @@ updated: 2026-11-11
 - 修复 PowerShell 脚本 UTF-8 BOM 兼容性问题。
 - health check 验证：`jena healthy, neo4j healthy, postgres healthy, status: ok`。
 - 新增 Wiki 页面 [[本地一键启动]]，把一键启动命令、参数、健康检查、前端启动、故障排查沉淀为常用入口。
+## [2026-11-11] feat | M2-C（V2-06 多租户隔离＋共享等级）交付
+- 新增 `backend/tenant.py` 统一判定层：租户隔离（跨租户 404 不泄露存在性）、四级共享（private/project/department/public，schema 只读）、实例永不共享（INV-2）、上传型内容显式开放（上限=共享等级可见范围）、共享降级即时收口。
+- 端点：`PATCH /api/ontologies/{id}/sharing`、`POST /api/ingest/instances/{id}/content-open`、`POST /api/ingest/instances/{id}/content-revoke`（详见 [[API 接口清单]] / API 文档 §24）。
+- 数据模型：project/user 加 `tenant_id`；ontology 加 `owner/sharing/shared_with`（新建默认 private）；instance 加 `uploaded_by/content_open`。
+- 路由接入：ontologies/graph/mcp/dictionary/ingest/projects/auth ＋ `api/dependencies.py` 资源级判定（不再项目级一刀切）。
+- 前端：建模页共享等级控制（owner/admin）＋实例详情内容受限提示与开放管理。
+- 验收：`scripts/verify_m2c_multitenant.py` PASS=37/FAIL=0；TC-06-06 由 `scripts/verify_tp0606_delegated_read.py` PASS=13/FAIL=0 联验；L5 93/93；M2-A 67/0、M2-B 19/0 复绿。
+- 见 [[V2开发里程碑]] M2-C ✅、[[source-V2-测试用例]] 脚本登记。

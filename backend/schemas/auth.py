@@ -22,6 +22,7 @@ class UserCreate(BaseModel):
     password: str = Field(min_length=8, max_length=256)
     role: Literal["admin", "modeler", "reviewer", "viewer"] = "viewer"
     grants: list[GrantIn] = Field(default_factory=list)
+    tenant_id: Optional[str] = None  # V2-06：租户绑定（缺省 default）
 
 
 class UserPatch(BaseModel):
@@ -30,3 +31,4 @@ class UserPatch(BaseModel):
     grants: Optional[list[GrantIn]] = None
     disabled: Optional[bool] = None
     password: Optional[str] = Field(default=None, min_length=8, max_length=256)
+    tenant_id: Optional[str] = None  # V2-06：调整用户租户归属

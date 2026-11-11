@@ -721,3 +721,31 @@
 
 ### 30.3 下一步
 - **M2-C（V2-06 多租户隔离＋共享等级，8–12 人日）已获用户指示启动**：tenant_id 全链路过滤（API＋UI＋MCP）→ 四级共享（私有/项目组/部门/公开，schema 只读）→ 实例永不共享（INV-2）→ 上传型内容显式开放 → 共享降级即时收口 → 共享不授写；验收 TP-06-01~08/EP-06-01~03（TC-06-06 已提前联验）；凭据映射管理 UI 随 M2-C 一并补。
+
+---
+
+## 31. 2026-11-11：M2-C（V2-06 多租户隔离＋共享等级）交付（验收 37/37；L5 93/93；四套验收脚本复绿）
+
+> 用户指令：「3. 完成后进行M2-C开发」（已获明确指示启动）。
+
+### 31.1 交付内容
+- **`backend/tenant.py`（新模块）**：租户/共享统一判定层——`ensure_project_access`（跨租户 404 不泄露存在性；admin 豁免、测试态 bypass）、`ensure_schema_visible`/`ensure_schema_write`（四级共享：private/project/department/public，project 级 shared_with 可跨租户）、`content_visible`/`instance_read_allowed`（实例永不共享 INV-2；上传型内容默认仅上传者＋content_open 开放范围）、`project_tenant_guard`（路由级守卫）、`audit_content_open`（开放/收回审计）。
+- **数据模型**：project/user 加 `tenant_id`（存量项目=default）；ontology 加 `owner/sharing/shared_with`（新建默认 private，存量无 sharing 视为 department 不收紧既有协作）；ingest_candidate 加 `created_by`；instance 加 `uploaded_by/content_open`。
+- **端点**：`PATCH /api/ontologies/{id}/sharing`（owner/admin；project 级必须给成员；无效账号 422 TCE-06-01；sharing_change 审计 from/to；即时生效）；`POST /api/ingest/instances/{id}/content-open` 与 `/content-revoke`（仅上传者/admin；开放上限=共享等级可见范围，超出 422 TCE-06-02；审计 content_open_grant/revoke）。
+- **路由接入**：router_ontologies（owner/sharing 落库＋sharing 端点＋schema 可见性/写权限判定＋graph/inference 守卫）、router_graph、router_mcp（router 级 project_tenant_guard）、router_dictionary（router 级守卫）、router_ingest（upload/preview/approve 等 ensure_project_access＋实例可见性/内容开放；修复误用候选 store 读本体的 bug）、router_projects（tenant_id 透传）、router_auth（UserCreate/UserPatch tenant_id）、api/dependencies.py（project_id_param 不再项目级一刀切，改资源级判定）。
+- **前端**：`frontend/index.html` 建模页 `#detailSharing` 容器；`frontend/app.js` 共享等级控制（SHARING_LABELS、renderOntologySharing/saveOntologySharing，project 级成员输入，owner/admin 可调）＋实例详情弹层内容受限提示（content_restricted 显式标记）＋内容开放管理面板（renderContentOpenPanel/saveContentOpen 开放/收回）。
+
+### 31.2 验收与回归
+- `scripts/verify_m2c_multitenant.py` **PASS=37/FAIL=0**（临时 DATA_DIR＋鉴权启用态＋真实 JWT）：TC-06-01~05/07/08＋TCE-06-01/02/03；**TC-06-06** 由 `verify_tp0606_delegated_read.py` **PASS=13/FAIL=0** 联验。
+- 回归：M2-A **67/0**、M2-B **19/0**、TP-06-06 **13/0**、M2-C **37/0** 四套脚本复跑全绿；L5 `backend/tests` **93/93**（102s）。
+- 回归中发现并修复：`patch_ontology_object` 缺 request 参数（NameError）；`create_ontology` 改回必传 request（`Request | None = None` 与 FastAPI 不兼容，9 个 collection error）＋router_templates 透传 request（owner=操作者）。
+
+### 31.3 文档/wiki
+- `docs/API-INTERFACE-DOC.md` §24（数据模型变更＋3 端点＋可见性规则＋验收与边界）；`docs/V2-开发里程碑.md` M2-C ✅；项目 wiki `source-V2-测试用例` 登记 M2-C 验收行；本 checkpoint；用户级 wiki 同步。
+
+### 31.4 已知边界 / 未完成下一步
+1. MCP 工具（/mcp/{project}）沿用项目静态 token（token 即租户边界），不携带访问者身份——访问者级代查走 §23 `federated_read()`；MCP 侧访问者身份化为 M4/V2-02 调用点。
+2. 跨租户上传内容经开放的读取随 V2-15 开放接口落地；legacy 无 owner/sharing 存量本体按 department 级处理。
+3. 凭据映射管理 UI（前端页面）仍未做（M2-B 遗留，可随 M2-D/M4 补）。
+4. **M2 剩余**：V2-09 权限审计与治理（M2-D）、V2-07 能力注册与发现（M2-E）、TCE2E-05/06；下一步切片启动需用户明确指示。
+5. `git commit` 待执行（用户已授权可 commit）。

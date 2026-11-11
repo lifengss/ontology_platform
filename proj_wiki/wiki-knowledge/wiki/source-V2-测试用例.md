@@ -65,6 +65,7 @@ tags: [源文档, V2, 测试用例]
 | **TC-14-11 身份联邦**（配置平台用户→外部系统凭据映射；mcp_client 以映射身份委托代查 mock HTTP——正确凭据 200/错误凭据 401；凭据 Fernet 加密落盘、load_secret 还原；DATA_DIR＋secrets 目录 grep 无明文；审计事件 identity_*，principal 脱敏） | `scripts/verify_m2b_identity_federation.py`（临时 DATA_DIR＋合成凭据） | ✅ 通过 PASS=19/FAIL=0（2026-11-11） |
 | **TCE-14-04 凭据映射缺失**（删除/未配置映射后触发含该系统调用 → `IDENTITY_MAPPING_MISSING` 403 指明缺失系统，不回落匿名/默认账号） | `scripts/verify_m2b_identity_federation.py`（同上，缺失映射分支） | ✅ 通过 PASS=19/FAIL=0（2026-11-11，含该分支） |
 | **TC-06-06 源连接内容按访问者权限**（V2-06 × M2-B 联验：同一连接 A/B 各持映射，`federated_read()` 委托代查——mock 源系统按身份返回宽 8 行/窄 3 行且敏感字段掩码；委托身份真实传递到源系统、连接自带 auth 被覆盖；缺失映射拒绝且不产生源系统调用；审计 identity_delegated_read 无明文。边界：平台侧租户/schema 过滤随 M2-C/M4 叠加） | `scripts/verify_tp0606_delegated_read.py`（临时 DATA_DIR＋本地 mock 源系统） | ✅ 通过 PASS=13/FAIL=0（2026-11-11） |
+| **M2-C 验收（V2-06 多租户隔离＋共享等级）**：TC-06-01 项目/实例/连接/字典租户过滤（跨租户不可见）、TC-06-02 猜测 ID 同文案 404 不泄露存在性、TC-06-03 四级共享（private/project/department/public）schema 可见矩阵＋project 级成员可跨租户、TC-06-04 sharing_change 审计（from/to 留痕）、TC-06-05 实例永不共享（INV-2：跨共享范围仅可见 schema、实例列表 200 空）、TC-06-07 上传型内容受限（`content_restricted` 显式标记→开放→可读→收回，开放/收回审计）、TC-06-08 共享不授写（跨租户 403）；TCE-06-01 开放对象无效账号/部门 422 指出无效项、TCE-06-02 开放超共享等级可见范围 422、TCE-06-03 共享降级即时收口 | `scripts/verify_m2c_multitenant.py`（临时 DATA_DIR＋鉴权启用态＋真实 JWT；TC-06-06 由 `verify_tp0606_delegated_read.py` 联验） | ✅ 通过 PASS=37/FAIL=0（2026-11-11） |
 
 ## See Also
 - [[source-V2-测试大纲]]、[[source-V2-功能需求描述]]、[[V2开发里程碑]]

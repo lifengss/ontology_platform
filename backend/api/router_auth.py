@@ -130,6 +130,7 @@ def api_create_user(payload: UserCreate, request: Request):
         rec = auth_svc.create_user(
             payload.username.strip(), payload.password, payload.role,
             [g.model_dump() for g in payload.grants],
+            tenant_id=payload.tenant_id,
         )
     except ValueError as exc:
         raise ApiError("VALIDATION_ERROR", str(exc), http_status=422) from exc

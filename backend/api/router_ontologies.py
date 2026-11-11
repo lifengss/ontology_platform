@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from rdflib import Graph
 
 from ai_helper import call_llm, extract_json, generate_ontology_from_document, generate_ontology_from_text
@@ -44,6 +44,18 @@ from schemas.ontology import (
     PrimaryKeyMigrationRequest,
     ValidateRequest,
     ValidateResult,
+)
+from tenant import (
+    audit_sharing_change,
+    bypass,
+    can_manage_sharing,
+    current_user,
+    effective_sharing,
+    ensure_schema_visible,
+    ensure_schema_write,
+    is_admin,
+    schema_visible,
+    SHARING_LEVELS,
 )
 
 JOBS: dict[str, dict[str, Any]] = {}
@@ -104,14 +116,19 @@ def _backfill_object_fields(obj: dict, namespace: str) -> None:
 @router.post("", status_code=201)
 def create_ontology(
     payload: OntologyCreate,
+    request: Request,
     project_id: str = Depends(project_id_param),
     namespace: str | None = Depends(namespace_param),
 ):
+    user = current_user(request) or {}
     record = payload.model_dump()
     record["id"] = uuid.uuid4().hex
     record["status"] = "draft"
     record["project_id"] = project_id
     record["namespace"] = namespace or project_id
+    record["owner"] = user.get("username") or "dev"  # V2-06：建模人归属
+    record["sharing"] = "private"  # V2-06：新建本体默认私有（仅本人可见）
+    record["shared_with"] = []
     record["created_at"] = _now()
     record["updated_at"] = record["created_at"]
     # 对象级 namespace 默认继承本体 namespace；并自动补齐业务语义定义与稳定主键
@@ -130,6 +147,7 @@ def create_ontology(
 
 @router.get("")
 def list_ontologies(
+    request: Request,
     project_id: str = Depends(project_id_param),
     namespace: str | None = Depends(namespace_param),
     page: int = Query(default=1, ge=1),
@@ -139,6 +157,11 @@ def list_ontologies(
     page, page_size = parse_pagination(page, page_size)
     store = _store_for(project_id)
     items = store.all()
+    user = current_user(request)
+    project = _project_store.get(project_id)
+    if not bypass() and not is_admin(user):
+        # V2-06 TC-06-03：列表仅含 schema 可见本体（私有=owner，部门=同租户，项目组=指定成员，公开=全员）
+        items = [o for o in items if schema_visible(user, project, o)]
     # 按 namespace 过滤；未显式指定则继承 project_id
     ns = namespace or project_id
     items = [o for o in items if (o.get("namespace") or project_id) == ns]
@@ -150,17 +173,74 @@ def list_ontologies(
 
 
 @router.get("/{ontology_id}")
-def get_ontology(ontology_id: str, project_id: str = Depends(project_id_param)):
+def get_ontology(ontology_id: str, request: Request, project_id: str = Depends(project_id_param)):
     rec = _store_for(project_id).get(ontology_id)
     if not rec:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    ensure_schema_visible(request, project_id, rec)  # V2-06：不可见=404（不泄露存在性）
+    rec = dict(rec)
+    rec.setdefault("sharing", effective_sharing(rec))
     return success(rec)
+
+
+@router.patch("/{ontology_id}/sharing")
+def update_sharing(
+    ontology_id: str,
+    payload: dict,
+    request: Request,
+    project_id: str = Depends(project_id_param),
+):
+    """V2-06 / TC-06-03·04：调整本体共享等级（仅 owner/admin）。
+
+    body: {"sharing": "private|project|department|public", "shared_with": ["username", ...]}
+    - project 级必须给出 shared_with（可跨租户指定成员）；指定无效账号 422（TCE-06-01）；
+    - 变更即时生效（每次请求实时计算，降级立即收口，TCE-06-03）；
+    - 审计 sharing_change：谁/何时/从哪级到哪级（TC-06-04）。
+    """
+    store = _store_for(project_id)
+    rec = store.get(ontology_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    user = current_user(request) or {}
+    if not bypass():
+        ensure_schema_visible(request, project_id, rec)
+        if not can_manage_sharing(user, project_id, rec):
+            raise ApiError("FORBIDDEN", "仅建模人本人或管理员可调整共享等级", http_status=403)
+    new_level = payload.get("sharing")
+    if new_level not in SHARING_LEVELS:
+        raise ApiError("VALIDATION_ERROR", f"sharing 必须是 {sorted(SHARING_LEVELS)}", http_status=422)
+    shared_with = payload.get("shared_with")
+    if new_level == "project":
+        if not isinstance(shared_with, list) or not shared_with:
+            raise ApiError("VALIDATION_ERROR", "项目组共享必须给出 shared_with 指定成员列表", http_status=422)
+        import auth as auth_svc
+        existing = {u["username"] for u in auth_svc.list_users()}
+        invalid = [u for u in shared_with if u not in existing]
+        if invalid:
+            raise ApiError("VALIDATION_ERROR", "共享指定了无效账号", http_status=422,
+                           details={"invalid_users": invalid})
+    else:
+        shared_with = []
+    old_level = effective_sharing(rec)
+    updated = store.update(ontology_id, {
+        "sharing": new_level,
+        "shared_with": shared_with,
+        "updated_at": _now(),
+    })
+    audit_sharing_change(
+        (user.get("username") or "dev"), project_id, ontology_id,
+        old_level, new_level, shared_with,
+    )
+    logger.info("sharing_change ontology=%s project=%s %s->%s members=%d",
+                ontology_id, project_id, old_level, new_level, len(shared_with))
+    return success(updated)
 
 
 @router.put("/{ontology_id}")
 def update_ontology(
     ontology_id: str,
     payload: Ontology,
+    request: Request,
     project_id: str = Depends(project_id_param),
     namespace: str | None = Depends(namespace_param),
 ):
@@ -168,6 +248,8 @@ def update_ontology(
     existing = store.get(ontology_id)
     if not existing:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    ensure_schema_visible(request, project_id, existing)
+    ensure_schema_write(request, project_id, existing)  # V2-06：共享只授 schema 只读（TC-06-08）
     old_stable_keys = {o.get("id"): o.get("stable_key") for o in existing.get("objects", [])}
     patch = payload.model_dump(exclude_unset=True)
     patch.pop("id", None)
@@ -228,6 +310,7 @@ def patch_ontology_object(
     ontology_id: str,
     object_id: str,
     payload: OntologyObjectPatch,
+    request: Request,
     project_id: str = Depends(project_id_param),
     namespace: str | None = Depends(namespace_param),
     if_match: str | None = Header(default=None, alias="If-Match"),
@@ -243,6 +326,8 @@ def patch_ontology_object(
     existing = store.get(ontology_id)
     if not existing:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    ensure_schema_visible(request, project_id, existing)
+    ensure_schema_write(request, project_id, existing)
     expected_updated_at = existing.get("updated_at")
     if if_match and if_match != expected_updated_at:
         raise ApiError("STALE_ONTOLOGY", "本体已被其它请求更新，请刷新后重试（后到者须基于最新状态提交）",
@@ -375,6 +460,7 @@ def migrate_primary_key(
 @router.delete("/{ontology_id}")
 def delete_ontology(
     ontology_id: str,
+    request: Request,
     force: bool = Query(default=False),
     project_id: str = Depends(project_id_param),
 ):
@@ -388,6 +474,8 @@ def delete_ontology(
     rec = store.get(ontology_id)
     if not rec:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    ensure_schema_visible(request, project_id, rec)
+    ensure_schema_write(request, project_id, rec)
 
     # 1) MCP 发布状态：自动取消发布（内存态，随删除清除）
     unpublished = False

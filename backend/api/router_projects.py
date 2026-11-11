@@ -1,14 +1,19 @@
-"""项目管理路由：项目 CRUD + 共享库提示 + 项目级数据访问入口。"""
+"""项目管理路由：项目 CRUD + 共享库提示 + 项目级数据访问入口。
+
+V2-06（M2-C）：项目即租户边界——创建时落租户归属（创建人租户），列表按租户过滤，
+跨租户读写/删除/归档一律 404（不泄露存在性）。
+"""
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 
 from core.project_store import ProjectStore
 from core.responses import ApiError, list_payload, parse_pagination, success
 from logging_setup import get_logger
 from schemas.project import ProjectCreate, ProjectUpdate
+from tenant import bypass, current_user, ensure_project_access, is_admin, user_tenant
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 logger = get_logger("api.projects")
@@ -16,14 +21,16 @@ _store = ProjectStore()
 
 
 @router.post("", status_code=201)
-def create_project(payload: ProjectCreate):
-    rec = _store.create(payload)
-    logger.info("create_project id=%s name=%s", rec["id"], rec["name"])
+def create_project(payload: ProjectCreate, request: Request):
+    user = current_user(request) or {}
+    rec = _store.create(payload, tenant_id=user_tenant(user))
+    logger.info("create_project id=%s name=%s tenant=%s", rec["id"], rec["name"], rec.get("tenant_id"))
     return success(rec, http_status=201)
 
 
 @router.get("")
 def list_projects(
+    request: Request,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100, alias="pageSize"),
     with_stats: bool = Query(default=False, description="附带项目级统计（本体数/实例数/数据量），首页总览用"),
@@ -34,6 +41,11 @@ def list_projects(
     for rec in items:
         rec.setdefault("status", "active")  # 历史数据无 status 字段，视为 active
         rec.setdefault("department", "默认部门")  # 历史数据无 department 字段，视为默认部门
+        rec.setdefault("tenant_id", "default")  # 历史数据无 tenant_id 字段，视为默认租户
+    user = current_user(request)
+    if not bypass() and not is_admin(user):
+        # V2-06 TC-06-01：非管理员仅见本租户项目
+        items = [rec for rec in items if (rec.get("tenant_id") or "default") == user_tenant(user)]
     if department:
         items = [rec for rec in items if (rec.get("department") or "默认部门") == department]
     total = len(items)
@@ -50,7 +62,8 @@ def list_projects(
 
 
 @router.get("/{project_id}")
-def get_project(project_id: str):
+def get_project(request: Request, project_id: str):
+    ensure_project_access(request, project_id)
     rec = _store.get(project_id)
     if not rec:
         raise ApiError("NOT_FOUND", "项目不存在", http_status=404)
@@ -58,7 +71,8 @@ def get_project(project_id: str):
 
 
 @router.put("/{project_id}")
-def update_project(project_id: str, payload: ProjectUpdate):
+def update_project(request: Request, project_id: str, payload: ProjectUpdate):
+    ensure_project_access(request, project_id)
     if not _store.get(project_id):
         raise ApiError("NOT_FOUND", "项目不存在", http_status=404)
     patch = payload.model_dump(exclude_unset=True)
@@ -69,7 +83,8 @@ def update_project(project_id: str, payload: ProjectUpdate):
 
 
 @router.delete("/{project_id}")
-def delete_project(project_id: str):
+def delete_project(request: Request, project_id: str):
+    ensure_project_access(request, project_id)
     if project_id in ("default", "_shared"):
         raise ApiError("FORBIDDEN_WRITE", "不能删除默认项目或共享库", http_status=403)
     if not _store.get(project_id):

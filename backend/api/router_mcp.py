@@ -17,7 +17,9 @@ from mcp_client import McpClient
 from mcp_server import get_mcp_server
 from schemas.mcp import ConnectionConfig, ConnectionCreate
 
-router = APIRouter(prefix="/api/mcp", tags=["mcp"])
+from tenant import project_tenant_guard  # V2-06 租户隔离（TC-06-01）
+
+router = APIRouter(prefix="/api/mcp", tags=["mcp"], dependencies=[Depends(project_tenant_guard)])
 logger = get_logger("api.mcp")
 _client = McpClient()
 _server = get_mcp_server()

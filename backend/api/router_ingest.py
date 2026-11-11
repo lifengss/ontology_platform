@@ -19,6 +19,39 @@ from core.instance_store import get_instance_store
 from core.responses import ApiError, list_payload, parse_pagination, success
 from core.storage import JsonStore
 from ai_helper.client import call_llm
+from tenant import (
+    audit_content_open,
+    bypass,
+    content_visible,
+    current_user,
+    ensure_project_access,
+    ensure_schema_visible,
+    ensure_schema_write,
+    instance_read_allowed,
+    instance_uploader,
+    is_admin,
+    mask_instance_content,
+    merge_open_targets,
+    remove_open_targets,
+    validate_open_targets,
+)
+
+
+def _request_username(request: Request) -> str:
+    """V2-06：上传者归属（鉴权关闭时 dev）。"""
+    user = current_user(request) or {}
+    return user.get("username") or "dev"
+
+
+def _ensure_instance_write(request: Request, project_id: str, rec: dict) -> None:
+    """V2-06：实例写权限 = 实例可见（同租户＋schema 可见）且 schema 写权限（共享只授读）。"""
+    if bypass():
+        return
+    user = current_user(request)
+    ont = _ontologies_for(project_id).get(rec.get("ontology_id"))
+    if not ont or not instance_read_allowed(user, project_id, ont):
+        raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
+    ensure_schema_write(request, project_id, ont)
 from ingestion import approve as approve_candidate_logic
 from ingestion import preview as preview_candidate
 from ingestion import validate_instance
@@ -316,6 +349,7 @@ def _save_candidate(
     candidate: dict[str, Any],
     project_id: str,
     source_ref: str,
+    created_by: str | None = None,
 ) -> dict[str, Any]:
     rec = {
         "id": uuid.uuid4().hex,
@@ -329,18 +363,22 @@ def _save_candidate(
         "created_at": _now(),
         "approve_result": None,
     }
+    if created_by:
+        rec["created_by"] = created_by  # V2-06：上传者归属（上传型内容默认仅本人可读）
     _store_for(project_id).insert(rec)
     return rec
 
 
 @router.post("/upload")
 async def upload_instances(
+    request: Request,
     ontology_id: str,
     object_type: str | None = None,
     field_map: str | None = Form(default=None),
     file: UploadFile = File(...),
     project_id: str = Depends(project_id_param),
 ):
+    ensure_project_access(request, project_id)  # V2-06：租户隔离
     """上传 Excel/CSV 生成候选实例。xlsx 支持按 sheet 名/文件名推断对象类型；
     未指定 object_type 时遍历所有 sheet，每个合法 sheet 生成一个候选。csv 必须指定 object_type。
     field_map 为 JSON 字符串，{源表头: 属性id}，显式覆盖自动匹配。"""
@@ -404,7 +442,7 @@ async def upload_instances(
                                f"sheet「{sheet_name}」的表头 {headers} 无法匹配对象「{obj.get('name') or matched_object_type}」的任何属性，"
                                f"请检查表头（应使用属性 id 或名称）或显式传 field_map", http_status=422)
             candidate = _build_candidate_records(ontology_id, ontology, matched_object_type, filename, records, parsed_field_map, project_id)
-            rec = _save_candidate(candidate, project_id, filename)
+            rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request))
             candidates.append(rec)
     elif ext == "csv":
         if not object_type:
@@ -430,7 +468,7 @@ async def upload_instances(
                            f"CSV 表头无法匹配对象「{obj.get('name') or object_type}」的任何属性，"
                            f"请检查表头（应使用属性 id 或名称）或显式传 field_map", http_status=422)
         candidate = _build_candidate_records(ontology_id, ontology, object_type, filename, records, parsed_field_map, project_id)
-        rec = _save_candidate(candidate, project_id, filename)
+        rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request))
         candidates.append(rec)
     else:
         raise ApiError("VALIDATION_ERROR", "仅支持 .xlsx 或 .csv 文件", http_status=422)
@@ -478,6 +516,7 @@ def _infer_field_map_with_llm(
 
 @router.post("/upload-smart")
 async def upload_instances_smart(
+    request: Request,
     ontology_id: str,
     object_type: str | None = None,
     auto_apply: bool = Form(default=False),
@@ -491,6 +530,7 @@ async def upload_instances_smart(
     - 默认返回每个 sheet/object 的推断映射供用户确认。
     - auto_apply=true 时直接生成 candidate 记录。
     """
+    ensure_project_access(request, project_id)  # V2-06：租户隔离
     ontology = _load_ontology(ontology_id, project_id)
     biz_errors = blocking_violations(ontology)
     if biz_errors:
@@ -528,7 +568,7 @@ async def upload_instances_smart(
                 records, _ = _parse_excel_sheet(wb[sheet_name], matched_object_type, filename, set(field_map.values()), field_map, obj)
                 if records:
                     candidate = _build_candidate_records(ontology_id, ontology, matched_object_type, filename, records, field_map, project_id)
-                    rec = _save_candidate(candidate, project_id, filename)
+                    rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request))
                     candidates.append(rec)
     elif ext == "csv":
         if not object_type:
@@ -550,7 +590,7 @@ async def upload_instances_smart(
             records, _ = _parse_csv(content, object_type, filename, set(field_map.values()), field_map, obj)
             if records:
                 candidate = _build_candidate_records(ontology_id, ontology, object_type, filename, records, field_map, project_id)
-                rec = _save_candidate(candidate, project_id, filename)
+                rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request))
                 candidates.append(rec)
     else:
         raise ApiError("VALIDATION_ERROR", "仅支持 .xlsx 或 .csv 文件", http_status=422)
@@ -563,8 +603,10 @@ async def upload_instances_smart(
 
 
 @router.post("/preview")
-def preview(payload: IngestPreviewRequest, project_id: str = Depends(project_id_param)):
+def preview(payload: IngestPreviewRequest, request: Request, project_id: str = Depends(project_id_param)):
+    ensure_project_access(request, project_id)  # V2-06：租户隔离
     ontology = _load_ontology(payload.ontology_id, project_id)
+    ensure_schema_visible(request, project_id, ontology)
     biz_errors = blocking_violations(ontology)
     if biz_errors:
         raise ApiError("VALIDATION_ERROR", "本体模型未通过业务层校验，无法生成候选", http_status=422,
@@ -582,6 +624,7 @@ def preview(payload: IngestPreviewRequest, project_id: str = Depends(project_id_
         "status": "pending",
         "created_at": _now(),
         "approve_result": None,
+        "created_by": _request_username(request),  # V2-06：上传者归属
     }
     _store_for(project_id).insert(rec)
     logger.info("ingest preview candidate_id=%s project_id=%s source=%s instances=%d",
@@ -654,6 +697,7 @@ def _approve_one(rec: dict, candidate_id: str, project_id: str) -> dict:
         rec["status"] = "imported"
         instance_store = _instance_store_for(project_id)
         key = _stable_key_for(ontology, rec.get("object_type"))
+        uploader = rec.get("created_by")  # V2-06：上传型内容默认仅上传者可读
         n_inserted = n_deduped = 0
         for inst in rec.get("instances", []):
             instance_record = {
@@ -666,6 +710,9 @@ def _approve_one(rec: dict, candidate_id: str, project_id: str) -> dict:
                 "imported_at": _now(),
                 "tx_id": result.get("neo_tx_id"),
             }
+            if uploader:
+                instance_record["uploaded_by"] = uploader
+                instance_record["content_open"] = {"users": [], "departments": []}
             key_value = inst.get(key) if key else None
             if key and key_value is not None and key_value != "":
                 instance_record["stable_key"] = key
@@ -700,7 +747,8 @@ def _approve_one(rec: dict, candidate_id: str, project_id: str) -> dict:
 
 
 @router.post("/candidates/{candidate_id}/approve")
-def approve_candidate(candidate_id: str, project_id: str = Depends(project_id_param)):
+def approve_candidate(request: Request, candidate_id: str, project_id: str = Depends(project_id_param)):
+    ensure_project_access(request, project_id)  # V2-06：租户隔离
     store = _store_for(project_id)
     rec = store.get(candidate_id)
     if not rec:
@@ -713,7 +761,8 @@ def approve_candidate(candidate_id: str, project_id: str = Depends(project_id_pa
 
 
 @router.post("/candidates/{candidate_id}/reject")
-def reject_candidate(candidate_id: str, project_id: str = Depends(project_id_param)):
+def reject_candidate(request: Request, candidate_id: str, project_id: str = Depends(project_id_param)):
+    ensure_project_access(request, project_id)  # V2-06：租户隔离
     store = _store_for(project_id)
     rec = store.get(candidate_id)
     if not rec:
@@ -726,8 +775,9 @@ def reject_candidate(candidate_id: str, project_id: str = Depends(project_id_par
 
 
 @router.post("/candidates/{candidate_id}/revert")
-def revert_candidate(candidate_id: str, project_id: str = Depends(project_id_param)):
+def revert_candidate(request: Request, candidate_id: str, project_id: str = Depends(project_id_param)):
     """1.4：已驳回候选恢复为待审核。"""
+    ensure_project_access(request, project_id)  # V2-06：租户隔离
     store = _store_for(project_id)
     rec = store.get(candidate_id)
     if not rec:
@@ -777,8 +827,9 @@ def delete_candidate(candidate_id: str, project_id: str = Depends(project_id_par
 
 
 @router.post("/candidates/batch-approve")
-def batch_approve_candidates(payload: dict, project_id: str = Depends(project_id_param)):
+def batch_approve_candidates(request: Request, payload: dict, project_id: str = Depends(project_id_param)):
     """1.4：批量批准（仅对 pending 候选生效，逐组执行与单个批准相同的校验+落库）。"""
+    ensure_project_access(request, project_id)  # V2-06：租户隔离
     store = _store_for(project_id)
     ids = payload.get("candidate_ids")
     if not isinstance(ids, list) or not ids:
@@ -804,8 +855,9 @@ def batch_approve_candidates(payload: dict, project_id: str = Depends(project_id
 
 
 @router.post("/candidates/batch-reject")
-def batch_reject_candidates(payload: dict, project_id: str = Depends(project_id_param)):
+def batch_reject_candidates(request: Request, payload: dict, project_id: str = Depends(project_id_param)):
     """1.4：批量驳回（仅对 pending 候选生效）。"""
+    ensure_project_access(request, project_id)  # V2-06：租户隔离
     store = _store_for(project_id)
     ids = payload.get("candidate_ids")
     if not isinstance(ids, list) or not ids:
@@ -865,6 +917,7 @@ def delete_candidate_instance(
 
 @router.get("/instances")
 def list_instances(
+    request: Request,
     project_id: str = Depends(project_id_param),
     namespace: str | None = None,
     ontology_id: str | None = None,
@@ -882,6 +935,25 @@ def list_instances(
     if namespace:
         allowed = set(_namespace_ontology_ids(project_id, namespace))
         items = [it for it in items if it.get("ontology_id") in allowed]
+    # V2-06：实例永不共享（INV-2）——仅同租户且 schema 可见的本体实例可见；
+    # 上传型内容默认仅上传者可读，未开放者只见元数据（键/类型/关系），字段值置空并标记。
+    user = current_user(request)
+    if not bypass():
+        from core.project_store import ProjectStore
+        project = ProjectStore().get(project_id)
+        onto_cache: dict[str, dict | None] = {}
+        visible_items: list[dict] = []
+        for it in items:
+            oid = it.get("ontology_id")
+            if oid not in onto_cache:
+                onto_cache[oid] = _ontologies_for(project_id).get(oid)
+            ont = onto_cache[oid]
+            if not ont or not instance_read_allowed(user, project_id, ont):
+                continue
+            if not content_visible(user, project_id, it, ont):
+                it = mask_instance_content(it)
+            visible_items.append(it)
+        items = visible_items
     items.sort(key=lambda x: x.get("imported_at") or "", reverse=True)
     total = len(items)
     start = (page - 1) * page_size
@@ -889,11 +961,101 @@ def list_instances(
 
 
 @router.get("/instances/{instance_id}")
-def get_instance(instance_id: str, project_id: str = Depends(project_id_param)):
+def get_instance(instance_id: str, request: Request, project_id: str = Depends(project_id_param)):
     rec = _instance_store_for(project_id).get(instance_id)
     if rec:
+        user = current_user(request)
+        if not bypass():
+            from core.project_store import ProjectStore
+            project = ProjectStore().get(project_id)
+            ont = _ontologies_for(project_id).get(rec.get("ontology_id"))
+            if not ont or not instance_read_allowed(user, project_id, ont):
+                raise ApiError("NOT_FOUND", "实例不存在", http_status=404)  # 跨共享范围：实例不可见（INV-2）
+            if not content_visible(user, project_id, rec, ont):
+                return success(mask_instance_content(rec))  # 上传型内容未开放：仅元数据
         return success(rec)
     raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
+
+
+@router.post("/instances/{instance_id}/content-open")
+def open_instance_content(
+    instance_id: str,
+    payload: dict,
+    request: Request,
+    project_id: str = Depends(project_id_param),
+):
+    """V2-06 / TC-06-07：上传型实例内容显式开放到人/部门（仅上传者/admin）。
+
+    body: {"users": ["username"...], "departments": ["tenant_id"...]}
+    - 指定无效账号/部门 422（TCE-06-01）；
+    - 开放上限=本体共享等级可见范围，范围外 422（TCE-06-02）；
+    - 审计 content_open_grant。
+    """
+    rec = _instance_store_for(project_id).get(instance_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
+    user = current_user(request) or {}
+    ont = _ontologies_for(project_id).get(rec.get("ontology_id"))
+    if not ont:
+        raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    if not bypass():
+        ensure_schema_visible(request, project_id, ont)
+        if not (is_admin(user) or instance_uploader(rec) == user.get("username")):
+            raise ApiError("FORBIDDEN", "仅上传者本人或管理员可开放实例内容", http_status=403)
+    users = [u for u in (payload.get("users") or []) if u]
+    departments = [d for d in (payload.get("departments") or []) if d]
+    if not users and not departments:
+        raise ApiError("VALIDATION_ERROR", "users/departments 至少指定一项", http_status=422)
+    errors = validate_open_targets(project_id, ont, users, departments)
+    invalid = errors["invalid_users"] + errors["invalid_departments"]
+    out_of_cap = errors["out_of_cap_users"] + errors["out_of_cap_departments"]
+    if invalid:
+        raise ApiError("VALIDATION_ERROR", "开放指定了无效账号/部门", http_status=422,
+                       details={"invalid_users": errors["invalid_users"],
+                                "invalid_departments": errors["invalid_departments"]})
+    if out_of_cap:
+        raise ApiError("VALIDATION_ERROR", "开放范围超出本体共享等级可见范围（上限=schema 可见范围）",
+                       http_status=422,
+                       details={"out_of_cap_users": errors["out_of_cap_users"],
+                                "out_of_cap_departments": errors["out_of_cap_departments"]})
+    rec["content_open"] = merge_open_targets(rec, users, departments)
+    _instance_store_for(project_id).update(instance_id, {"content_open": rec["content_open"]})
+    audit_content_open(user.get("username") or "dev", project_id, instance_id, users, departments)
+    logger.info("content_open instance=%s project=%s users=%d departments=%d",
+                instance_id, project_id, len(users), len(departments))
+    return success({"id": instance_id, "content_open": rec["content_open"]})
+
+
+@router.post("/instances/{instance_id}/content-revoke")
+def revoke_instance_content(
+    instance_id: str,
+    payload: dict,
+    request: Request,
+    project_id: str = Depends(project_id_param),
+):
+    """V2-06 / TC-06-07：收回实例内容开放范围（仅上传者/admin），审计 content_open_revoke。"""
+    rec = _instance_store_for(project_id).get(instance_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
+    user = current_user(request) or {}
+    ont = _ontologies_for(project_id).get(rec.get("ontology_id"))
+    if not ont:
+        raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    if not bypass():
+        ensure_schema_visible(request, project_id, ont)
+        if not (is_admin(user) or instance_uploader(rec) == user.get("username")):
+            raise ApiError("FORBIDDEN", "仅上传者本人或管理员可收回实例内容开放", http_status=403)
+    users = [u for u in (payload.get("users") or []) if u]
+    departments = [d for d in (payload.get("departments") or []) if d]
+    if not users and not departments:
+        raise ApiError("VALIDATION_ERROR", "users/departments 至少指定一项", http_status=422)
+    rec["content_open"] = remove_open_targets(rec, users, departments)
+    _instance_store_for(project_id).update(instance_id, {"content_open": rec["content_open"]})
+    audit_content_open(user.get("username") or "dev", project_id, instance_id, users, departments,
+                       revoked=True)
+    logger.info("content_revoke instance=%s project=%s users=%d departments=%d",
+                instance_id, project_id, len(users), len(departments))
+    return success({"id": instance_id, "content_open": rec["content_open"]})
 
 
 @router.put("/instances/batch")
@@ -928,6 +1090,7 @@ def update_instances_batch(
             errors.append({"id": iid, "error": "实例不存在"})
             continue
         try:
+            _ensure_instance_write(request, project_id, rec)
             warnings = _validate_for_update(store, project_id, rec, new_instance, strict_fields)
         except ApiError as e:
             errors.append({"id": iid, "error": e.message})
@@ -974,6 +1137,7 @@ def update_instance(
     rec = store.get(instance_id)
     if not rec:
         raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
+    _ensure_instance_write(request, project_id, rec)
 
     new_instance = payload.get("instance")
     if not isinstance(new_instance, dict):
@@ -1019,6 +1183,7 @@ def patch_instance(
     rec = store.get(instance_id)
     if not rec:
         raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
+    _ensure_instance_write(request, project_id, rec)
     before = copy.deepcopy(rec.get("instance") or {})
     merged = dict(before)
     merged.update(patch)
@@ -1057,10 +1222,13 @@ def list_instance_change_logs(
 
 
 @router.delete("/instances/{instance_id}")
-def delete_instance(instance_id: str, project_id: str = Depends(project_id_param)):
+def delete_instance(instance_id: str, request: Request, project_id: str = Depends(project_id_param)):
     store = _instance_store_for(project_id)
     rec = store.get(instance_id)
-    if rec is None or not store.delete(instance_id):
+    if rec is None:
+        raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
+    _ensure_instance_write(request, project_id, rec)
+    if not store.delete(instance_id):
         raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
     stale_info = _invalidate_capability_results(project_id, instance_id)
     _sync_rdf(project_id, rec.get("ontology_id"), instance_id=instance_id, deleted=True)

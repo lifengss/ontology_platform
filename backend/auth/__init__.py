@@ -252,6 +252,7 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
         "username": user["username"],
         "role": user.get("role", "viewer"),
         "grants": user.get("grants", []),
+        "tenant_id": user.get("tenant_id") or "default",
         "disabled": bool(user.get("disabled", False)),
         "locked": bool(user.get("locked_until", 0) > _now()),
         "created_at": user.get("created_at"),
@@ -353,7 +354,8 @@ def authenticate(username: str, password: str) -> tuple[dict[str, Any] | None, s
 
 
 def create_user(username: str, password: str, role: str = "viewer",
-                grants: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                grants: list[dict[str, Any]] | None = None,
+                tenant_id: str | None = None) -> dict[str, Any]:
     if role not in ROLES:
         raise ValueError(f"未知角色: {role}")
     if find_user(username):
@@ -364,6 +366,7 @@ def create_user(username: str, password: str, role: str = "viewer",
         "password_hash": hash_password(password),
         "role": role,
         "grants": grants or [],
+        "tenant_id": tenant_id or "default",
         "disabled": False,
         "failed_attempts": 0,
         "locked_until": 0,
@@ -378,7 +381,7 @@ def update_user(user_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
     if rec is None:
         return None
     allowed = {k: v for k, v in patch.items()
-               if k in ("role", "grants", "disabled", "password") and v is not None}
+               if k in ("role", "grants", "disabled", "password", "tenant_id") and v is not None}
     if "role" in allowed and allowed["role"] not in ROLES:
         raise ValueError(f"未知角色: {allowed['role']}")
     password = allowed.pop("password", None)

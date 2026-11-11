@@ -28,7 +28,10 @@ from schemas.dictionary import (
     TermUpdate,
 )
 
-router = APIRouter(prefix="/api/dictionary", tags=["dictionary"])
+from tenant import project_tenant_guard  # V2-06 租户隔离（TC-06-01）
+
+router = APIRouter(prefix="/api/dictionary", tags=["dictionary"],
+                   dependencies=[Depends(project_tenant_guard)])
 logger = get_logger("api.dictionary")
 
 
