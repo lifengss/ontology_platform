@@ -106,6 +106,18 @@ TOOLS_CONTRACT = {
                            "inputs 覆盖值/数据缺口显式标注（input_overrides/data_gaps/inputs_persisted=false）"],
         "side_effect": True,
     },
+    "alignment_candidates": {
+        "reads": ["等价声明", "实例ABox（stable_key/来源信号，采样截断）"], "writes": [],
+        "preconditions": ["本体已发布（MCP 通道访问边界=发布态，仅已发布本体参与候选检测）"],
+        "postconditions": ["仅返回双方均已发布的本体对候选（四类信号+证据+置信度；被拒对不重提）"],
+        "side_effect": False,
+    },
+    "alignment_declarations": {
+        "reads": ["等价声明（含属性冲突与会签进度）"], "writes": [],
+        "preconditions": ["本体已发布（MCP 通道访问边界=发布态）"],
+        "postconditions": ["仅返回双方本体均已发布的声明；会签/冲突决策等写操作走 REST /api/alignment 通道"],
+        "side_effect": False,
+    },
 }
 
 
@@ -967,6 +979,75 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
             raise _err(ERR_CAPABILITY_FAILED,
                        f"{e.code}: {e.message} (http_status={e.http_status})")
         return json.dumps(res, ensure_ascii=False)
+
+    @m.tool()
+    def alignment_candidates(ontology_a: str = "", ontology_b: str = "") -> str:
+        """V2-02 跨本体对齐候选检测（M4-A②，只读）：key overlap / common origin / semantic /
+        structural 四类信号＋置信度＋证据。MCP 通道访问边界=发布态（与其他工具一致，
+        仅已发布本体参与），与 REST POST /api/alignment/candidates 同一检测引擎
+        （REST 通道按当前用户可见性过滤，MCP 通道按发布态预筛）。
+
+        ontology_a/ontology_b（名称或 32 位 ID）同时给出时只计算该对的对象级信号；
+        留空则全量扫描本项目已发布本体对（被拒对不重提，除非证据显著变化 repropose=true）。
+        """
+        import alignment as _al
+        from api.router_projects import get_project_store
+        if bool(ontology_a) != bool(ontology_b):
+            raise _err(ERR_INVALID_ARGUMENT, "指定候选对须同时给出 ontology_a 与 ontology_b")
+        published = set(owner._published_ontologies.get(project_id, []))
+        if ontology_a:
+            oa_id = _resolve_ontology_id(owner, project_id, ontology_a)
+            ob_id = _resolve_ontology_id(owner, project_id, ontology_b)
+            if oa_id == ob_id:
+                raise _err(ERR_INVALID_ARGUMENT, "不能检测本体与自身的对齐")
+            _require_published(owner, project_id, oa_id)
+            _require_published(owner, project_id, ob_id)
+            a, b = ontologies.get(oa_id) or {}, ontologies.get(ob_id) or {}
+            sig_a = _al._instance_signal_data(project_id, oa_id)
+            sig_b = _al._instance_signal_data(project_id, ob_id)
+            best = []
+            for x in (a.get("objects") or []):
+                for y in (b.get("objects") or []):
+                    s = _al.object_pair_signals(a, x, b, y, sig_a, sig_b)
+                    best.append({"object_a": x.get("id"), "object_b": y.get("id"),
+                                 "object_a_name": x.get("name"), "object_b_name": y.get("name"),
+                                 **s})
+            best.sort(key=lambda t: t["confidence"], reverse=True)
+            return json.dumps({"ontology_a": oa_id, "ontology_b": ob_id,
+                               "ontology_a_name": a.get("name"), "ontology_b_name": b.get("name"),
+                               "object_pairs": best[:10]}, ensure_ascii=False)
+        subset = [o for o in ontologies.all() if o.get("id") and o["id"] in published]
+        project_rec = get_project_store().get(project_id) or {"id": project_id}
+        return json.dumps(_al.detect_candidates(None, project_rec, subset), ensure_ascii=False)
+
+    @m.tool()
+    def alignment_declarations(decl_id: str = "", status: str = "", limit: int = 50) -> str:
+        """V2-02 跨本体对齐声明查询（M4-A②，只读）：等价声明＋属性冲突（值域/必填/主键，
+        权威源决策状态）＋会签进度（required signers/已签/状态）。MCP 通道访问边界=发布态：
+        仅返回双方本体均已发布的声明，decl_id 不存在或不满足时一律 NOT_FOUND（不泄露存在性）。
+        会签（approve/reject）、冲突决策、撤回等写操作走 REST /api/alignment/declarations/... 通道。
+
+        decl_id 指定则查详情；否则列表，status 可过滤 pending/approved/rejected/withdrawn，
+        limit 默认 50/上限 200。
+        """
+        import alignment as _al
+        published = set(owner._published_ontologies.get(project_id, []))
+        store = _al._store(project_id)
+        if decl_id:
+            d = store.get(decl_id)
+            if (not d or d.get("ontology_a") not in published
+                    or d.get("ontology_b") not in published):
+                raise _err(ERR_NOT_FOUND, "声明不存在")
+            return json.dumps(d, ensure_ascii=False)
+        lim = max(1, min(int(limit or 50), 200))
+        items = []
+        for d in store.all():
+            if status and d.get("status") != status:
+                continue
+            if d.get("ontology_a") in published and d.get("ontology_b") in published:
+                items.append(d)
+        items.sort(key=lambda d: d.get("submitted_at") or "", reverse=True)
+        return json.dumps({"items": items[:lim], "total": len(items)}, ensure_ascii=False)
 
 
 def _run_inference(ontology: dict[str, Any]) -> list[dict[str, Any]]:

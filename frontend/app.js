@@ -309,6 +309,8 @@ async function refreshActiveTabAfterScopeChange() {
       await loadHome();
     } else if (tab === 'orchestration') {
       await loadOrchestration();
+    } else if (tab === 'alignment') {
+      await Promise.all([alignLoadDecls(), alignDetect()]);
     }
     // modeling 已由 setProject 内的 loadOntologies() 刷新
   } catch (e) {
@@ -1050,6 +1052,7 @@ function switchTab(name) {
       loadQualityTrend();
     });
   }
+  if (name === 'alignment') { alignLoadDecls(); alignDetect(); }
   if (name === 'mcp') { loadMcpOntologies(1); loadMcpTools(); loadMcpToken(); }
   if (name === 'logs') { loadServerLogs(); }
   if (name === 'settings') { loadLLMSettings(); }
@@ -7473,4 +7476,285 @@ async function orchGenerateFragment() {
     toast('片段已并入草稿（grounding 校验通过）', 'ok');
     await orchSelectWorkflow(ORCH.wf.id, true);
   } catch (e) { toast('片段生成失败：' + e.message, 'err'); }
+}
+
+/* =============================================================
+ * V2-02 跨本体对齐（M4-A②）：候选检测 / 等价声明 / 多 owner 会签 / 冲突权威源决策
+ * 数据源同 MCP alignment_candidates / alignment_declarations（REST 按用户可见性过滤）
+ * ============================================================= */
+const ALIGN = { cands: [], decls: [], decl: null, sel: null, expanded: null };
+const ALIGN_STATUS_CLS = {
+  pending: 'bg-amber-500/20 text-amber-300',
+  approved: 'bg-emerald-500/20 text-emerald-300',
+  rejected: 'bg-rose-500/20 text-rose-300',
+  withdrawn: 'bg-slate-600/40 text-slate-400',
+};
+const ALIGN_STATUS_CN = { pending: '待会签', approved: '已生效', rejected: '已拒绝', withdrawn: '已撤回' };
+const ALIGN_SIGNAL_CN = { key_overlap: '键重叠', common_origin: '共同来源', semantic: '语义相似', structural: '结构相似' };
+const ALIGN_TYPE_CLS = {
+  primary_key: 'bg-rose-500/20 text-rose-300',
+  required: 'bg-amber-500/20 text-amber-300',
+  value_domain: 'bg-blue-500/20 text-blue-300',
+};
+
+async function alignDetect() {
+  try {
+    const r = await api('/api/alignment/candidates', { method: 'POST' });
+    const d = r.data || {};
+    ALIGN.cands = d.candidates || [];
+    renderAlignCands();
+  } catch (e) { toast('候选检测失败：' + e.message, 'err'); }
+}
+
+function _alignSigBar(v) {
+  const pct = Math.max(0, Math.min(100, Math.round((v || 0) * 100)));
+  const color = (v || 0) >= 0.6 ? 'bg-emerald-500' : (v || 0) >= 0.3 ? 'bg-amber-500' : 'bg-slate-600';
+  return `<div class="h-1.5 w-full rounded bg-slate-800"><div class="h-1.5 rounded ${color}" style="width:${pct}%"></div></div>`;
+}
+
+function _alignPairRows(p) {
+  return Object.keys(ALIGN_SIGNAL_CN).map(k => `
+    <div class="grid grid-cols-[88px_1fr_40px] items-center gap-2">
+      <span class="text-slate-400">${ALIGN_SIGNAL_CN[k]}</span>
+      ${_alignSigBar(p.signals ? p.signals[k] : 0)}
+      <span class="text-right text-slate-300">${Math.round(((p.signals ? p.signals[k] : 0) || 0) * 100)}%</span>
+    </div>`).join('');
+}
+
+function _alignPairEvidence(p) {
+  const ev = p.evidence || {};
+  return Object.keys(ALIGN_SIGNAL_CN).filter(k => ev[k]).map(k => ALIGN_SIGNAL_CN[k] + '：' + esc(ev[k])).join('<br>');
+}
+
+function renderAlignCands() {
+  const el = $('alignCands'); if (!el) return;
+  if (!ALIGN.cands.length) {
+    el.innerHTML = '<div class="text-xs text-slate-500">无候选对齐对（可能无可同时可见的本体对，或信号不足）</div>';
+    return;
+  }
+  el.innerHTML = ALIGN.cands.map(c => {
+    const id = 'alignCand_' + c.ontology_a + '_' + c.ontology_b;
+    const pairs = (c.object_pairs || []).map(p => `
+      <div class="rounded bg-slate-800/40 p-2 mb-1">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-slate-200">${esc(p.object_a_name || p.object_a)} ⇄ ${esc(p.object_b_name || p.object_b)}</span>
+          <span class="text-[10px] text-slate-500">对置信度 ${Math.round((p.confidence || 0) * 100)}%</span>
+        </div>
+        ${_alignPairRows(p)}
+        ${_alignPairEvidence(p) ? `<div class="text-[10px] text-slate-500 mt-1 leading-relaxed">${_alignPairEvidence(p)}</div>` : ''}
+      </div>`).join('');
+    return `
+    <div class="rounded border border-slate-700 mb-2 overflow-hidden">
+      <div class="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-slate-800/40" onclick="alignToggleCand('${id}')">
+        <span class="text-slate-200 font-medium truncate">${esc(c.ontology_a_name || c.ontology_a)} ⇄ ${esc(c.ontology_b_name || c.ontology_b)}</span>
+        <span class="px-1.5 py-0.5 rounded text-[10px] bg-blue-500/20 text-blue-300 shrink-0">置信度 ${Math.round((c.confidence || 0) * 100)}%</span>
+        ${c.repropose ? '<span class="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/20 text-purple-300 shrink-0">重提（证据显著变化）</span>' : ''}
+        <span class="ml-auto flex gap-1 shrink-0">
+          <button class="btn-ghost text-xs" onclick="event.stopPropagation();alignDeclareCandidate('${c.ontology_a}','${c.ontology_b}')">发起等价声明</button>
+          <span class="text-slate-500 text-xs">${ALIGN.expanded === id ? '▾' : '▸'}</span>
+        </span>
+      </div>
+      <div id="${id}_body" class="px-3 pb-2 ${ALIGN.expanded === id ? '' : 'hidden'}">${pairs}</div>
+    </div>`;
+  }).join('');
+}
+
+function alignToggleCand(id) {
+  ALIGN.expanded = ALIGN.expanded === id ? null : id;
+  renderAlignCands();
+}
+
+async function alignDeclareCandidate(ontA, ontB) {
+  const c = ALIGN.cands.find(x => x.ontology_a === ontA && x.ontology_b === ontB);
+  if (!c) return;
+  if (!confirm('以候选对「' + (c.ontology_a_name || ontA) + ' ⇄ ' + (c.ontology_b_name || ontB) +
+    '」发起等价声明？\n\n将进入多 owner 会签流程（一票否决；属性冲突须先指定权威源）。')) return;
+  try {
+    const r = await api('/api/alignment/declarations', {
+      method: 'POST',
+      body: JSON.stringify({
+        ontology_a: ontA, ontology_b: ontB,
+        object_pairs: (c.object_pairs || []).slice(0, 3).map(p => ({ object_a: p.object_a, object_b: p.object_b, attribute_pairs: [] })),
+        candidate: { confidence: c.confidence },
+        repropose: !!c.repropose,
+      }),
+    });
+    toast('声明已创建，进入会签', 'ok');
+    await alignLoadDecls();
+    await alignOpen((r.data || {}).id);
+  } catch (e) { toast('声明失败：' + e.message, 'err'); }
+}
+
+async function alignLoadDecls() {
+  const status = ($('alignStatus') || {}).value || '';
+  try {
+    const r = await api('/api/alignment/declarations' + (status ? '?status=' + encodeURIComponent(status) : ''));
+    ALIGN.decls = (r.data && r.data.items) || [];
+    renderAlignDecls();
+  } catch (e) { toast('声明加载失败：' + e.message, 'err'); }
+}
+
+function _alignCanSign(r, me) {
+  if (!me) return false;
+  if (me.username === r.owner) return true;
+  return me.role === 'admin' && !r.present; // owner 缺位时 admin 可代行
+}
+
+function renderAlignDecls() {
+  const el = $('alignDecls'); if (!el) return;
+  if (!ALIGN.decls.length) { el.innerHTML = '<div class="text-xs text-slate-500">暂无声明</div>'; return; }
+  el.innerHTML = ALIGN.decls.map(d => {
+    const unresolved = (d.conflicts || []).filter(c => !c.resolution).length;
+    const reqs = d.signers_required || [];
+    const signed = (d.signatures || []).filter(s => s.decision === 'approve').length;
+    return `
+    <div class="rounded border px-3 py-2 mb-2 cursor-pointer ${d.id === ALIGN.sel ? 'border-blue-500 bg-blue-500/10' : 'border-slate-700'}" onclick="alignOpen('${d.id}')">
+      <div class="flex items-center gap-2">
+        <span class="text-slate-200 font-medium truncate">${esc(d.ontology_a_name || d.ontology_a)} ⇄ ${esc(d.ontology_b_name || d.ontology_b)}</span>
+        <span class="px-1.5 py-0.5 rounded text-[10px] shrink-0 ${ALIGN_STATUS_CLS[d.status] || ''}">${ALIGN_STATUS_CN[d.status] || d.status}</span>
+      </div>
+      <div class="text-[10px] text-slate-500 mt-1 flex items-center gap-3">
+        <span>会签 ${signed}/${reqs.length}</span>
+        <span class="${unresolved ? 'text-rose-400' : ''}">${unresolved ? '冲突 ' + unresolved + ' 未决策' : '无未决冲突'}</span>
+        <span>提交 ${esc(d.submitted_by || '')}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function alignOpen(declId) {
+  ALIGN.sel = declId;
+  renderAlignDecls();
+  try {
+    const r = await api('/api/alignment/declarations/' + declId);
+    ALIGN.decl = r.data;
+    renderAlignDetail();
+    const card = $('alignDetailCard');
+    if (card) card.style.display = '';
+  } catch (e) { toast('声明详情加载失败：' + e.message, 'err'); }
+}
+
+function renderAlignDetail() {
+  const d = ALIGN.decl;
+  const el = $('alignDetail');
+  if (!d || !el) return;
+  const me = _meUser() || {};
+  const reqs = d.signers_required || [];
+  const unresolved = (d.conflicts || []).filter(c => !c.resolution);
+  let html = `
+  <div class="flex items-center gap-2 mb-2 flex-wrap">
+    <h3 class="font-medium text-sm text-slate-200">${esc(d.ontology_a_name || d.ontology_a)} ⇄ ${esc(d.ontology_b_name || d.ontology_b)}</h3>
+    <span class="px-1.5 py-0.5 rounded text-[10px] ${ALIGN_STATUS_CLS[d.status] || ''}">${ALIGN_STATUS_CN[d.status] || d.status}</span>
+    <span class="text-[10px] text-slate-500">置信度 ${Math.round((d.last_confidence || 0) * 100)}% · 提交人 ${esc(d.submitted_by || '')} · ${esc(d.submitted_at || '')}</span>
+    ${d.status === 'pending' && me.username === d.submitted_by ? `<button class="btn-ghost text-xs ml-auto" onclick="alignWithdraw('${d.id}')">撤回声明</button>` : ''}
+  </div>`;
+  if (d.status === 'rejected' && d.reject_reason) {
+    html += `<div class="text-xs text-rose-300 mb-2">拒绝原因（一票否决）：${esc(d.reject_reason)}</div>`;
+  }
+  html += `<div class="text-xs text-slate-400 mb-1">对象对（${(d.object_pairs || []).length}）</div>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">` + (d.object_pairs || []).map(p => `
+    <div class="rounded bg-slate-800/40 p-2">
+      <div class="flex items-center gap-2">
+        <span class="text-slate-200">${esc(p.object_a || '')} ⇄ ${esc(p.object_b || '')}</span>
+        <span class="text-[10px] text-slate-500">${p.confidence != null ? '对置信度 ' + Math.round((p.confidence || 0) * 100) + '%' : ''}</span>
+      </div>
+      ${(p.attribute_pairs || []).length
+        ? `<div class="text-[10px] text-slate-500 mt-1">${p.attribute_pairs.map(a => esc(a.attr_a || '') + ' ⇄ ' + esc(a.attr_b || '')).join('；')}</div>`
+        : '<div class="text-[10px] text-slate-600 mt-1">无属性级映射（对象级等价声明）</div>'}
+    </div>`).join('') + '</div>';
+
+  html += `<div class="text-xs text-slate-400 mb-1">属性冲突（${(d.conflicts || []).length}）${unresolved.length ? ` <span class="text-rose-400">${unresolved.length} 未决策——须先指定权威源才可批准（不自动合并）</span>` : ''}</div>`;
+  if (!(d.conflicts || []).length) {
+    html += '<div class="text-xs text-slate-500 mb-3">未检测到属性冲突（值域 / 必填 / 主键一致）</div>';
+  } else {
+    html += '<div class="mb-3 space-y-1">' + (d.conflicts || []).map((c, i) => `
+      <div class="flex items-center gap-2 rounded bg-slate-800/40 px-2 py-1.5">
+        <span class="px-1 rounded text-[10px] shrink-0 ${ALIGN_TYPE_CLS[c.type] || 'bg-slate-600/40 text-slate-300'}">${esc(c.type)}</span>
+        <span class="text-slate-300 flex-1">${esc(c.detail || '')} <span class="text-slate-500">（${esc(c.attr_a || '')} ⇄ ${esc(c.attr_b || '')}）</span></span>
+        ${c.resolution
+          ? `<span class="text-emerald-300 text-[10px] shrink-0">已决策：以 ${c.resolution === 'a' ? 'A' : 'B'} 为准（${esc(c.resolved_by || '')}）</span>`
+          : (d.status === 'pending' ? `
+            <button class="btn-ghost text-xs shrink-0" onclick="alignResolve('${d.id}',${i},'a')">以 A 为准</button>
+            <button class="btn-ghost text-xs shrink-0" onclick="alignResolve('${d.id}',${i},'b')">以 B 为准</button>` : '')}
+      </div>`).join('') + '</div>';
+  }
+
+  html += `<div class="text-xs text-slate-400 mb-1">会签（required ${reqs.length} · 全批准生效，一票否决；owner 缺位时租户管理员可代行）</div>
+  <div class="space-y-1">` + reqs.map(r => {
+    const sig = (d.signatures || []).find(s => s.owner === r.owner && (s.ontology_id || '') === (r.ontology_id || ''));
+    let state;
+    if (sig) {
+      state = sig.decision === 'approve'
+        ? `<span class="text-emerald-300 text-[10px]">已批准${sig.role === 'tenant_admin_proxy' ? '（代行缺位 owner，原因：' + esc(sig.proxy_reason || '') + '）' : ''}${sig.comment ? ' · “' + esc(sig.comment) + '”' : ''}</span>`
+        : `<span class="text-rose-300 text-[10px]">已拒绝${sig.comment ? ' · “' + esc(sig.comment) + '”' : ''}</span>`;
+    } else {
+      state = r.present
+        ? (d.status === 'pending' ? '<span class="text-slate-400 text-[10px]">待会签</span>' : '<span class="text-slate-500 text-[10px]">已终态未签</span>')
+        : '<span class="text-amber-300 text-[10px]">owner 账号缺位（租户管理员可代行）</span>';
+    }
+    const canSign = d.status === 'pending' && !sig && _alignCanSign(r, me);
+    return `
+    <div class="flex items-center gap-2 rounded bg-slate-800/40 px-2 py-1.5">
+      <span class="text-slate-200 w-36 truncate shrink-0" title="${esc(r.ontology_id || '')}">${esc(r.owner || '')}</span>
+      <span class="text-[10px] text-slate-500 truncate flex-1">本体 ${esc(r.ontology_id || '')}${(r.objects || []).length ? '（对象：' + (r.objects || []).map(esc).join('、') + '）' : ''}</span>
+      ${state}
+      ${canSign ? `
+        <button class="btn-ghost text-xs shrink-0" onclick="alignSign('${d.id}','approve','${esc(r.owner || '')}')">批准</button>
+        <button class="btn-ghost text-xs shrink-0" onclick="alignSign('${d.id}','reject','${esc(r.owner || '')}')">拒绝</button>` : ''}
+    </div>`;
+  }).join('') + '</div>';
+  el.innerHTML = html;
+}
+
+async function alignSign(declId, decision, signerOwner) {
+  const me = _meUser() || {};
+  let comment = '';
+  let proxyReason = '';
+  const isProxy = signerOwner !== me.username; // 后端按 username 定位 signer；非 owner 即代行路径
+  if (decision === 'reject') {
+    comment = prompt('拒绝原因（留痕，作为一票否决理由）：') || '';
+    if (comment === null) return;
+  } else if (isProxy) {
+    comment = prompt('意见（可选，留痕）：') || '';
+    if (comment === null) return;
+  }
+  if (isProxy) {
+    proxyReason = prompt('owner 账号缺位，租户管理员代行会签——请填写代行原因（必填，留审计）：') || '';
+    if (!proxyReason.trim()) { toast('代行必须填写原因', 'err'); return; }
+  }
+  try {
+    const r = await api('/api/alignment/declarations/' + declId + '/sign', {
+      method: 'POST',
+      body: JSON.stringify({ decision, comment, proxy_reason: proxyReason }),
+    });
+    ALIGN.decl = r.data;
+    const st = (r.data || {}).status;
+    toast(st === 'approved' ? '会签完成，等价声明已生效' : st === 'rejected' ? '已拒绝（一票否决）' : '会签已记录（待其余 owner）', 'ok');
+    renderAlignDetail();
+    await alignLoadDecls();
+  } catch (e) { toast('会签失败：' + e.message, 'err'); }
+}
+
+async function alignResolve(declId, idx, resolution) {
+  if (!confirm('将该属性冲突的权威源指定为「' + (resolution === 'a' ? '本体 A（' + esc((ALIGN.decl || {}).ontology_a_name || '') + '）' : '本体 B（' + esc((ALIGN.decl || {}).ontology_b_name || '') + '）') + '」？\n\n决策后不可自动合并，结果留审计。')) return;
+  try {
+    const r = await api('/api/alignment/declarations/' + declId + '/conflicts/' + idx + '/resolve', {
+      method: 'POST', body: JSON.stringify({ resolution }),
+    });
+    ALIGN.decl = r.data;
+    toast('冲突已决策（权威源：' + (resolution === 'a' ? 'A' : 'B') + '）', 'ok');
+    renderAlignDetail();
+    await alignLoadDecls();
+  } catch (e) { toast('冲突决策失败：' + e.message, 'err'); }
+}
+
+async function alignWithdraw(declId) {
+  if (!confirm('撤回该等价声明？（仅提交人可撤回，撤回后该本体对可重新声明）')) return;
+  try {
+    const r = await api('/api/alignment/declarations/' + declId + '/withdraw', { method: 'POST' });
+    ALIGN.decl = r.data;
+    toast('声明已撤回', 'ok');
+    renderAlignDetail();
+    await alignLoadDecls();
+  } catch (e) { toast('撤回失败：' + e.message, 'err'); }
 }

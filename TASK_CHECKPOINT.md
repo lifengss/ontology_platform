@@ -957,6 +957,35 @@
 ### 40.4 状态
 - M3-E **已交付并 commit** `176c495`（16 文件 +1811/-144；M3-G 退出统一 push）。工作区仅余成本核算业务线未提交项（docs/数据缺口*.md M、cost_baseline_kit/、docs/备份/、docs/成本核算*.md，与平台代码无关、有意保留，不提交）。M3 剩余：F Action编排（V2-14 主体）→G 退出＋push；随后 M4 全片＋终验＋push。
 
+## 48. M4-A② 跨本体对齐（V2-02：候选检测/会签/冲突）✅（2026-11-13）
+
+### 48.1 交付
+1. **`backend/alignment.py`（新建，核心模块）**：
+   - 四类信号 `object_pair_signals`：key_overlap（实例 stable_key 值 Jaccard，`_instance_signal_data` 读 JsonlInstanceStore 带 try/except）/common_origin（来源指纹 Jaccard）/semantic（对象名 0.5＋属性名集 0.5 Jaccard）/structural（属性名 0.7＋关系 0.3 Jaccard）；`SIGNAL_WEIGHTS={key_overlap:.40, common_origin:.25, semantic:.20, structural:.15}`，confidence=权重和（4 位），evidence 逐信号留痕。
+   - `detect_candidates(user, project, ontologies)`：user=None（MCP 通道）跳过用户可见性、访问边界=发布态；REST 通道按 `tenant.schema_visible` 过滤，候选对须对本体双方同时可见；top `CANDIDATE_LIMIT=20`；**被拒对不重提**：`status=rejected` 且 `confidence - last_confidence < REPROPOSE_DELTA(0.20)` 跳过，显著变化才重提且 `repropose=True`；pending/approved 永不重提。
+   - `detect_attribute_conflicts`：value_domain/required/primary_key 三类（不自动合并，权威源决策 a/b）。
+   - 会签 `make_declaration`/`sign_decl`/`withdraw_decl`/`resolve_conflict`：signers_required 按 (owner, ontology_id) 去重＋`present`（username∈auth.list_users()）；全 approve→approved、一票否决 reject→rejected（decided_by/reject_reason）；approve 前置 `check_all_conflicts_resolved`（422 CONFLICT_RESOLUTION_REQUIRED）；**owner 缺位租户管理员代行**（proxy_reason 必填 422 PROXY_REASON_REQUIRED、签名 role=tenant_admin_proxy＋signed_for、审计 alignment_proxy_sign）；shared_with 非 owner 无审批权（403 SIGNER_NOT_ALLOWED）；撤回仅提交人且 pending；冲突决策权限=提交人/会签 owner/admin。
+2. **`backend/api/router_alignment.py`（新建）**：prefix `/api/alignment`；POST /candidates（只读 POST，viewer 可用）/POST /declarations（201；本体不可见 404 不泄露存在性；BAD_PAIR/BAD_BODY 422；对象不存在 404；同对 pending 409 DECLARATION_IN_PROGRESS；审计 alignment_declare）/GET /declarations?status=/GET /declarations/{id}（`is_decl_visible`：任一涉及本体可见）/POST /{id}/sign（_DeclError 422 集={CONFLICT_RESOLUTION_REQUIRED, PROXY_REASON_REQUIRED, BAD_RESOLUTION, CONFLICT_NOT_FOUND, OWNER_ABSENT} 其余 403；拒绝审计 alignment_sign_denied；成功事件 audit alignment_sign_approve/alignment_proxy_sign/alignment_sign_reject/alignment_approved）/POST /{id}/withdraw/POST /{id}/conflicts/{idx}/resolve（审计 alignment_conflict_resolve）。
+3. **`backend/main.py`**：import＋挂载 `alignment_router`。
+4. **`backend/auth/__init__.py`**：`READ_ONLY_POST_RE` 加 `alignment/candidates`（纯计算只读 POST，viewer 可用）。
+5. **MCP 三处同步**：`mcp_server/__init__.py` TOOLS_CONTRACT 加 `alignment_candidates`/`alignment_declarations`（side_effect=False、仅已发布本体）＋`_register_tools` 两工具实现；`mcp_stdio_bridge.py`/`mcp_stdio_bridge_v2.py` 各加两包装（`_client.call`）。
+6. **前端**：`index.html` 新增「跨本体对齐」tab＋面板（候选列表/声明列表/详情/状态过滤）；`app.js` switchTab 挂接＋scope 刷新分支＋ALIGN 面板模块（候选检测/发起声明 top3 对象对/冲突 a-b 决策/会签进度/签核与代行/撤回）。
+7. **测试 `backend/tests/test_v2_02_alignment.py`（新建，9 用例）**：四信号单测（含 Jaccard 精确值）/候选 dev 态＋声明参数校验/鉴权启用多用户（bootstrap admin＋5 角色）/可见性矩阵（private/department 升降级×三用户）/冲突会签流（冲突未决 422→决策→approve→一票否决→终态 403＋4 审计动作断言）/同 owner 即签即生效/owner 缺位 admin 代行（401 旧令牌失效＋proxy_reason 必填＋SIGNER_NOT_ALLOWED＋审计）/被拒重提规则/MCP 暴露（TOOLS_CONTRACT＋双桥源码断言）。
+
+### 48.2 验证
+- 新测试 **9/9 全绿**；L5 全量回归 **112/112**（103 既有＋9 新增）全绿无回归。
+- MCP 双桥 `--check` OK（6 工具含 alignment 两工具）。
+- 前端 `node --check`＋read_lints 干净（浏览器冒烟随 M4-A 后续步统一做）。
+
+### 48.3 验收中修复缺陷
+1. **`signers_pending` 代行死锁**（本切片核心缺陷）：匹配键用 (owner, ontology_id)，而代行签名记 `owner=admin`/`signed_for=缺位 owner`→admin 代行批准后缺位 owner 的会签项永远 pending、声明无法生效→done 集改 `signed_for or owner`。
+2. 测试侧两处前置口径修正：声明要求提交人对本体双方同时可见（不可见 404 不泄露存在性）→test_05/07 先升 department 再声明；`_ctx` 键名不一致（`admin` vs `tok_admin`）。
+
+### 48.4 边界与下一步
+- git：本切片 commit 本地不 push（M4-I 终验统一 push）。
+- 文档：API 文档待补 §31（/api/alignment 端点＋alignment MCP 两工具）；项目 wiki 测试用例登记 M4-A② 行已补。
+- 下一步：**M4-A③**（V2-02 融合查询 TP-02-01/02/03/05）→ M4-A④（TP-04-06 批量回源＋成本提示；M1-B SKIP 的 TP-04-06/EP-04-03 按 D2 随 M4-A 补齐）→ M4-B…→ M4-I 终验统一 push。
+
 ## 41. M3-F 交付——V2-14 复杂 Action 编排：前端 no-code 三面板＋浏览器冒烟全通（2026-11-12）
 
 ### 41.1 背景

@@ -162,6 +162,19 @@ def action_invoke(action_id: str, confirmation_token: str = "") -> str:
     return _client.call("action_invoke", {"action_id": action_id, "confirmation_token": confirmation_token})
 
 
+@mcp.tool()
+def alignment_candidates(ontology_a: str = "", ontology_b: str = "") -> str:
+    """跨本体对齐候选检测（只读）：四类信号＋置信度＋证据。
+    ontology_a/ontology_b（名称或 32 位 ID）同时给出时只算该对；留空则扫描本项目已发布本体对。"""
+    return _client.call("alignment_candidates", {"ontology_a": ontology_a, "ontology_b": ontology_b})
+
+
+@mcp.tool()
+def alignment_declarations(decl_id: str = "", status: str = "") -> str:
+    """跨本体对齐声明查询（只读）：声明/属性冲突/会签进度。decl_id 查详情；status 过滤状态。"""
+    return _client.call("alignment_declarations", {"decl_id": decl_id, "status": status})
+
+
 if __name__ == "__main__":
     if "--check" in sys.argv:
         import asyncio

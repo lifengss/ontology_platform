@@ -266,6 +266,7 @@
     <div class="tab" data-tab="dictionary" onclick="switchTab('dictionary')">数据字典</div>
     <div class="tab" data-tab="capability" onclick="switchTab('capability')">能力</div>
     <div class="tab" data-tab="quality" onclick="switchTab('quality')">数据健康度</div>
+    <div class="tab" data-tab="alignment" onclick="switchTab('alignment')">跨本体对齐</div>
     <div class="tab" data-tab="mcp" onclick="switchTab('mcp')">MCP</div>
     <div class="tab" data-tab="logs" onclick="switchTab('logs')">日志</div>
     <div class="tab" data-tab="settings" onclick="switchTab('settings')">设置</div>
@@ -925,6 +926,47 @@
         <div class="card p-4">
           <h3 class="font-medium text-sm text-slate-200 mb-2">质量趋势（快照序列；基线=首次全量入库）</h3>
           <div id="qualityTrend"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="alignment" class="tab-content hidden grid grid-cols-12 gap-4">
+      <div class="col-span-12 flex items-start justify-between gap-2 flex-wrap">
+        <div>
+          <h3 class="font-medium text-sm text-slate-200 mb-1">跨本体对齐（V2-02：候选检测 / 等价声明 / 多 owner 会签 / 冲突权威源决策）</h3>
+          <div class="text-xs text-slate-500 leading-relaxed">
+            候选检测基于 key overlap / common origin / semantic / structural 四类信号＋置信度（仅取双方对本体可见的对；被拒对证据显著变化才重提）。
+            等价声明进入多 owner 会签：一票否决；owner 缺位时租户管理员可代行（须给原因并留审计）；
+            属性冲突（值域 / 必填 / 主键）必须先显式指定权威源（a/b）才允许批准，不自动合并。
+          </div>
+        </div>
+        <div class="flex gap-2 shrink-0">
+          <button class="btn" type="button" onclick="alignDetect()">候选检测</button>
+          <select id="alignStatus" class="w-28" onchange="alignLoadDecls()">
+            <option value="">全部状态</option>
+            <option value="pending">待会签</option>
+            <option value="approved">已生效</option>
+            <option value="rejected">已拒绝</option>
+            <option value="withdrawn">已撤回</option>
+          </select>
+          <button class="btn secondary" type="button" onclick="alignLoadDecls()">刷新声明</button>
+        </div>
+      </div>
+      <div class="col-span-12 lg:col-span-7">
+        <div class="card p-4">
+          <h3 class="font-medium text-sm text-slate-200 mb-2">候选对齐对（展开查看对象级信号与证据）</h3>
+          <div id="alignCands" class="text-xs text-slate-500">点击「候选检测」扫描</div>
+        </div>
+      </div>
+      <div class="col-span-12 lg:col-span-5">
+        <div class="card p-4">
+          <h3 class="font-medium text-sm text-slate-200 mb-2">等价声明（会签进度 / 冲突）</h3>
+          <div id="alignDecls" class="text-xs text-slate-500">暂无数据</div>
+        </div>
+      </div>
+      <div class="col-span-12">
+        <div class="card p-4" id="alignDetailCard" style="display:none">
+          <div id="alignDetail"></div>
         </div>
       </div>
     </section>

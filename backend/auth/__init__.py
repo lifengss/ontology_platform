@@ -75,6 +75,7 @@ READ_ONLY_POST_RE = re.compile(
     r"|inference/impact"
     r"|ingest/preview"
     r"|actions/[^/]+/execute"
+    r"|alignment/candidates"
     r"|mcp/connections/[^/]+/(?:test|read)"
     r"|mcp/server/tools"
     r"|mcp/server/status"
