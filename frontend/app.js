@@ -6847,7 +6847,7 @@ function orchRenderCanvas() {
       const active = ORCH.pendingPort && ORCH.pendingPort.node === n.id && (ORCH.pendingPort.port || 'default') === p;
       return `<div class="orch-port absolute -right-1.5 w-3 h-3 rounded-full cursor-pointer border border-slate-300 ${active ? 'bg-emerald-400' : 'bg-slate-400'} hover:bg-emerald-300"
         style="top:${22 + i * 22 - 6}px" title="输出端口 ${esc(p)}（点击→点目标输入端口连线）"
-        onclick="orchPortClick(event,'${n.id}',${JSON.stringify(p)})"></div>`;
+        onclick="orchPortClick(event,${JSON.stringify(n.id).replace(/"/g, '&quot;')},${JSON.stringify(p).replace(/"/g, '&quot;')})"></div>`;
     }).join('');
     let extra = '';
     if (n.kind === 'action') {
