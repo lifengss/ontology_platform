@@ -899,4 +899,4 @@
 - 本 checkpoint ＋ 用户级 wiki（raw 快照 `2026-11-12-M3-C-数据健康度.md`/进展与测试/实体页/log/对话历史）同步。
 
 ### 38.4 状态
-- M3-C **已交付**（commit 见 git log，本轮执行）；不 push（用户指令：M3-G 退出统一 push）。M3 剩余：D 流式CDC（V2-12）→E 回写风险（V2-13）→F Action编排（V2-14 主体）→G 退出＋push；随后 M4 全片＋终验＋push。
+- M3-C **已交付并 commit** `b8119ea`（14 文件 +1640/-1；.gitignore 增 `scripts/_*.json` 探针产物忽略）；不 push（用户指令：M3-G 退出统一 push）。工作区仅余成本核算业务线未提交项（docs/数据缺口*.md M、cost_baseline_kit/、docs/备份/、docs/成本核算*.md，与平台代码无关、有意保留）。M3 剩余：D 流式CDC（V2-12）→E 回写风险（V2-13）→F Action编排（V2-14 主体）→G 退出＋push；随后 M4 全片＋终验＋push。
