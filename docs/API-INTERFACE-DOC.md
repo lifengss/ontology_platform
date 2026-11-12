@@ -1119,3 +1119,41 @@
 - 前端（`frontend/app.js`）：实例详情「血缘」面板渲染六要素表＋字段级血缘表＋转换规则块＋上游链（点击上游实例跳转追溯）；REST 失败回退仅展示 `_source` 原始信息。
 - 候选 `mapping` 持久化（V2-08 配套）：`router_ingest` 全部候选创建点（xlsx/csv/智能 xlsx/智能 csv/preview）落 `mapping={"field_map": {...}, "field_map_source": "file"|"dictionary"}`，供源字段要素反查。
 - 边界（如实标注）：血缘为**读时装配**（不维护独立血缘表），依赖候选/能力记录留存——候选被清理后 `batch` 与源字段要素缺失（`source` 仍由 `_source` 回退给出）；`term` 仅标注与候选映射来源一致的字典路径，不做猜测匹配。
+
+## 27. 数据健康度与质量趋势（V2-21 / M3-C，2026-11-12）
+
+**四维**：完整性（必填填充/键填充/关系解析）/ 唯一性（键重复/缺键）/ 合规性（枚举命中/SHACL，与门禁同引擎同形状）/ 新鲜度（按来源连接 `fetched_at` vs 阈值）。三通道（REST / MCP `quality_health` / 前端「数据健康度」tab）共用 `data_quality.evaluate_ontology()` 同一引擎同口径（TP-21-05 断言 summary 相等）。**护栏**：指标为观测性，不阻断审批（SHACL 422 门禁职责不变）；**指标恒伴随规模**（`scale`），趋势点附 `caliber_changed`/`scale_changed`/`is_baseline` 标注，防"口径变化误报为质量劣化"与"删数据假改善"。
+
+### 27.1 执行通道（`channels` / `objects[*].value_channel`）
+
+| 通道 | 适用 | 说明 |
+|---|---|---|
+| `local_snapshot` | 键/关系/新鲜度指标 | 本地关系快照执行（唯一性/关系解析率/时效性），不依赖平台侧全量内容值 |
+| `local_full` | 上传型（文件）非键值指标 | 上传值本地全量执行 |
+| `governance_sampled` | 源连接型非键值指标 | 按 `stable_key` 以**治理身份**（连接自带凭据）回读源端**最新值**抽样比对；`sample={sample_count, errors, basis}` |
+| `source_required` | 采样关闭（`ONTOLOGY_DATA_QUALITY_SOURCE_ENABLED=false`） | 显式标记"需源端执行"，不静默、不臆测 |
+
+来源连接型判定：`_source.connection_id` ∈ 真实 MCP 连接集合（`mcp_connections`）——`ingestion.apply_field_map` 对上传/MCP 两通道恒写 `_source.kind="field_map"`，**不可按 kind 判定**（上传实例不入陈旧口径）。
+
+### 27.2 端点
+
+| 方法 / 路径 | 说明 | 响应 / 错误 |
+|---|---|---|
+| `GET /api/quality/ontologies/{id}/health` | 当前健康度：最新快照；无快照则即时计算（**不落快照**，`is_snapshot=false`） | `success(data)`；本体不存在 → 404 `NOT_FOUND`（EP-21-05） |
+| `POST /api/quality/ontologies/{id}/evaluate` | 即时评估并落快照（趋势新增一点）；审计 `quality_evaluated` | `success(snap)`；本体不存在 → 404 `NOT_FOUND` |
+| `GET /api/quality/ontologies/{id}/snapshots?limit=50` | 质量趋势线（旧→新） | `success({items, total, baseline_hint?})`；`items[*]` 附 `is_baseline`/`caliber_changed`/`scale_changed`；空时带 `baseline_hint`（EP-21-02） |
+| `GET /api/ingest/candidates/{id}/health` | 批次健康卡（入库时点重算） | `success(data)`；计算失败 → 200 + `data.error` 显式原因，**不 500、不阻断确认主流程**（EP-21-01） |
+| MCP 工具 `quality_health(ontology_id, limit=5)` | 与 REST 同口径：`{health, trend}` | JSON 字符串；本体须已发布（`_require_published`，否则 `NOT_PUBLISHED`/`NOT_FOUND` 错误结构） |
+
+### 27.3 快照结构（`data`）
+
+- 顶层：`{id, computed_at, ontology_id, project_id, caliber:{constraint_hash, dictionary_hash}, scale:{instance_count, by_object}, summary:{completeness, uniqueness, conformity, timeliness}, channels, objects:{<obj_id>: {…}}}`。
+- `objects[*]`：`{total, value_channel, sample, completeness:{key_fill_rate, required_fill_rate, required_detail:{attr:{total,filled,rate}}, relation_resolve_rate, relation_detail:{rel:{total,resolved,rate}}}, uniqueness:{stable_key, dup_rate, dup_key_count, missing_key_count}, conformity:{enum_hit_rate, enum_detail:{attr:{count,out_of_enum}}, shacl_violation_rate, shacl_violation_count, shacl_by_attribute:{attr:{count}}, shacl_available}}`。
+- `summary.timeliness`：`{stale_ratio, stale_instance_count, stale_threshold_days, connections:[{connection_id, instance_count, stale, age_days}]}`（仅源连接型实例入陈旧口径）。
+- 批次健康卡（候选 `health`，`compute_batch_health`）：`{batch_size, key_missing_count, key_dup_within_batch, key_dup_groups:{key:n}, key_dup_with_existing:[key], enum_violation_total, enum_violations:{attr:{count,values}}, required_fill_rate, required_detail, freshness:{basis:"now"|"fetched_at", age_days}}`；候选创建即附带（确认卡展示）。
+
+### 27.4 验收
+
+- `scripts/verify_m3c_data_health.py` **PASS=56/FAIL=0**（临时 DATA_DIR＋进程内 ControllableMockSystem 可控源（read/write 计数）＋TestClient＋进程内 MCPServer 直调工具）：TP-21-01（脏批次健康卡：缺键/批内重复/存量重复/枚举出域/必填填充率/新鲜度 basis=now＋GET 重算一致）、TP-21-02（基线 is_baseline＋趋势序列＋audit `quality_evaluated` 可归因）、TP-21-03（草稿本体加 enum 约束→constraint_hash 变＋`caliber_changed`＋违规率升不误导）、TP-21-04（规模 7→8 `scale_changed`，未改口径 `caliber_changed=false`）、TP-21-05（MCP 对象级＋属性级钻取数据与 REST summary 相等）、TP-21-06（脏批次审批仍被 SHACL 门禁拦截 imported=0，健康卡仍可读，观测不阻断）、TP-21-07（四执行通道：local_snapshot/local_full/governance_sampled（真实读源 read_calls 增长＋源端漂移 P-101→archived 反映到枚举/SHACL）/source_required（采样关闭显式标记）＋新鲜度陈旧判定 fetched_at 40 天）、EP-21-01（候选损坏→主流程 200＋健康卡 200 带 error）、EP-21-02（无快照即时计算 is_snapshot=false＋趋势空 baseline_hint＋不落快照）、EP-21-05（REST 404 NOT_FOUND / MCP 错误结构）。TP-21-08（扩展维度，P2）依赖 V2-01/02，挂 M4-A。
+- L5 回归 `backend/tests` **93/93** 全绿。
+- 前端（`frontend/app.js` + `index.html`）：「数据健康度」tab（四维卡片/对象表/属性级钻取/新鲜度/趋势表）＋人工确认卡批次健康卡（`renderBatchHealthCard`）。

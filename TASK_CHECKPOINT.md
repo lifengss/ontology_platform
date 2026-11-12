@@ -874,3 +874,29 @@
 
 ### 37.4 状态
 - M3-B **已交付并 commit** `d0bd238`（10 文件 +965/-11）；不 push（用户指令：M3-G 退出统一 push）。M3 剩余：C 数据健康度（V2-21 核心四维）→D 流式CDC（V2-12）→E 回写风险（V2-13）→F Action编排（V2-14 主体）→G 退出＋push；随后 M4 全片＋终验＋push。
+
+## 38. M3-C 交付——V2-21 数据健康度（核心四维）（2026-11-12）
+
+### 38.1 指令与交付
+- 用户指令：「按之前的方案处理，进度写入wiki，按需披露加载。继续未完成的任务」（同一全权授权延续：按里程碑顺序、不询问、进度存 wiki、M3-G 统一 push）。
+- **后端**：
+  - `backend/data_quality/__init__.py`（新，核心模块）：`evaluate_ontology(project_id, ontology_id, actor, save)`——四维评估引擎（完整性：必填填充率/键填充率/关系解析率；唯一性：键重复/缺键；合规性：枚举命中＋SHACL；新鲜度：按来源连接 fetched_at vs 阈值）；**SHACL 与门禁同引擎同形状**（jena_adapter.client.shacl_validate 逐对象跑，形状图=全本体，回填 conformity）；`latest_snapshot`/`list_snapshots`（趋势旧→新，首条 `is_baseline`、`caliber_changed`（caliber=constraint_hash/dictionary_hash 变化）、`scale_changed`（instance_count 变化）标注）；`compute_batch_health`（批次健康卡：键重复批内+对存量/缺键/枚举出域分布/必填填充率/新鲜度 basis=now|fetched_at）。
+  - `backend/api/router_quality.py`（新）：`GET /api/quality/ontologies/{id}/health`（最新快照；无快照即时计算不落快照 is_snapshot=false）、`POST .../evaluate`（落快照＋审计 quality_evaluated）、`GET .../snapshots?limit=50`（趋势；空时 baseline_hint）；404 NOT_FOUND；`project_tenant_guard`；main.py 注册。
+  - `backend/api/router_ingest.py`：`_save_candidate` 候选创建即附 `rec["health"]=compute_batch_health(...)`（try/except 不阻断）；`GET /api/ingest/candidates/{id}/health` 即时重算＋护栏（计算失败→200+显式 error，不 500 不阻断确认主流程，EP-21-01）。
+  - `backend/mcp_server/__init__.py`：MCP 工具 `quality_health(ontology_id, limit=5)`——`{health, trend}`，与 REST 同引擎（`_require_published` 守卫）。
+- **前端**（`frontend/index.html`＋`frontend/app.js`）：「数据健康度」tab（四维卡片/对象表/属性级钻取/新鲜度/趋势表）＋人工确认卡批次健康卡 `renderBatchHealthCard(c)`（插入 startReviewCandidate）。
+- **设计口径**：①**执行通道四分类**——local_snapshot（键/关系/新鲜度，本地关系快照）、local_full（上传值全量）、governance_sampled（源连接型按 stable_key 以治理身份=连接自带凭据回读源端**最新值**抽样，sample={sample_count,errors,basis}）、source_required（采样关闭 `ONTOLOGY_DATA_QUALITY_SOURCE_ENABLED=false` 显式标记，不静默不臆测）。②**来源连接型判定=`_source.connection_id` ∈ 真实 MCP 连接集合**（`_valid_connection_ids` 读 mcp_connections）——`apply_field_map` 对上传/MCP 恒写 `_source.kind="field_map"`，不可按 kind 判定；上传实例不入陈旧口径。③指标**恒伴随 scale**；趋势点标注防「口径变化误报质量劣化」与「删数据假改善」。④护栏：观测不阻断（SHACL 422 门禁职责不变）。
+
+### 38.2 验收
+- `scripts/verify_m3c_data_health.py` **PASS=56/FAIL=0**（临时 DATA_DIR `_m3c_verify`＋进程内 `ControllableMockSystem` 可控源 partdb（P-101/P-102，read/write 计数＋可受控漂移）＋TestClient with 模式＋进程内 MCPServer `_register_tools` 直调 `quality_health`；主本体 part+order（many_to_one 关系）＋草稿本体 B（口径变化）＋空本体 C（EP-21-02））：TP-21-01（脏批次健康卡：缺键=1/批内重复 P-003×2/存量重复 [P-003]/枚举出域 retired/必填填充 0.875/basis=now＋GET 重算一致）、TP-21-02（基线 is_baseline＋趋势＋audit quality_evaluated≥5）、TP-21-03（草稿本体加 enum→constraint_hash 变＋caliber_changed＋违规 0→>0）、TP-21-04（规模 7→8 scale_changed；caliber_changed=false）、TP-21-05（MCP 对象级＋属性级钻取（required_detail/enum_detail/shacl_by_attribute）与 REST summary 相等）、TP-21-06（脏批次审批仍被 SHACL 门禁拦截 imported=0+violations，健康卡仍可读）、TP-21-07（四执行通道＋源端漂移 P-101→archived 反映到枚举/SHACL 按属性细分＋read_calls 真实增长＋采样关闭 source_required＋fetched_at 回拨 40 天>阈值 30→stale_ratio=1.0）、EP-21-01（候选损坏→主流程 200＋健康卡 200 带 error）、EP-21-02（无快照即时计算＋趋势空 baseline_hint＋不落快照）、EP-21-05（REST 404 NOT_FOUND／MCP 错误结构）。TP-21-08（扩展维度）P2 挂 M4-A。
+- L5 回归 `python -m pytest tests/ -q` **93/93** 全绿无回归（105.80s）。
+- **关键坑**：①`ingestion.apply_field_map` **恒写 `_source.kind="field_map"`**（上传 connection_id=文件名、MCP=connection_id）——来源连接型判定必须按 connection_id ∈ 真实 MCP 连接集合，不可按 kind（首轮 7 项 FAIL 根因：MCP 实例未走采样/STALE n=0/上传混入连接列表）。②mock write 必须 POST 路径 `/write`（`tool` 字段与 path 双判；发 `/read` 会被当 read 过滤返回 records:[]）。③项目/本体/连接创建 POST 返回 **201**（断言须 `in (200,201)`）。④`_require_published` 对不存在本体抛 **NOT_PUBLISHED**（非 NOT_FOUND）。⑤`compute_batch_health` 在 `apply_field_map` 后计算——批内不先做键去重，重复键如实计入健康卡（观测口径）。⑥已发布本体禁直 PATCH（`_ensure_editable`）→ 口径变化测试须用草稿本体 B。
+
+### 38.3 文档/wiki
+- `docs/API-INTERFACE-DOC.md`：新增 **§27**（四维口径/四执行通道表/来源连接型判定/端点契约/快照结构/批次健康卡字段/验收/边界）。
+- `docs/V2-开发里程碑.md`：M3-C ✅＋交付结果。
+- 项目 wiki `source-V2-测试用例.md`「测试脚本链接登记」登记 M3-C 行（56/56 通过＋L5 93/93＋关键坑）。
+- 本 checkpoint ＋ 用户级 wiki（raw 快照 `2026-11-12-M3-C-数据健康度.md`/进展与测试/实体页/log/对话历史）同步。
+
+### 38.4 状态
+- M3-C **已交付**（commit 见 git log，本轮执行）；不 push（用户指令：M3-G 退出统一 push）。M3 剩余：D 流式CDC（V2-12）→E 回写风险（V2-13）→F Action编排（V2-14 主体）→G 退出＋push；随后 M4 全片＋终验＋push。

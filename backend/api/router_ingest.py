@@ -370,6 +370,14 @@ def _save_candidate(
         rec["mapping"] = {"field_map": field_map, "field_map_source": "file"}
     if created_by:
         rec["created_by"] = created_by  # V2-06：上传者归属（上传型内容默认仅本人可读）
+    # V2-21（M3-C）：批次健康卡——入库时点观测指标（键重复/缺键/枚举违规分布/必填填充率/新鲜度），
+    # 供人工确认卡展示；观测性，不阻断审批
+    try:
+        from data_quality import compute_batch_health
+        rec["health"] = compute_batch_health(project_id, rec)
+    except Exception as e:  # 健康卡失败不阻断候选创建
+        rec["health"] = {"error": f"批次健康卡计算失败: {e}"}
+        logger.warning("批次健康卡计算失败 candidate=%s: %s", rec["id"], e)
     _store_for(project_id).insert(rec)
     return rec
 
@@ -678,6 +686,21 @@ def get_candidate(candidate_id: str, project_id: str = Depends(project_id_param)
     if not rec:
         raise ApiError("NOT_FOUND", "候选不存在", http_status=404)
     return success(rec)
+
+
+@router.get("/candidates/{candidate_id}/health")
+def get_candidate_health(candidate_id: str, project_id: str = Depends(project_id_param)):
+    """V2-21（M3-C）：批次健康卡即时重算（确认卡刷新/存量候选补算）。"""
+    rec = _store_for(project_id).get(candidate_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "候选不存在", http_status=404)
+    from data_quality import compute_batch_health
+    try:
+        # EP-21-01：健康卡计算失败返回显式 error（200），不 500、不阻断人工确认主流程
+        return success(compute_batch_health(project_id, rec))
+    except Exception as e:
+        logger.warning("批次健康卡计算失败 candidate=%s: %s", candidate_id, e)
+        return success({"error": f"批次健康卡计算失败: {e}"})
 
 
 def _stable_key_for(ontology: dict, object_type: str) -> str | None:

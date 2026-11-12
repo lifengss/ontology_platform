@@ -912,6 +912,13 @@ function switchTab(name) {
   if (name === 'action') { loadActions(); }
   if (name === 'dictionary') { loadDictionary(); }
   if (name === 'capability') { loadCapabilities(); }
+  if (name === 'quality') {
+    loadOntologies().then(() => {
+      renderQualityOntologySelect();
+      loadQuality();
+      loadQualityTrend();
+    });
+  }
   if (name === 'mcp') { loadMcpOntologies(1); loadMcpTools(); loadMcpToken(); }
   if (name === 'logs') { loadServerLogs(); }
   if (name === 'settings') { loadLLMSettings(); }
@@ -3038,6 +3045,30 @@ function renderRelInput(rel, value, idx) {
   return '<div class="mb-2">' + label + '<input id="' + inputId + '" type="text" class="w-full" value="' + esc(val) + '" placeholder="目标对象的业务主键值" /></div>';
 }
 
+// V2-21 / M3-C：批次健康卡（入库时点观测指标，人工确认卡展示；不阻断审批）
+function renderBatchHealthCard(c) {
+  const h = c.health;
+  if (!h || h.error) {
+    return '<div class="text-xs text-slate-600 mb-2">批次健康卡：' + esc((h && h.error) || '未计算（存量候选可经 GET /candidates/{id}/health 补算）') + '</div>';
+  }
+  const items = ['批次 ' + h.batch_size + (h.stable_key ? '（键 ' + esc(h.stable_key) + '）' : '（未定义主键）')];
+  if (h.key_missing_count) items.push('<span class="text-amber-400">缺键 ' + h.key_missing_count + '</span>');
+  if (h.key_dup_within_batch) items.push('<span class="text-rose-400">批内重复键 ' + h.key_dup_within_batch + '</span>'
+    + (h.key_dup_groups && Object.keys(h.key_dup_groups).length ? '（' + esc(Object.keys(h.key_dup_groups).join(', ')) + '）' : ''));
+  if (h.key_dup_with_existing && h.key_dup_with_existing.length) items.push('<span class="text-amber-400">与存量重复 ' + h.key_dup_with_existing.length + ' 键</span>');
+  if (h.enum_violation_total) items.push('<span class="text-rose-400">枚举出域 ' + h.enum_violation_total + ' 处</span>');
+  if (h.required_fill_rate !== null && h.required_fill_rate < 1) items.push('<span class="text-amber-400">必填填充率 ' + Math.round(h.required_fill_rate * 100) + '%</span>');
+  const fr = h.freshness || {};
+  items.push('新鲜度：' + (fr.basis === 'fetched_at' ? (fr.age_days === null ? '未知' : fr.age_days + ' 天') : '刚上传'));
+  const bad = h.key_missing_count || h.key_dup_within_batch || (h.key_dup_with_existing && h.key_dup_with_existing.length) || h.enum_violation_total;
+  return '<div class="mb-2 p-2 rounded border ' + (bad ? 'border-amber-500/40 bg-amber-500/5' : 'border-emerald-500/30') + ' text-xs space-y-0.5">'
+    + '<div class="text-slate-400 font-medium">批次健康卡（V2-21 观测指标，不阻断审批）</div>'
+    + '<div class="text-slate-500">' + items.join(' · ') + '</div>'
+    + (h.enum_violations && Object.keys(h.enum_violations).length
+      ? '<div class="text-rose-400/80">出域明细：' + Object.entries(h.enum_violations).map(([aid, d]) => esc(d.name || aid) + '=' + esc((d.values || []).join('/'))).join('、') + '</div>' : '')
+    + '</div>';
+}
+
 function startReviewCandidate(cid) {
   const c = state.candidates.find(x => x.id === cid);
   if (!c) return toast('候选未找到', 'err');
@@ -3057,7 +3088,7 @@ function startReviewCandidate(cid) {
   }).join('');
   const saveBtn = readOnly ? '' : '<button class="btn" onclick="saveReviewCandidate()">保存修改</button>';
   const readOnlyNote = readOnly ? '<div class="text-xs text-slate-500 mb-2">当前状态为「' + (c.status === 'imported' ? '已入库' : '已驳回') + '」，只读查看。</div>' : '';
-  const content = readOnlyNote + '<div class="space-y-2 max-h-[420px] overflow-auto mb-3">' + rows + '</div>' +
+  const content = readOnlyNote + renderBatchHealthCard(c) + '<div class="space-y-2 max-h-[420px] overflow-auto mb-3">' + rows + '</div>' +
     '<div class="flex gap-2">' + saveBtn + '<button class="btn secondary" onclick="closeModal()">关闭</button></div>';
   showModal(readOnly ? '查看候选实例' : '审核候选实例', content, { readOnly });
 }
@@ -3373,6 +3404,214 @@ async function loadInstanceLineage(inst) {
   } catch (e) {
     // 血缘 API 不可用（如旧版本后端）回退本地 _source 静态展示，来源信息不静默丢失
     panel.innerHTML = renderSourceLineageFallback(inst);
+  }
+}
+
+// ---- V2-21 / M3-C 数据健康度（四维 + 钻取 + 趋势；数据源同 MCP quality_health）----
+let _qualitySnap = null;
+
+function renderQualityOntologySelect() {
+  const sel = $('qualityOntology');
+  if (!sel) return;
+  const active = (state.ontologies || []).filter(o => (o.status || 'active') === 'active');
+  const prev = sel.value;
+  sel.innerHTML = active.map(o => '<option value="' + o.id + '">' + esc(o.name) + '</option>').join('');
+  if (prev && active.find(o => o.id === prev)) sel.value = prev;
+}
+
+function _qRate(v) {
+  if (v === null || v === undefined) return '-';
+  return (Math.round(v * 10000) / 100) + '%';
+}
+
+function _qCard(title, lines, tone) {
+  const border = tone === 'bad' ? 'border-rose-500/40' : (tone === 'warn' ? 'border-amber-500/40' : 'border-slate-700/50');
+  return '<div class="card p-3 border ' + border + '">'
+    + '<div class="text-xs text-slate-400 mb-1">' + title + '</div>'
+    + '<div class="text-sm text-slate-200 space-y-0.5">' + lines.join('') + '</div></div>';
+}
+
+function _qLine(k, v) { return '<div class="flex justify-between gap-2"><span class="text-slate-500">' + k + '</span><span class="font-mono">' + v + '</span></div>'; }
+
+async function loadQuality() {
+  const sel = $('qualityOntology');
+  if (!sel || !sel.value) return;
+  const box = $('qualitySummary');
+  box.innerHTML = '<div class="text-xs text-slate-500 col-span-12">评估中…（源连接型实例会按治理身份采样读源）</div>';
+  try {
+    const j = await api('/api/quality/ontologies/' + encodeURIComponent(sel.value) + '/health');
+    _qualitySnap = j.data;
+    renderQualityHealth(j.data);
+  } catch (e) {
+    _qualitySnap = null;
+    box.innerHTML = '<div class="text-xs text-rose-400 col-span-12">评估失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderQualityHealth(d) {
+  const s = d.summary || {};
+  const scale = d.scale || {};
+  const comp = s.completeness || {};
+  const uniq = s.uniqueness || {};
+  const conf = s.conformity || {};
+  const time = s.timeliness || {};
+  const staleRatio = time.stale_ratio;
+  const cards = [];
+  cards.push(_qCard('完整性', [
+    _qLine('键填充率', _qRate(comp.key_fill_rate)),
+    _qLine('必填填充率', _qRate(comp.required_fill_rate)),
+    _qLine('关系解析率', _qRate(comp.relation_resolve_rate)),
+    _qLine('规模', (scale.instance_count ?? 0) + ' 实例'),
+  ], (comp.required_fill_rate !== null && comp.required_fill_rate < 1) ? 'warn' : 'ok'));
+  cards.push(_qCard('唯一性', [
+    _qLine('重复率', _qRate(uniq.dup_rate)),
+    _qLine('缺键率', _qRate(uniq.missing_key_rate)),
+    _qLine('通道', 'local_snapshot'),
+  ], (uniq.dup_rate > 0) ? 'bad' : 'ok'));
+  cards.push(_qCard('合规性', [
+    _qLine('SHACL 违规率', conf.shacl_violation_rate === null ? '不可用' : _qRate(conf.shacl_violation_rate)),
+    _qLine('违规数', conf.shacl_violation_count ?? '-'),
+    _qLine('枚举命中率', _qRate(conf.enum_hit_rate)),
+  ], (conf.shacl_violation_rate > 0) ? 'bad' : 'ok'));
+  cards.push(_qCard('新鲜度', [
+    _qLine('陈旧占比', staleRatio === null ? '-' : _qRate(staleRatio)),
+    _qLine('陈旧实例', time.stale_instance_count ?? 0),
+    _qLine('连接数', (time.connections || []).length),
+  ], (staleRatio !== null && staleRatio > 0) ? 'warn' : 'ok'));
+  $('qualitySummary').innerHTML = cards.join('');
+  renderQualityObjects(d);
+  renderQualityTimeliness(d);
+  $('qualityDrill').innerHTML = '<span class="text-slate-500">点击对象行钻取属性级</span>';
+  const cal = d.caliber || {};
+  const note = $('qualityCaliberNote');
+  if (note) note.innerHTML = '<div class="text-[11px] text-slate-500 mt-1">口径：constraint=' + esc(cal.constraint_hash || '-')
+    + ' · dictionary=' + esc(cal.dictionary_hash || '-') + ' · ' + esc(cal.module_version || '-')
+    + (d.is_snapshot === false ? ' · <span class="text-amber-400">即时计算（未记快照）</span>' : '') + '</div>';
+}
+
+function renderQualityObjects(d) {
+  const objs = d.objects || {};
+  const rows = Object.values(objs).map(m => {
+    const u = m.uniqueness || {}, c = m.completeness || {}, f = m.conformity || {};
+    return '<tr class="border-b border-slate-800 cursor-pointer hover:bg-slate-800/40" onclick="qualityDrill(\'' + esc(m.object_type) + '\')">'
+      + '<td class="p-1 font-mono">' + esc(m.object_type) + '</td>'
+      + '<td class="p-1">' + m.total + '</td>'
+      + '<td class="p-1 ' + ((u.dup_rate || 0) > 0 ? 'text-rose-400' : 'text-slate-400') + '">' + _qRate(u.dup_rate) + '</td>'
+      + '<td class="p-1">' + _qRate(c.key_fill_rate) + '</td>'
+      + '<td class="p-1">' + _qRate(c.required_fill_rate) + '</td>'
+      + '<td class="p-1">' + _qRate(c.relation_resolve_rate) + '</td>'
+      + '<td class="p-1 ' + ((f.shacl_violation_rate || 0) > 0 ? 'text-rose-400' : 'text-slate-400') + '">'
+      + (f.shacl_violation_rate === null ? '-' : _qRate(f.shacl_violation_rate)) + '</td>'
+      + '<td class="p-1">' + _qRate(f.enum_hit_rate) + '</td>'
+      + '<td class="p-1 text-[11px] text-slate-500">' + esc(m.value_channel || '-') + (m.coverage < 1 ? ' · 覆盖' + _qRate(m.coverage) : '') + '</td>'
+      + '</tr>';
+  }).join('');
+  $('qualityObjects').innerHTML = '<table class="w-full text-xs">'
+    + '<thead><tr class="text-slate-500 text-left">'
+    + '<th class="p-1">对象</th><th class="p-1">规模</th><th class="p-1">重复率</th><th class="p-1">键填充</th><th class="p-1">必填填充</th><th class="p-1">关系解析</th><th class="p-1">SHACL违规</th><th class="p-1">枚举命中</th><th class="p-1">值通道</th>'
+    + '</tr></thead><tbody>' + (rows || '<tr><td class="p-2 text-slate-500" colspan="9">无对象</td></tr>') + '</tbody></table>';
+}
+
+function qualityDrill(otype) {
+  if (!_qualitySnap) return;
+  const m = (_qualitySnap.objects || {})[otype];
+  if (!m) return;
+  const c = m.completeness || {}, f = m.conformity || {};
+  let html = '<div class="text-xs text-slate-400 space-y-2">';
+  html += '<div class="font-mono text-slate-300">' + esc(otype) + '（' + m.total + ' 实例，覆盖 ' + _qRate(m.coverage) + '）</div>';
+  html += '<div><div class="text-slate-500 mb-1">必填属性填充率</div>';
+  const req = c.required_detail || {};
+  html += Object.keys(req).length ? Object.entries(req).map(([aid, d2]) =>
+    _qLine(esc(d2.name || aid), _qRate(d2.fill_rate) + '（' + d2.filled + '/' + d2.total + '）')).join('')
+    : '<div class="text-slate-600">无必填属性</div>';
+  html += '</div>';
+  html += '<div><div class="text-slate-500 mb-1">关系指向解析率</div>';
+  const rel = c.relation_detail || {};
+  html += Object.keys(rel).length ? Object.entries(rel).map(([rid, d2]) =>
+    _qLine(esc(d2.name || rid) + ' → ' + esc(d2.target_object || '?'), d2.total ? _qRate(d2.resolve_rate) + '（' + d2.resolved + '/' + d2.total + '）' : '无值')).join('')
+    : '<div class="text-slate-600">无关系</div>';
+  html += '</div>';
+  html += '<div><div class="text-slate-500 mb-1">SHACL 违规（按属性）</div>';
+  const byAttr = f.shacl_by_attribute || {};
+  html += f.shacl_available === false ? '<div class="text-amber-400">SHACL 引擎不可用（pyshacl 未安装），违规率未计算</div>'
+    : (Object.keys(byAttr).length ? Object.entries(byAttr).map(([aid, d2]) =>
+      _qLine(esc(aid), d2.count + ' 次')).join('') + '<div class="text-slate-600 mt-1">违规明细见审计/入库门禁（此处仅计数）</div>'
+      : '<div class="text-emerald-400">无违规</div>');
+  html += '</div>';
+  html += '<div><div class="text-slate-500 mb-1">枚举值域命中</div>';
+  const en = f.enum_detail || {};
+  html += Object.keys(en).length ? Object.entries(en).map(([aid, d2]) =>
+    _qLine(esc(d2.name || aid), _qRate(d2.hit_rate) + '（' + d2.hit + '/' + d2.total + (d2.out_of_enum && d2.out_of_enum.length ? '，出域: ' + esc(d2.out_of_enum.join(', ')) : '') + '）')).join('')
+    : '<div class="text-slate-600">无枚举约束属性</div>';
+  html += '</div>';
+  if (m.sample && m.sample.errors && m.sample.errors.length) {
+    html += '<div class="text-amber-400">采样错误（源端不可读部分按 source_required 明示，不臆测）：<br>'
+      + m.sample.errors.map(esc).join('<br>') + '</div>';
+  }
+  html += '</div>';
+  $('qualityDrill').innerHTML = html;
+}
+
+function renderQualityTimeliness(d) {
+  const time = (d.summary || {}).timeliness || {};
+  const conns = time.connections || [];
+  if (!conns.length) {
+    $('qualityTimeliness').innerHTML = '<div class="text-xs text-slate-600">无带来源取数时间的实例</div>';
+    return;
+  }
+  const rows = conns.map(c =>
+    '<div class="flex justify-between text-xs py-1 border-b border-slate-800">'
+    + '<span class="text-slate-400">' + esc(c.connection_id) + (c.stale ? ' <span class="text-rose-400">陈旧</span>' : '') + '（' + c.instance_count + ' 实例）</span>'
+    + '<span class="font-mono">' + (c.age_days === null ? '-' : c.age_days + ' 天') + ' / 阈值' + c.stale_threshold_days + '天</span></div>'
+  ).join('');
+  $('qualityTimeliness').innerHTML = rows;
+}
+
+async function qualityEvaluate() {
+  const sel = $('qualityOntology');
+  if (!sel || !sel.value) return;
+  try {
+    const j = await api('/api/quality/ontologies/' + encodeURIComponent(sel.value) + '/evaluate', { method: 'POST', body: JSON.stringify({}) });
+    toast('已评估并记录快照（规模 ' + j.data.scale.instance_count + '）', 'ok');
+    loadQuality();
+    loadQualityTrend();
+  } catch (e) { toast('评估失败: ' + e.message, 'err'); }
+}
+
+async function loadQualityTrend() {
+  const sel = $('qualityOntology');
+  const box = $('qualityTrend');
+  if (!sel || !sel.value) { box.innerHTML = ''; return; }
+  try {
+    const j = await api('/api/quality/ontologies/' + encodeURIComponent(sel.value) + '/snapshots?limit=30');
+    const items = (j.data.items || []).slice().reverse(); // 新→旧展示
+    if (!items.length) {
+      box.innerHTML = '<div class="text-xs text-slate-500">' + esc(j.data.baseline_hint || '尚无快照') + '</div>';
+      return;
+    }
+    const rows = items.map(s => {
+      const sum = s.summary || {}, cal = s.caliber || {};
+      const badges = [];
+      if (s.is_baseline) badges.push('<span class="text-sky-400">基线</span>');
+      if (s.caliber_changed) badges.push('<span class="text-amber-400">口径变化</span>');
+      if (s.scale_changed) badges.push('<span class="text-violet-400">规模变化</span>');
+      if (s.caliber_changed) badges.push('<span class="text-slate-600">（约束/字典口径已变，不可与上一版直接比质量）</span>');
+      return '<tr class="border-b border-slate-800">'
+        + '<td class="p-1 font-mono text-slate-500">' + esc((s.computed_at || '').replace('T', ' ').slice(0, 19)) + '</td>'
+        + '<td class="p-1">' + (s.scale || {}).instance_count + '</td>'
+        + '<td class="p-1">' + _qRate((sum.completeness || {}).required_fill_rate) + '</td>'
+        + '<td class="p-1">' + _qRate((sum.uniqueness || {}).dup_rate) + '</td>'
+        + '<td class="p-1">' + ((sum.conformity || {}).shacl_violation_rate === null ? '-' : _qRate((sum.conformity || {}).shacl_violation_rate)) + '</td>'
+        + '<td class="p-1">' + (((sum.timeliness || {}).stale_ratio === null) ? '-' : _qRate((sum.timeliness || {}).stale_ratio)) + '</td>'
+        + '<td class="p-1 font-mono text-[10px] text-slate-600">' + esc((cal.constraint_hash || '').slice(0, 8)) + '/' + esc((cal.dictionary_hash || '').slice(0, 8)) + '</td>'
+        + '<td class="p-1 text-[11px]">' + badges.join(' ') + '</td>'
+        + '</tr>';
+    }).join('');
+    box.innerHTML = '<table class="w-full text-xs"><thead><tr class="text-slate-500 text-left">'
+      + '<th class="p-1">时间</th><th class="p-1">规模</th><th class="p-1">必填填充</th><th class="p-1">重复率</th><th class="p-1">SHACL违规</th><th class="p-1">陈旧占比</th><th class="p-1">口径</th><th class="p-1">标注</th>'
+      + '</tr></thead><tbody>' + rows + '</tbody></table>';
+  } catch (e) {
+    box.innerHTML = '<div class="text-xs text-rose-400">趋势加载失败: ' + esc(e.message) + '</div>';
   }
 }
 

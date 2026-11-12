@@ -814,6 +814,27 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
         return json.dumps(data, ensure_ascii=False)
 
     @m.tool()
+    def quality_health(ontology_id: str, limit: int = 5) -> str:
+        """V2-21 数据健康度（M3-C）：查本体四维健康（完整性/唯一性/合规性/新鲜度）＋质量趋势。
+
+        health=最新快照（无快照则即时计算，不落快照）；trend=快照序列（旧→新，附
+        caliber_changed/scale_changed/is_baseline 标注——口径变化不等同于质量下降）。
+        指标恒伴随规模（scale）展示；执行通道（local_snapshot/local_full/
+        governance_sampled/source_required）随指标给出。观测性指标，不阻断。
+        与 REST GET /api/quality/ontologies/{id}/health 及前端「数据健康度」tab 同一引擎。
+        """
+        _require_published(owner, project_id, ontology_id)
+        from data_quality import evaluate_ontology, latest_snapshot, list_snapshots
+        snap = latest_snapshot(project_id, ontology_id)
+        if snap is not None:
+            health = {**snap, "is_snapshot": True}
+        else:
+            health = {**evaluate_ontology(project_id, ontology_id, actor="mcp", save=False),
+                      "is_snapshot": False}
+        trend = list_snapshots(project_id, ontology_id, limit=max(1, min(int(limit or 5), 50)))
+        return json.dumps({"health": health, "trend": trend}, ensure_ascii=False)
+
+    @m.tool()
     def action_invoke(action_id: str, confirmation_token: str = "") -> str:
         """确认执行 Action（需先通过 /api/actions/{id}/execute 获取 confirmation_token）。"""
         rec = actions.get(action_id)

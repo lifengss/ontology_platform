@@ -90,6 +90,14 @@ class Settings:
         self.schema_drift_probe_interval_seconds: int = _env_int("ONTOLOGY_SCHEMA_DRIFT_PROBE_INTERVAL_SECONDS", 300)
         self.schema_drift_stale_multiplier: float = _env_float("ONTOLOGY_SCHEMA_DRIFT_STALE_MULTIPLIER", 3.0)
 
+        # V2-21（M3-C）：数据健康度评估
+        # 陈旧阈值（天）：来源连接 last_fetched 距今超过该值记为 stale；
+        # 治理身份采样大小：源连接型实例的非键值指标（填充/SHACL）采样读取源端最新值；
+        # 源端采样开关：关闭时源连接型值指标显式标记 source_required（不静默、不臆测）
+        self.data_quality_stale_days: int = _env_int("ONTOLOGY_DATA_QUALITY_STALE_DAYS", 30)
+        self.data_quality_sample_size: int = _env_int("ONTOLOGY_DATA_QUALITY_SAMPLE_SIZE", 50)
+        self.data_quality_source_enabled: bool = _env_bool("ONTOLOGY_DATA_QUALITY_SOURCE_ENABLED", True)
+
     def ensure_dirs(self) -> None:
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
