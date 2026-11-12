@@ -956,3 +956,51 @@
 
 ### 40.4 状态
 - M3-E **已交付并 commit** `176c495`（16 文件 +1811/-144；M3-G 退出统一 push）。工作区仅余成本核算业务线未提交项（docs/数据缺口*.md M、cost_baseline_kit/、docs/备份/、docs/成本核算*.md，与平台代码无关、有意保留，不提交）。M3 剩余：F Action编排（V2-14 主体）→G 退出＋push；随后 M4 全片＋终验＋push。
+
+## 41. M3-F 交付——V2-14 复杂 Action 编排：前端 no-code 三面板＋浏览器冒烟全通（2026-11-12）
+
+### 41.1 背景
+M3-F 后端已在前一阶段交付（commit e3aa175，verify_m3f_orchestration.py 119/119，L5 93/93）。本阶段目标：补齐前端 no-code 编排三面板（M3-G TCE2E-07 要求浏览器拖拽编排），完成浏览器冒烟全链路，修复片段生成（generate-fragment）缺陷。
+
+### 41.2 交付
+- **前端三面板**（frontend/app.js 编排模块＋frontend/index.html 骨架＋编排 tab）：
+  - 左：工作流列表（新建/删除/状态徽章）＋节点库 6 类（start/end/action/branch/confirm/capability_gap，拖拽或点击加入）＋「从 SOP / skill 生成草稿」面板（grounded 步骤→action；无 grounded 步骤显式标 capability_gap，不静默丢弃，草稿禁发）。
+  - 中：画布（SVG 贝塞尔边＋端口小圆点；连线=点输出端口→点目标输入端口；toolbar 自动布局/保存/干跑/发布·撤销/运行/片段生成；手动运行 payload JSON 输入）。
+  - 右：属性面板（名称/描述/触发器 manual·event·cron；选中节点按 kind 动态表单——action 的 action_id/failure_policy/retry_max/参数表、branch 条件端口（field_ref）、confirm 超时等）。
+  - 运行区：运行列表（status/trigger/started_at）＋运行详情逐节点 status 徽章（success/failed/skipped/not_reached/awaiting_confirmation）＋confirm 节点内嵌确认/拒绝＋interrupted 运行「恢复」。
+- **端点对齐**：发布/撤销 POST /workflows/{id}/publish 与 /un-publish（注意非 /unpublish；toast 按响应 status 字段判定）；运行详情用全局 GET /api/orchestration/runs/{run_id}（后端无 workflow 作用域 run 详情路由，作用域列表存在但详情不存在）。
+- **生成层四连修**（backend/orchestration/generation.py，+94/-20）：
+  1. prompt 第 7 条明示 failure_policy 仅 retry/skip/abort（action 缺省 retry，retry_max 1~10 默认 2；confirm 默认 abort）＋_POLICY_SYNONYMS（fail/failed/failure/error/stop/halt/cancel→abort；continue/ignore/pass/proceed→skip）＋_normalize_fragment()（kind 小写、on_failure→failure_policy 改名、同义词归一/缺省补齐、retry_max 限幅）——根治真实 LLM 输出 on_failure="fail" 非法值 400。
+  2. 锚点回退：显式 after_node/branch_node > 无出边非 end 节点 > end 的非 end 前驱（线性链回退，此前报 NO_ANCHOR）。
+  3. 片段自带 start/end 剥离＋占位符 __anchor-{suffix}__/__downstream-{suffix}__ 边重映射（_A 边 from=anchor 保留 branch 端口；_D 边展开为每个 downstream 各一条）。
+  4. 拼接返回修复：循环已把 remap 后边并入 wf_edges，末行原 return wf_nodes + nodes, wf_edges + edges 会把含占位符原边重复拼回→改 return wf_nodes + nodes, wf_edges。
+- **分页参数**：router_orchestration.py 3 处＋router_actions.py 1 处 page_size 增 alias="pageSize"（前端 api() 统一用 pageSize）。
+
+### 41.3 浏览器冒烟（agent-browser 经 CDP 9222，admin 已登录）
+1. 三面板渲染正常（节点库 6 项）；新建工作流（start+end 自动）；加 action/branch 节点；端口连线；action 配 action_id＋failure_policy 保存→dirty=false。
+2. 干跑通过（action 节点 awaiting_confirmation，零外呼）。
+3. 发布状态机 published→draft（/un-publish）→published 往返通过。
+4. 真实执行闭环：高风险 Action→停在 confirm 确认点（下游 not_reached）→confirm 签核→4 节点全 success→run succeeded。
+5. 运行详情面板（初调作用域路由 404→改全局 /runs/{run_id} 修复）。
+6. SOP→草稿生成（真实 LLM）：3 步 SOP 无 grounded 全部显式转 capability_gap。
+7. 片段插入（intent=「在同步ERP之前加一个人工审批确认」）：7 节点 start→cap_create→cap_approve→action_sync→confirm_1→action_sync_erp→end，6 边线性，无占位符，单 start/end 各一。
+8. 全页截图 docs/备份/m3f-orch-smoke.png（三面板＋画布＋属性面板＋运行详情 4 节点 SUCCESS）。
+9. 测试数据清理：冒烟 2 个工作流删除（已发布须先 /un-publish 再 DELETE，「已发布编排不可删除（请归档）」口径生效）；run 1 条保留（审计语义）。
+
+### 41.4 验收与回归
+- L5 python -m pytest tests/ -q **93/93** 全绿（generation 改动后复跑，无回归）。
+- M3-F 后端验收 119/119 保持（本阶段未动执行语义，仅生成层修复）。
+
+### 41.5 关键坑
+① 撤销发布端点名 /un-publish（带连字符，非 /unpublish）；状态判断读响应 status 字段。② 无 workflow 作用域 run 详情路由（404）→全局 /api/orchestration/runs/{run_id}。③ 真实 LLM 会输出非法 on_failure="fail"→prompt 声明不足以根治，必须后端 _normalize_fragment 归一。④ 线性链（末节点直连 end）无「无出边非 end」锚点→end 前驱回退。⑤ AI 片段自带 start/end 必须剥离，否则双 start/双 end。⑥ 占位符边 remap 后已在循环并入 wf_edges，返回再 + edges 会重复拼回。⑦ orchDelEdge(edgeId) 参数是 edge id 非数组索引。⑧ agent-browser eval 中 async IIFE 必须整体被 await，否则读到未完成 Promise 假失败；location.reload(true) 破缓存。⑨ 并行会话编辑互相覆盖→关键编辑后跑全量盘点脚本断言落盘。⑩ agent-browser screenshot 用法 [selector] [path] --full（选项在路径后，--full-page 会被当路径误存文件）。⑪ 已发布工作流删除须先撤销发布。⑫ Get-NetTCPConnection -LocalPort 8000 精确定位后端进程。
+
+### 41.6 文档/wiki
+- docs/V2-开发里程碑.md：M3 行与 M3-F 行标 ✅（M3-A~F 完成，余 M3-G 退出＋push）。
+- proj_wiki source-V2-测试用例.md：「测试脚本链接登记」新增 M3-F 行（TC-14-01~13/TCE-14-01~05/TCEE-04，119 断言，PASS=119/FAIL=0）。
+- 用户级 wiki：raw 快照 2026-11-12-M3-F-Action编排与前端三面板.md（新）＋进展与测试 M3-F 节＋实体页（状态/sources/导航表 M3-F 行）＋log＋对话历史 #40 同步。
+
+### 41.7 状态
+- M3-F **已交付**：后端 e3aa175＋本阶段前端三面板/生成修复/pageSize 别名/2 文档本地 commit（不 push，M3-G 退出统一 push）。
+- 工作区仅余成本核算业务线未提交项（docs/数据缺口*.md M、cost_baseline_kit/、docs/备份/、docs/成本核算*.md，与平台代码无关、有意保留）。
+- 临时文件已清理（scripts/_check_edits.py、scripts/_orch_chunk2.js、误存 --full-page）；backend/_boot.log、_boot_err.log 被后端进程占用，进程停止后清理。
+- 下一步：M3-G 里程碑退出（TCE2E-03/07 端到端联验＋退出报告＋统一 push）→M4 全片＋终验＋push。

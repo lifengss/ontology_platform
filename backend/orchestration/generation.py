@@ -91,7 +91,9 @@ def _ai_fragment(text: str, source_type: str, actions: dict[str, dict],
         "字段路径形如 node:<节点id>.<字段> 或 trigger.<字段>；\n"
         "4) 文本中无法对应任何 action 的步骤，输出 capability_gap 节点（gap_reason 说明原因），不得省略；\n"
         "5) 每个节点给 grounding：{\"basis\": \"来源原文或Action定义的简短引用\", \"confidence\": 0.0~1.0}；\n"
-        "6) 恰好一个 start 节点；片段末端必须是 end 节点（或 capability_gap 直连 end）。\n\n"
+        "6) 恰好一个 start 节点；片段末端必须是 end 节点（或 capability_gap 直连 end）；\n"
+        "7) action 节点 failure_policy 仅允许 retry/skip/abort（省略则默认 retry，retry_max 1~10 默认 2）；"
+        "confirm 节点 failure_policy 默认 abort。\n\n"
         f"可用 Action 集合（仅可引用其中 id）：\n{json.dumps(action_list, ensure_ascii=False)[:8000]}\n\n"
         + (f"补全意图（限定插入到现有编排的锚点）：{text[:3000]}" if intent_mode
            else f"{'SOP' if source_type == 'sop' else 'skill'} 文本：\n{text[:6000]}")
@@ -111,7 +113,40 @@ def _ai_fragment(text: str, source_type: str, actions: dict[str, dict],
     if not obj or not isinstance(obj.get("nodes"), list) or not isinstance(obj.get("edges"), list):
         logger.warning("orch generation: AI returned invalid JSON, fallback deterministic")
         return None
-    return {"nodes": obj["nodes"], "edges": obj["edges"]}
+    return _normalize_fragment({"nodes": obj["nodes"], "edges": obj["edges"]})
+
+
+# AI 常见同义词 → 合法 failure_policy 值（模型偶发输出 fail/failed/continue 等）
+_POLICY_SYNONYMS: dict[str, str] = {
+    "retry": "retry", "skip": "skip", "abort": "abort",
+    "fail": "abort", "failed": "abort", "failure": "abort", "error": "abort",
+    "stop": "abort", "halt": "abort", "cancel": "abort",
+    "continue": "skip", "ignore": "skip", "pass": "skip", "proceed": "skip",
+}
+
+
+def _normalize_fragment(frag: dict) -> dict:
+    """归一化 AI 节点字段：kind 小写、failure_policy 同义词/缺省补齐、retry_max 限幅。校验层仍为最终防线。"""
+    for n in frag.get("nodes") or []:
+        if not isinstance(n, dict):
+            continue
+        kind = str(n.get("kind") or "").strip().lower()
+        if kind:
+            n["kind"] = kind
+        if "on_failure" in n and "failure_policy" not in n:
+            n["failure_policy"] = n.pop("on_failure")
+        fp = str(n.get("failure_policy") or "").strip().lower()
+        if fp:
+            n["failure_policy"] = _POLICY_SYNONYMS.get(fp, "abort")
+        elif kind in ("action", "confirm"):
+            n["failure_policy"] = "retry" if kind == "action" else "abort"
+        if kind == "action":
+            try:
+                rm = int(n.get("retry_max", 2))
+            except (TypeError, ValueError):
+                rm = 2
+            n["retry_max"] = max(1, min(10, rm))
+    return frag
 
 
 def _fragment_valid(frag: dict, actions: dict[str, dict]) -> bool:
@@ -359,16 +394,33 @@ def _insert_fragment(wf: dict, frag: dict, req: dict) -> tuple[list[dict], list[
         if e.get("from_port"):
             e2["from_port"] = e["from_port"]
         edges.append(e2)
-    by_id = {n["id"]: n for n in nodes}
     in_deg = {n["id"]: 0 for n in nodes}
     out_deg = {n["id"]: 0 for n in nodes}
     for e in edges:
         in_deg[e["to"]] = in_deg.get(e["to"], 0) + 1
         out_deg[e["from"]] = out_deg.get(e["from"], 0) + 1
-    starts = [n for n in nodes if in_deg[n["id"]] == 0]
-    ends = [n for n in nodes if out_deg[n["id"]] == 0]
-    frag_start = starts[0]["id"] if starts else nodes[0]["id"]
-    frag_end = ends[0]["id"] if ends else nodes[-1]["id"]
+    frag_start_ids = {n["id"] for n in nodes if in_deg[n["id"]] == 0}
+    frag_end_ids = {n["id"] for n in nodes if out_deg[n["id"]] == 0}
+    # 片段自身 start/end 是边界标记：编排已有自己的 start/end，插入中部时须剥离，否则双 start 校验失败
+    bound_ids = frag_start_ids | frag_end_ids
+    inner = [n for n in nodes if n["id"] not in bound_ids]
+    if not inner:
+        raise ApiError("NO_ANCHOR", "片段剥离边界节点后无内容，无可插入结构", http_status=422)
+    _A, _D = f"__anchor-{suffix}__", f"__downstream-{suffix}__"
+    remapped: list[dict] = []
+    for e in edges:
+        f, t = e["from"], e["to"]
+        if f in frag_start_ids:
+            f = _A
+        if t in frag_end_ids:
+            t = _D
+        if f in bound_ids or t in bound_ids:
+            continue  # 指向非边界端点的残留边（理论上不存在），丢弃
+        e2 = {"id": e["id"], "from": f, "to": t}
+        if e.get("from_port"):
+            e2["from_port"] = e["from_port"]
+        remapped.append(e2)
+    nodes, edges = inner, remapped
 
     wf_nodes: list[dict] = [dict(n) for n in wf.get("nodes") or []]
     wf_edges: list[dict] = [dict(e) for e in wf.get("edges") or []]
@@ -376,9 +428,13 @@ def _insert_fragment(wf: dict, frag: dict, req: dict) -> tuple[list[dict], list[
     if not anchor and req.get("branch_node") and req.get("port"):
         anchor = req["branch_node"]
     if not anchor:
-        # 默认挂末端：无出边且非 end 的节点
+        # 默认挂末端：优先无出边且非 end 的节点；线性链（末节点直连 end）取 end 的非 end 前驱，插入到 end 之前
         has_out = {e.get("from") for e in wf_edges}
         tail = [n["id"] for n in wf_nodes if n.get("kind") != "end" and n["id"] not in has_out]
+        if not tail:
+            end_ids = {n["id"] for n in wf_nodes if n.get("kind") == "end"}
+            tail = [e.get("from") for e in wf_edges
+                    if e.get("to") in end_ids and e.get("from") and e.get("from") not in end_ids]
         if not tail:
             raise ApiError("NO_ANCHOR", "编排中可插入的末端节点不存在，请显式指定 after_node/branch_node",
                            http_status=422)
@@ -392,8 +448,20 @@ def _insert_fragment(wf: dict, frag: dict, req: dict) -> tuple[list[dict], list[
         raise ApiError("NO_ANCHOR", f"锚点节点「{anchor}」无下游边，无法插入片段", http_status=422)
     wf_edges = [e for e in wf_edges
                 if not (e.get("from") == anchor and (branch_port in (None, e.get("from_port"))))]
-    wf_edges.append({"id": f"ef-in-{suffix}", "from": anchor, "to": frag_start,
-                     **({"from_port": branch_port} if branch_port else {})})
-    for d in downstream:
-        wf_edges.append({"id": f"ef-out-{d}-{suffix}", "from": frag_end, "to": d})
-    return wf_nodes + nodes, wf_edges + edges
+    for e in edges:
+        f, t = e["from"], e["to"]
+        if f == _A:
+            e = dict(e)
+            e["from"] = anchor
+            if branch_port:
+                e["from_port"] = branch_port
+        if t == _D:
+            for d in downstream:
+                e2 = dict(e)
+                e2["id"] = f"ef-out-{d}-{e['id']}"
+                e2["to"] = d
+                wf_edges.append(e2)
+        else:
+            wf_edges.append(e)
+    # edges 已在上方循环并入 wf_edges（含占位符替换），此处不再重复拼接
+    return wf_nodes + nodes, wf_edges

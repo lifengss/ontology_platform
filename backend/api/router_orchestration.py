@@ -97,7 +97,7 @@ async def create_workflow(request: Request, project_id: str = Depends(project_id
 
 @router.get("/workflows")
 def list_workflows(request: Request, project_id: str = Depends(project_id_param),
-                   page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=200),
+                   page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=200, alias="pageSize"),
                    status: str | None = Query(default=None)):
     tenant_svc.ensure_project_access(request, project_id)
     page, page_size = parse_pagination(page, page_size)
@@ -184,7 +184,7 @@ async def generate_fragment(wf_id: str, request: Request, project_id: str = Depe
 # ---------- 运行查询 / 确认 / 恢复 ---------- #
 @router.get("/workflows/{wf_id}/runs")
 def list_workflow_runs(wf_id: str, request: Request, project_id: str = Depends(project_id_param),
-                       page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=200)):
+                       page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=200, alias="pageSize")):
     tenant_svc.ensure_project_access(request, project_id)
     page, page_size = parse_pagination(page, page_size)
     items = [r for r in _store(project_id, "workflow_runs").all() if r.get("workflow_id") == wf_id]
@@ -197,7 +197,7 @@ def list_workflow_runs(wf_id: str, request: Request, project_id: str = Depends(p
 @router.get("/runs")
 def list_runs(request: Request, project_id: str = Depends(project_id_param),
               workflow_id: str | None = Query(default=None),
-              page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=200)):
+              page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=200, alias="pageSize")):
     tenant_svc.ensure_project_access(request, project_id)
     page, page_size = parse_pagination(page, page_size)
     items = [r for r in _store(project_id, "workflow_runs").all()

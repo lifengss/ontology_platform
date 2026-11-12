@@ -143,6 +143,7 @@
     <div class="tab" data-tab="graph" onclick="switchTab('graph')">图谱</div>
     <div class="tab" data-tab="inference" onclick="switchTab('inference')">推理</div>
     <div class="tab" data-tab="action" onclick="switchTab('action')">业务动作</div>
+    <div class="tab" data-tab="orchestration" onclick="switchTab('orchestration')">编排</div>
     <div class="tab" data-tab="dictionary" onclick="switchTab('dictionary')">数据字典</div>
     <div class="tab" data-tab="capability" onclick="switchTab('capability')">能力</div>
     <div class="tab" data-tab="quality" onclick="switchTab('quality')">数据健康度</div>
@@ -1055,6 +1056,110 @@
             <div class="text-sm text-slate-400">把本体数据安全地同步到外部系统，每一步都可预览、可确认、可审计。</div>
           </div>
           <div class="grid grid-cols-1 md:grid-cols-3 gap-4" id="actionTemplateCards"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 编排页（V2-14 no-code 三面板：节点库 / 画布 / 属性面板） -->
+    <section id="orchestration" class="tab-content hidden grid grid-cols-12 gap-4">
+      <!-- 左：工作流列表 + 节点库 + SOP 生成 -->
+      <div class="col-span-12 lg:col-span-3 flex flex-col gap-4">
+        <div class="card p-4">
+          <div class="flex justify-between items-center mb-3">
+            <h3 class="font-medium">工作流</h3>
+            <button class="btn-primary text-xs" onclick="orchNewWorkflow()">＋ 新建</button>
+          </div>
+          <div id="orchWfList" class="space-y-2 max-h-[220px] overflow-auto"></div>
+        </div>
+        <div class="card p-4">
+          <h3 class="font-medium mb-1">节点库</h3>
+          <div class="text-xs text-slate-500 mb-2">拖到画布（或点击添加）；连线：点输出端口→点目标输入端口</div>
+          <div id="orchNodeLib" class="grid grid-cols-2 gap-2"></div>
+        </div>
+        <div class="card p-4">
+          <h3 class="font-medium mb-2">从 SOP / skill 生成草稿</h3>
+          <textarea id="orchSopText" rows="5" class="w-full text-sm" placeholder="粘贴 SOP / skill 步骤文本，如：&#10;1. 同步订单数据&#10;2. 发送邮件通知&#10;3. 手工打电话确认（暂无自动化能力）"></textarea>
+          <div class="flex gap-2 mt-2">
+            <select id="orchSopType" class="flex-1 text-sm">
+              <option value="sop">SOP</option>
+              <option value="skill">skill</option>
+            </select>
+            <input id="orchSopName" class="flex-1 text-sm" placeholder="工作流名称（可选）">
+          </div>
+          <button class="btn-primary w-full mt-2 text-sm" onclick="orchGenerate()">生成草稿（AI 优先，确定性回退）</button>
+          <div class="text-xs text-slate-500 mt-1">无法 grounded 的步骤将标「能力缺口」节点并阻断发布；不自动发布。</div>
+        </div>
+      </div>
+
+      <!-- 中：画布 -->
+      <div class="col-span-12 lg:col-span-6 flex flex-col gap-3">
+        <div class="card p-3">
+          <div class="flex items-center gap-2 flex-wrap mb-2">
+            <span id="orchWfName" class="font-medium">未选择工作流</span>
+            <span id="orchWfStatus"></span>
+            <span class="flex-1"></span>
+            <button class="btn-ghost text-xs" onclick="orchAutoLayout()">自动布局</button>
+            <button class="btn-ghost text-xs" onclick="orchSaveWorkflow()">保存</button>
+            <button class="btn-ghost text-xs" onclick="orchDryRun()">干跑预览</button>
+            <button class="btn-ghost text-xs" onclick="orchPublishToggle()">发布/撤销</button>
+            <button class="btn-primary text-xs" onclick="orchRun()">运行</button>
+          </div>
+          <div class="flex items-center gap-2 mb-2">
+            <input id="orchRunPayload" class="flex-1 text-xs" placeholder='手动运行 payload（JSON，可空），如 {"order_id": "SO-1"}'>
+            <button class="btn-ghost text-xs" onclick="orchToggleFragment()">片段生成</button>
+          </div>
+          <div id="orchFragmentBox" class="hidden mb-2 text-sm">
+            <div class="text-xs text-slate-400 mb-1">AI 局部补全：自然语言意图 → 结构化片段（仅已绑定 Action，走草稿通道）</div>
+            <textarea id="orchFragmentIntent" rows="2" class="w-full text-sm" placeholder="如：如果订单金额大于 1000，先发邮件审批，再同步 ERP"></textarea>
+            <div class="flex gap-2 mt-1">
+              <select id="orchFragmentAfter" class="flex-1 text-sm"><option value="">锚点：流程末尾/起点</option></select>
+              <button class="btn-primary text-xs" onclick="orchGenerateFragment()">生成</button>
+            </div>
+          </div>
+        </div>
+        <div class="card p-0 overflow-hidden">
+          <div id="orchCanvas" class="relative overflow-auto" style="height: calc(100vh - 250px); min-height: 420px; background-color: #0b1220; background-image: radial-gradient(circle, rgba(148,163,184,.15) 1px, transparent 1px); background-size: 22px 22px;">
+            <div id="orchCanvasInner" class="relative" style="width: 1800px; height: 1100px;">
+              <svg id="orchEdgesSvg" class="absolute inset-0" width="1800" height="1100" fill="none">
+                <defs>
+                  <marker id="orchArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                    <path d="M0,0 L8,4 L0,8 z" fill="#64748b"></path>
+                  </marker>
+                </defs>
+              </svg>
+              <div id="orchNodes" class="absolute inset-0"></div>
+            </div>
+          </div>
+          <div id="orchCanvasHint" class="px-3 py-2 text-xs text-slate-500 border-t border-slate-800">提示：点节点选中后在右侧属性面板编辑；点连线选中可删除；分支节点每个输出端口独立连线。</div>
+        </div>
+        <div id="orchDryRunBox" class="hidden card p-3">
+          <div class="flex justify-between items-center mb-2">
+            <h3 class="font-medium text-sm">干跑预览（零外部调用）</h3>
+            <button class="text-xs text-slate-400" onclick="document.getElementById('orchDryRunBox').classList.add('hidden')">关闭</button>
+          </div>
+          <div id="orchDryRunResult" class="text-xs space-y-1 max-h-[240px] overflow-auto"></div>
+        </div>
+      </div>
+
+      <!-- 右：属性面板 + 运行面板 -->
+      <div class="col-span-12 lg:col-span-3 flex flex-col gap-4">
+        <div class="card p-4">
+          <h3 class="font-medium mb-2">属性</h3>
+          <div id="orchProps" class="text-sm space-y-2">
+            <div class="text-slate-500 text-xs">选择画布中的节点进行编辑；未选中时可配置工作流（名称/触发器）。</div>
+          </div>
+        </div>
+        <div class="card p-4">
+          <div class="flex justify-between items-center mb-2">
+            <h3 class="font-medium">运行</h3>
+            <button class="text-xs text-slate-400" onclick="orchLoadRuns()">刷新</button>
+          </div>
+          <div id="orchRunList" class="space-y-1 max-h-[180px] overflow-auto text-xs"></div>
+          <div id="orchRunDetail" class="hidden mt-3">
+            <div class="text-xs text-slate-400 mb-1" id="orchRunMeta"></div>
+            <div id="orchRunNodes" class="space-y-1 max-h-[220px] overflow-auto text-xs"></div>
+            <div id="orchRunActions" class="flex gap-2 mt-2"></div>
+          </div>
         </div>
       </div>
     </section>

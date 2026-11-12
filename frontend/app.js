@@ -307,6 +307,8 @@ async function refreshActiveTabAfterScopeChange() {
       await loadInference();
     } else if (tab === 'home') {
       await loadHome();
+    } else if (tab === 'orchestration') {
+      await loadOrchestration();
     }
     // modeling 已由 setProject 内的 loadOntologies() 刷新
   } catch (e) {
@@ -977,7 +979,7 @@ function renderConnHealth(d) {
     '<b class="text-sm">连接健康视图</b>' +
     '<div>' +
     '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="schemaCheckConn(\'' + esc(connHealthId) + '\'); openConnHealth(\'' + esc(connHealthId) + '\')">手动 schema 检查</button> ' +
-    '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="api(\'/api/cdc/channels/' + esc(connHealthId) + '/poll\', {method:\'POST\', body:\'{}\'}).then(j => { toast(\'poll: \' + (j.data.status) + \' applied=' + (j.data.applied ?? 0), \'info\', 5000); openConnHealth(\'' + esc(connHealthId) + '\'); }).catch(e => toast(\'poll 失败: \' + e.message, \'err\'))">手动 poll</button> ' +
+    '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="api(\'/api/cdc/channels/' + esc(connHealthId) + '/poll\', {method:\'POST\', body:\'{}\'}).then(j => { toast(\'poll: \' + (j.data.status) + \' applied=\' + (j.data.applied ?? 0), \'info\', 5000); openConnHealth(\'' + esc(connHealthId) + '\'); }).catch(e => toast(\'poll 失败: \' + e.message, \'err\'))">手动 poll</button> ' +
     '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="closeConnHealth()">关闭</button></div></div>' +
     '<div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">' +
     '<div>最近 schema 检查：' + (d.last_schema_check_at ? esc(String(d.last_schema_check_at).slice(0, 19)) : '未检查') +
@@ -1038,6 +1040,7 @@ function switchTab(name) {
   if (name === 'graph') { loadOntologies().then(() => { renderOntologySelects(); loadGraph(); }); }
   if (name === 'inference') { loadOntologies().then(() => { renderOntologySelects(); loadInference(); }); }
   if (name === 'action') { loadActions(); }
+  if (name === 'orchestration') { loadOrchestration(); }
   if (name === 'dictionary') { loadDictionary(); }
   if (name === 'capability') { loadCapabilities(); }
   if (name === 'quality') {
@@ -3793,7 +3796,8 @@ function renderLineagePanelData(d) {
   if (tr) {
     const inputs = tr.inputs || {};
     const used = (inputs.used_inputs || []).map(i =>
-      esc(String(i.attr)) + '=' + (i.value === null || i.value === undefined ? '∅' : esc(String(i.value))).join(', ');
+      esc(String(i.attr)) + '=' + (i.value === null || i.value === undefined ? '∅' : esc(String(i.value)))
+    ).join(', ');
     const gaps = (inputs.data_gaps || []).length ? ' · 数据缺口: ' + esc(inputs.data_gaps.join(', ')) : '';
     html += '<div class="text-xs text-slate-300 mb-1">转换规则（公式能力 · M1-B 四要素溯源）</div>';
     html += '<div class="text-xs border border-slate-700 rounded p-2 mb-2 bg-slate-800/40">'
@@ -6659,4 +6663,739 @@ async function credCheckStatus(id) {
     const st = credStatusMap[id] || {};
     toast(st.has_secret ? '凭据状态：已加密存储，可解析' : '凭据状态：缺失/无法解密，请删除后重建', st.has_secret ? 'ok' : 'err');
   } catch (e) { toast('状态查询失败：' + e.message, 'err'); }
+}
+
+
+/* ============================================================
+ * V2-14 Action 编排（M3-F）— no-code 三面板编辑器
+ * 节点库 / 画布（拖拽＋端口连线）/ 属性面板；干跑；运行/确认/拒绝/恢复；SOP 生成；片段生成
+ * 执行侧零 LLM 决策（INV-3）；能力缺口不静默丢弃（EP-14-05）
+ * ============================================================ */
+const ORCH = {
+  workflows: [], actions: [],
+  wf: null, nodes: [], edges: [],
+  layout: {}, selNode: null, selEdge: null, pendingPort: null,
+  runs: [], selRun: null, dirty: false, nodeSeq: 0,
+};
+
+const ORCH_NODE_META = {
+  start:          { label: '开始',     color: 'border-emerald-500 bg-emerald-600/20' },
+  end:            { label: '结束',     color: 'border-slate-500 bg-slate-600/20' },
+  action:         { label: '动作',     color: 'border-blue-500 bg-blue-600/20' },
+  branch:         { label: '分支',     color: 'border-amber-500 bg-amber-600/20' },
+  confirm:        { label: '人工确认', color: 'border-purple-500 bg-purple-600/20' },
+  capability_gap: { label: '能力缺口', color: 'border-rose-500 bg-rose-600/20' },
+};
+
+const ORCH_OPS = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'contains', 'not_contains', 'in', 'not_in'];
+
+async function loadOrchestration() {
+  try {
+    const [wj, aj] = await Promise.all([
+      api('/api/orchestration/workflows?page=1&pageSize=100'),
+      api('/api/actions?page=1&pageSize=100'),
+    ]);
+    ORCH.workflows = wj.data.items || [];
+    ORCH.actions = aj.data.items || [];
+    if (ORCH.wf) {
+      const cur = ORCH.workflows.find(w => w.id === ORCH.wf.id);
+      if (!cur) ORCH.wf = null; else ORCH.wf = cur;
+    }
+    if (!ORCH.wf && ORCH.workflows.length) ORCH.wf = ORCH.workflows[0];
+    renderOrchWfList();
+    renderOrchNodeLib();
+    if (ORCH.wf) await orchSelectWorkflow(ORCH.wf.id, true);
+    else { ORCH.nodes = []; ORCH.edges = []; ORCH.layout = {}; orchRenderCanvas(); orchRenderProps(); orchRenderWfHead(); orchLoadRuns(); }
+  } catch (e) { toast('编排加载失败：' + e.message, 'err'); }
+}
+
+function renderOrchWfList() {
+  const el = $('orchWfList'); if (!el) return;
+  if (!ORCH.workflows.length) { el.innerHTML = '<div class="text-xs text-slate-500">暂无工作流，点「新建」或从 SOP 生成。</div>'; return; }
+  el.innerHTML = ORCH.workflows.map(w => {
+    const st = w.status || 'draft';
+    const stCls = st === 'published' ? 'bg-emerald-500/20 text-emerald-300' : (st === 'archived' ? 'bg-slate-500/20 text-slate-400' : 'bg-blue-500/20 text-blue-300');
+    const hasGap = (w.nodes || []).some(n => n.kind === 'capability_gap');
+    return `<div onclick="orchSelectWorkflow('${w.id}')" class="cursor-pointer rounded border p-2 text-xs ${w.id === (ORCH.wf && ORCH.wf.id) ? 'border-blue-500 bg-blue-500/10' : 'border-slate-700 hover:border-slate-500'}">
+      <div class="flex items-center gap-1"><span class="font-medium truncate">${esc(w.name)}</span>
+        <span class="ml-auto px-1.5 py-0.5 rounded text-[10px] ${stCls}">${st === 'published' ? '已发布' : st === 'archived' ? '已归档' : '草稿'}</span></div>
+      <div class="text-slate-500 mt-0.5 flex items-center gap-1">${(w.nodes || []).length} 节点
+        ${hasGap ? '<span class="text-rose-400">含能力缺口（阻断发布）</span>' : ''}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderOrchNodeLib() {
+  const el = $('orchNodeLib'); if (!el) return;
+  el.innerHTML = Object.entries(ORCH_NODE_META).map(([kind, m]) =>
+    `<div draggable="true" ondragstart="orchLibDragStart(event,'${kind}')" onclick="orchAddNode('${kind}')"
+      class="cursor-grab rounded border px-2 py-1.5 text-xs text-center hover:brightness-125 ${m.color}">${m.label}</div>`
+  ).join('');
+}
+
+function orchLibDragStart(e, kind) { e.dataTransfer.setData('text/orch-kind', kind); e.dataTransfer.effectAllowed = 'copy'; }
+
+async function orchNewWorkflow() {
+  try {
+    const r = await api('/api/orchestration/workflows', {
+      method: 'POST',
+      body: JSON.stringify({ name: '工作流 ' + (ORCH.workflows.length + 1), trigger: { type: 'manual' },
+        nodes: [{ id: 'start', kind: 'start' }, { id: 'end', kind: 'end' }],
+        edges: [{ id: 'e1', from: 'start', to: 'end' }] }),
+    });
+    toast('已创建：' + (r.data.name || ''), 'ok');
+    ORCH.wf = r.data;
+    await orchSelectWorkflow(r.data.id, true);
+    await loadOrchestration();
+  } catch (e) { toast('新建失败：' + e.message, 'err'); }
+}
+
+async function orchSelectWorkflow(id, keepCanvas) {
+  try {
+    const r = await api('/api/orchestration/workflows/' + id);
+    ORCH.wf = r.data;
+    ORCH.nodes = (ORCH.wf.nodes || []).map(n => JSON.parse(JSON.stringify(n)));
+    ORCH.edges = (ORCH.wf.edges || []).map(e => JSON.parse(JSON.stringify(e)));
+    ORCH.layout = {}; ORCH.selNode = null; ORCH.selEdge = null; ORCH.pendingPort = null; ORCH.dirty = false;
+    ORCH.nodes.forEach((n, i) => { ORCH.layout[n.id] = { x: 60 + (i % 3) * 230, y: 60 + Math.floor(i / 3) * 130 }; });
+    orchAutoLayout();
+    renderOrchWfList(); orchRenderWfHead(); orchRenderCanvas(); orchRenderProps(); orchLoadRuns();
+  } catch (e) { toast('加载工作流失败：' + e.message, 'err'); }
+}
+
+function orchRenderWfHead() {
+  const name = $('orchWfName'), st = $('orchWfStatus');
+  if (!name) return;
+  if (!ORCH.wf) { name.textContent = '未选择工作流'; st.innerHTML = ''; return; }
+  name.textContent = ORCH.wf.name + (ORCH.dirty ? '（未保存）' : '');
+  const s = ORCH.wf.status || 'draft';
+  st.innerHTML = `<span class="text-xs px-1.5 py-0.5 rounded ${s === 'published' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-500/20 text-slate-400'}">${s === 'published' ? '已发布' : '草稿'}</span>`;
+}
+
+function orchAddNode(kind, x, y) {
+  if (!ORCH.wf) { toast('请先新建或选择工作流', 'err'); return; }
+  ORCH.nodeSeq += 1;
+  let id;
+  do { id = (kind === 'start' ? 'start' : kind === 'end' ? 'end' : kind + ORCH.nodeSeq); }
+  while (ORCH.nodes.some(n => n.id === id));
+  const node = { id, kind, label: ORCH_NODE_META[kind].label };
+  if (kind === 'action') Object.assign(node, { action_id: '', params: {}, failure_policy: 'retry', retry_max: 2 });
+  if (kind === 'branch') Object.assign(node, { branches: {
+    p1: { label: '条件1', condition: { logic: 'AND', rules: [] } },
+    d: { label: '默认', is_default: true, condition: null },
+  } });
+  if (kind === 'confirm') Object.assign(node, { confirm_title: '请确认是否执行' });
+  if (kind === 'capability_gap') Object.assign(node, { gap_reason: '该步骤暂无已绑定 Action 可支撑（能力缺口，发布被阻断）' });
+  if (kind === 'start') node = { id, kind: 'start', label: '开始' };
+  if (kind === 'end') node = { id, kind: 'end', label: '结束' };
+  ORCH.nodes.push(node);
+  ORCH.layout[id] = { x: x != null ? x : 80 + Math.random() * 300, y: y != null ? y : 80 + Math.random() * 300 };
+  ORCH.selNode = id; ORCH.dirty = true;
+  orchRenderCanvas(); orchRenderProps(); orchRenderWfHead();
+}
+
+function orchDelNode(id) {
+  const idx = ORCH.nodes.findIndex(n => n.id === id);
+  if (idx < 0) return;
+  if ((ORCH.nodes[idx].kind === 'start' || ORCH.nodes[idx].kind === 'end') && ORCH.nodes.filter(n => n.kind === ORCH.nodes[idx].kind).length <= 1) {
+    toast('start/end 各须保留一个', 'err'); return;
+  }
+  ORCH.nodes.splice(idx, 1);
+  ORCH.edges = ORCH.edges.filter(e => e.from !== id && e.to !== id);
+  delete ORCH.layout[id];
+  ORCH.selNode = null; ORCH.dirty = true;
+  orchRenderCanvas(); orchRenderProps();
+}
+
+function orchPortClick(e, nodeId, port) {
+  e.stopPropagation();
+  if (ORCH.pendingPort && ORCH.pendingPort.node === nodeId && ORCH.pendingPort.port === port) { ORCH.pendingPort = null; orchRenderCanvas(); return; }
+  if (!ORCH.pendingPort) { ORCH.pendingPort = { node: nodeId, port: port || 'default' }; orchRenderCanvas(); return; }
+  if (ORCH.pendingPort.node === nodeId) { ORCH.pendingPort = null; orchRenderCanvas(); return; }
+  const fromPort = ORCH.pendingPort.port || 'default';
+  const dup = ORCH.edges.some(ed => ed.from === ORCH.pendingPort.node && ed.to === nodeId && (ed.from_port || 'default') === fromPort);
+  if (dup) { toast('该连线已存在', 'err'); }
+  else {
+    ORCH.edgeSeq = (ORCH.edgeSeq || 0) + 1;
+    ORCH.edges.push({ id: 'e' + Date.now().toString(36) + ORCH.edgeSeq, from: ORCH.pendingPort.node, to: nodeId, from_port: fromPort === 'default' ? undefined : fromPort });
+    ORCH.dirty = true;
+  }
+  ORCH.pendingPort = null;
+  orchRenderCanvas();
+}
+
+function orchDelEdge(id) {
+  ORCH.edges = ORCH.edges.filter(e => e.id !== id);
+  ORCH.selEdge = null; ORCH.dirty = true;
+  orchRenderCanvas();
+}
+
+const ORCH_NODE_W = 170;
+
+function orchNodePorts(node) {
+  if (node.kind === 'branch') return Object.keys(node.branches || {});
+  return ['default'];
+}
+
+function orchRenderCanvas() {
+  const box = $('orchNodes'); if (!box) return;
+  box.innerHTML = ORCH.nodes.map(n => {
+    const pos = ORCH.layout[n.id] || { x: 60, y: 60 };
+    const m = ORCH_NODE_META[n.kind] || ORCH_NODE_META.action;
+    const ports = orchNodePorts(n);
+    const outs = ports.map((p, i) => {
+      const active = ORCH.pendingPort && ORCH.pendingPort.node === n.id && (ORCH.pendingPort.port || 'default') === p;
+      return `<div class="orch-port absolute -right-1.5 w-3 h-3 rounded-full cursor-pointer border border-slate-300 ${active ? 'bg-emerald-400' : 'bg-slate-400'} hover:bg-emerald-300"
+        style="top:${22 + i * 22 - 6}px" title="输出端口 ${esc(p)}（点击→点目标输入端口连线）"
+        onclick="orchPortClick(event,'${n.id}',${JSON.stringify(p)})"></div>`;
+    }).join('');
+    let extra = '';
+    if (n.kind === 'action') {
+      const a = ORCH.actions.find(x => x.action_id === n.action_id);
+      extra = a ? esc(a.name) + ' <span class="text-[10px] opacity-70">(' + (a.risk_level || 'high') + ')</span>' : '<span class="text-rose-300">未选择 Action</span>';
+    } else if (n.kind === 'branch') {
+      extra = ports.map(p => `<div class="text-[10px] opacity-80">${esc(p)}：${esc(((n.branches || {})[p] || {}).label || p)}${(n.branches || {})[p] && (n.branches[p]).is_default ? '（默认）' : ''}</div>`).join('');
+    } else if (n.kind === 'capability_gap') {
+      extra = '<div class="text-[10px] text-rose-200">发布被阻断（EP-14-05）</div>';
+    } else if (n.kind === 'confirm') {
+      extra = `<div class="text-[10px] opacity-80">${esc(n.confirm_title || '')}</div>`;
+    }
+    return `<div data-oid="${n.id}" class="orch-node absolute rounded-md border-2 shadow-lg select-none ${m.color} ${ORCH.selNode === n.id ? 'ring-2 ring-blue-400' : ''}"
+      style="left:${pos.x}px;top:${pos.y}px;width:${ORCH_NODE_W}px;cursor:grab">
+      <div class="px-2 py-1 rounded-t text-xs font-medium flex items-center gap-1">${m.label}<span class="opacity-70 truncate">· ${esc(n.label || n.id)}</span></div>
+      <div class="px-2 py-1.5 text-xs min-h-[28px]">${extra}</div>
+      <div class="orch-inport absolute -left-1.5 w-3 h-3 rounded-full bg-slate-300 border border-slate-500 cursor-pointer hover:bg-emerald-300" style="top:50%;transform:translateY(-50%)" title="输入端口"
+        onclick="orchPortClick(event,'${n.id}',null)"></div>
+      ${outs}
+    </div>`;
+  }).join('');
+  box.querySelectorAll('.orch-node').forEach(el => orchBindNodeDrag(el));
+  orchRenderEdges();
+  const sel = $('orchFragmentAfter');
+  if (sel) sel.innerHTML = '<option value="">锚点：流程末尾/起点</option>' +
+    ORCH.nodes.map(n => `<option value="${n.id}">${esc(n.label || n.id)}（${n.kind}）</option>`).join('');
+}
+
+function orchBindNodeDrag(el) {
+  const id = el.getAttribute('data-oid');
+  el.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.classList.contains('orch-port') || e.target.classList.contains('orch-inport')) return;
+    const start = ORCH.layout[id] || { x: 60, y: 60 };
+    const sx = e.clientX, sy = e.clientY;
+    el.style.cursor = 'grabbing';
+    el.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      const x = Math.max(0, Math.min(1600, start.x + ev.clientX - sx));
+      const y = Math.max(0, Math.min(980, start.y + ev.clientY - sy));
+      ORCH.layout[id] = { x, y };
+      el.style.left = x + 'px'; el.style.top = y + 'px';
+      orchRenderEdges();
+    };
+    const up = (ev) => {
+      el.style.cursor = 'grab';
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      ORCH.dirty = true;
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    ORCH.selNode = id; ORCH.selEdge = null;
+    // 仅更新选中态样式，不重渲染画布 DOM（重渲染会使 el 被移除 → 丢失 pointer capture，拖拽失效）
+    const box = el.parentElement;
+    if (box) box.querySelectorAll('.orch-node').forEach(x => x.classList.remove('ring-2', 'ring-blue-400'));
+    el.classList.add('ring-2', 'ring-blue-400');
+    orchRenderProps();
+  });
+}
+
+function orchPortCenter(nodeId, port, isOut) {
+  const inner = $('orchCanvasInner');
+  const el = isOut
+    ? inner.querySelector(`.orch-node[data-oid="${nodeId}"] .orch-port[title*="${port}"]`)
+    : inner.querySelector(`.orch-node[data-oid="${nodeId}"] .orch-inport`);
+  const pos = ORCH.layout[nodeId] || { x: 60, y: 60 };
+  if (el && inner) {
+    const r = el.getBoundingClientRect(), ir = inner.getBoundingClientRect();
+    return { x: r.left - ir.left + r.width / 2, y: r.top - ir.top + r.height / 2 };
+  }
+  const h = 64;
+  return isOut ? { x: pos.x + ORCH_NODE_W + 6, y: pos.y + h / 2 } : { x: pos.x - 6, y: pos.y + h / 2 };
+}
+
+function orchRenderEdges() {
+  const svg = $('orchEdgesSvg'); if (!svg) return;
+  svg.querySelectorAll('.orch-edge-g').forEach(g => g.remove());
+  const NS = 'http://www.w3.org/2000/svg';
+  ORCH.edges.forEach(ed => {
+    const p1 = orchPortCenter(ed.from, ed.from_port || 'default', true);
+    const p2 = orchPortCenter(ed.to, null, false);
+    const dx = Math.max(40, Math.abs(p2.x - p1.x) / 2);
+    const g = document.createElementNS(NS, 'g');
+    g.setAttribute('class', 'orch-edge-g');
+    g.style.cursor = 'pointer';
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', `M ${p1.x} ${p1.y} C ${p1.x + dx} ${p1.y}, ${p2.x - dx} ${p2.y}, ${p2.x} ${p2.y}`);
+    path.setAttribute('stroke', ORCH.selEdge === ed.id ? '#38bdf8' : '#64748b');
+    path.setAttribute('stroke-width', ORCH.selEdge === ed.id ? 2.5 : 1.5);
+    path.setAttribute('marker-end', 'url(#orchArrow)');
+    g.appendChild(path);
+    if (ed.from_port) {
+      const t = document.createElementNS(NS, 'text');
+      t.setAttribute('x', (p1.x + p2.x) / 2); t.setAttribute('y', (p1.y + p2.y) / 2 - 6);
+      t.setAttribute('fill', '#94a3b8'); t.setAttribute('font-size', '11'); t.setAttribute('text-anchor', 'middle');
+      t.textContent = ed.from_port;
+      g.appendChild(t);
+    }
+    g.addEventListener('click', (e) => { e.stopPropagation(); ORCH.selEdge = ORCH.selEdge === ed.id ? null : ed.id; ORCH.selNode = null; orchRenderCanvas(); });
+    svg.appendChild(g);
+  });
+}
+
+document.addEventListener('dragover', (e) => {
+  const c = $('orchCanvas');
+  if (c && e.dataTransfer && [...e.dataTransfer.types].includes('text/orch-kind')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }
+});
+document.addEventListener('drop', (e) => {
+  const kind = e.dataTransfer && e.dataTransfer.getData('text/orch-kind');
+  const c = $('orchCanvas');
+  if (!kind || !c) return;
+  e.preventDefault();
+  const ir = $('orchCanvasInner').getBoundingClientRect();
+  orchAddNode(kind, Math.max(0, e.clientX - ir.left - ORCH_NODE_W / 2), Math.max(0, e.clientY - ir.top - 20));
+});
+
+document.addEventListener('keydown', (e) => {
+  if (_lastTab !== 'orchestration' || (ORCH.selNode === null && ORCH.selEdge === null)) return;
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    e.preventDefault();
+    if (ORCH.selNode) orchDelNode(ORCH.selNode);
+    else if (ORCH.selEdge) orchDelEdge(ORCH.selEdge);
+  }
+});
+
+function orchAutoLayout() {
+  if (!ORCH.nodes.length) return;
+  const preds = {};
+  ORCH.nodes.forEach(n => { preds[n.id] = []; });
+  ORCH.edges.forEach(e => { if (preds[e.to]) preds[e.to].push(e.from); });
+  const layer = {}, visited = {};
+  const calc = (id, depth) => {
+    if (visited[id]) return;
+    visited[id] = true;
+    layer[id] = Math.max(layer[id] || 0, depth);
+    (ORCH.edges.filter(e => e.from === id).map(e => e.to)).forEach(t => calc(t, (layer[id] || 0) + 1));
+  };
+  const starts = ORCH.nodes.filter(n => n.kind === 'start').map(n => n.id);
+  (starts.length ? starts : ORCH.nodes.map(n => n.id)).forEach(s => calc(s, 0));
+  ORCH.nodes.forEach(n => { if (layer[n.id] == null) layer[n.id] = 0; });
+  const byLayer = {};
+  ORCH.nodes.forEach(n => { (byLayer[layer[n.id]] = byLayer[layer[n.id]] || []).push(n); });
+  Object.entries(byLayer).forEach(([ly, arr]) => arr.forEach((n, i) => {
+    ORCH.layout[n.id] = { x: 60 + (+ly) * 230, y: 80 + i * 130 };
+  }));
+  orchRenderCanvas();
+}
+
+/* ---------- 属性面板 ---------- */
+function orchRenderProps() {
+  const el = $('orchProps'); if (!el) return;
+  if (!ORCH.wf) { el.innerHTML = '<div class="text-xs text-slate-500">先选择/新建工作流。</div>'; return; }
+  if (!ORCH.selNode) {
+    const t = ORCH.wf.trigger || { type: 'manual' };
+    el.innerHTML = `
+      <div><label class="text-xs text-slate-400">名称</label>
+        <input id="orchWfName2" class="w-full text-sm" value="${esc(ORCH.wf.name || '')}" oninput="ORCH.wf.name=this.value;ORCH.dirty=true;orchRenderWfHead()"></div>
+      <div><label class="text-xs text-slate-400">描述</label>
+        <input id="orchWfDesc" class="w-full text-sm" value="${esc(ORCH.wf.description || '')}" oninput="ORCH.wf.description=this.value;ORCH.dirty=true"></div>
+      <div class="pt-1 border-t border-slate-800 mt-2"><label class="text-xs text-slate-400">触发器</label>
+        <select class="w-full text-sm mt-1" onchange="orchTriggerTypeChange(this.value)">
+          <option value="manual" ${t.type === 'manual' ? 'selected' : ''}>手动</option>
+          <option value="event" ${t.type === 'event' ? 'selected' : ''}>事件（业务事件总线）</option>
+          <option value="cron" ${t.type === 'cron' ? 'selected' : ''}>定时（cron）</option>
+        </select></div>
+      <div id="orchTriggerExtra" class="space-y-2">${orchTriggerExtraHtml(t)}</div>
+      <div class="text-xs text-slate-500 pt-2 border-t border-slate-800">选中画布节点后可编辑节点属性。</div>`;
+    return;
+  }
+  const n = ORCH.nodes.find(x => x.id === ORCH.selNode);
+  if (!n) { el.innerHTML = ''; return; }
+  let html = `<div class="flex items-center gap-2 mb-1">
+    <span class="text-xs font-medium">${ORCH_NODE_META[n.kind].label}</span>
+    <span class="text-xs text-slate-500">${esc(n.id)}</span>
+    <button class="ml-auto text-xs text-rose-400" onclick="orchDelNode('${n.id}')">删除</button></div>
+    <div><label class="text-xs text-slate-400">标签</label>
+      <input class="w-full text-sm" value="${esc(n.label || '')}" oninput="orchNodeField('${n.id}','label',this.value)"></div>`;
+  if (n.kind === 'action') {
+    html += `
+      <div><label class="text-xs text-slate-400">Action（白名单内）</label>
+        <select class="w-full text-sm" onchange="orchNodeField('${n.id}','action_id',this.value)">
+          <option value="">— 请选择 —</option>
+          ${ORCH.actions.map(a => `<option value="${a.action_id}" ${n.action_id === a.action_id ? 'selected' : ''}>${esc(a.name)}（${a.risk_level || 'high'}）</option>`).join('')}
+        </select></div>
+      <div><label class="text-xs text-slate-400">参数（key + 值来源）</label>
+        <div class="space-y-1 mt-1" id="orchParamRows">${orchParamRowsHtml(n)}</div>
+        <button class="btn-ghost text-xs mt-1" onclick="orchAddParamRow('${n.id}')">＋ 参数</button></div>
+      <div><label class="text-xs text-slate-400">失败策略</label>
+        <div class="flex gap-1">
+          <select class="flex-1 text-sm" onchange="orchNodeField('${n.id}','failure_policy',this.value)">
+            <option value="retry" ${n.failure_policy === 'retry' ? 'selected' : ''}>重试</option>
+            <option value="skip" ${n.failure_policy === 'skip' ? 'selected' : ''}>跳过</option>
+            <option value="abort" ${n.failure_policy === 'abort' ? 'selected' : ''}>终止</option>
+          </select>
+          <input type="number" min="0" max="10" class="w-14 text-sm" title="重试次数" value="${n.retry_max != null ? n.retry_max : 2}"
+            onchange="orchNodeField('${n.id}','retry_max',parseInt(this.value||'0',10))"></div></div>`;
+  }
+  if (n.kind === 'branch') {
+    const ports = Object.entries(n.branches || {});
+    html += `<div><label class="text-xs text-slate-400">分支端口（按序求值，默认端口兜底）</label>
+      <div class="space-y-2 mt-1">` + ports.map(([pid, b]) => `
+        <div class="rounded border border-slate-700 p-2 space-y-1">
+          <div class="flex items-center gap-1">
+            <input class="w-14 text-sm" value="${esc(pid)}" title="端口ID（唯一）" onchange="orchBranchPortRename('${n.id}','${pid}',this.value)">
+            <input class="flex-1 text-sm" value="${esc(b.label || '')}" placeholder="分支标签" oninput="orchBranchField('${n.id}','${pid}','label',this.value)">
+            <label class="text-xs flex items-center gap-1 cursor-pointer"><input type="checkbox" ${b.is_default ? 'checked' : ''}
+              onchange="orchBranchDefault('${n.id}','${pid}',this.checked)">默认</label>
+            <button class="text-rose-400 text-xs" onclick="orchBranchDelPort('${n.id}','${pid}')">×</button>
+          </div>
+          ${b.is_default ? '' : `
+          <select class="text-xs" onchange="orchBranchField('${n.id}','${pid}','logic',this.value)">
+            <option value="AND" ${(!b.condition || b.condition.logic === 'AND') ? 'selected' : ''}>AND</option>
+            <option value="OR" ${b.condition && b.condition.logic === 'OR' ? 'selected' : ''}>OR</option>
+          </select>
+          <div class="space-y-1" id="orchRules_${n.id}_${pid}">${orchRulesHtml(n, pid, b)}</div>
+          <button class="btn-ghost text-xs" onclick="orchAddRule('${n.id}','${pid}')">＋ 条件（引用 trigger.x / node:nodeId.body.字段）</button>`}
+        </div>`).join('') + `</div>
+      <button class="btn-ghost text-xs mt-1" onclick="orchAddPort('${n.id}')">＋ 分支端口</button></div>`;
+  }
+  if (n.kind === 'confirm') {
+    html += `<div><label class="text-xs text-slate-400">确认标题</label>
+      <input class="w-full text-sm" value="${esc(n.confirm_title || '')}" oninput="orchNodeField('${n.id}','confirm_title',this.value)"></div>
+      <div class="text-xs text-slate-500">高风险 Action 自动在此暂停并等待人工签核（超时 TTL 自动取消留痕）。</div>`;
+  }
+  if (n.kind === 'capability_gap') {
+    html += `<div><label class="text-xs text-slate-400">缺口原因</label>
+      <textarea class="w-full text-sm" rows="3" oninput="orchNodeField('${n.id}','gap_reason',this.value)">${esc(n.gap_reason || '')}</textarea></div>
+      <div class="text-xs text-rose-400">含能力缺口的工作流发布被阻断（EP-14-05）；绑定对应 Action 后替换为 action 节点。</div>`;
+  }
+  el.innerHTML = html;
+}
+
+function orchTriggerExtraHtml(t) {
+  if (t.type === 'event') return `
+    <div><label class="text-xs text-slate-400">事件名</label>
+      <input class="w-full text-sm" value="${esc(t.event_topic || '')}" oninput="orchTriggerField('event_topic',this.value)"></div>
+    <div><label class="text-xs text-slate-400">必需上下文（逗号分隔）</label>
+      <input class="w-full text-sm" value="${esc((t.required_ctx || []).join(','))}" oninput="orchTriggerField('required_ctx',this.value)"></div>
+    <div class="text-xs text-slate-500">payload 字段经 trigger.字段 注入节点参数。</div>`;
+  if (t.type === 'cron') return `
+    <div><label class="text-xs text-slate-400">cron 表达式</label>
+      <input class="w-full text-sm" value="${esc(t.cron_expr || '')}" oninput="orchTriggerField('cron_expr',this.value)" placeholder="* * * * *"></div>
+    <div><label class="text-xs text-slate-400">静态 payload（JSON）</label>
+      <input class="w-full text-sm" value="${esc(t.static_payload || '')}" oninput="orchTriggerField('static_payload',this.value)" placeholder='{"k":"v"}'></div>`;
+  return '<div class="text-xs text-slate-500">手动运行：右上「运行」按钮（payload 可选）。</div>';
+}
+
+function orchTriggerTypeChange(type) {
+  const t = Object.assign({}, ORCH.wf.trigger, { type });
+  if (type === 'event') Object.assign(t, { event_topic: t.event_topic || '', required_ctx: t.required_ctx || [] });
+  if (type === 'cron') Object.assign(t, { cron_expr: t.cron_expr || '', static_payload: t.static_payload || '' });
+  ORCH.wf.trigger = t; ORCH.dirty = true; orchRenderProps();
+}
+function orchTriggerField(k, v) {
+  const t = ORCH.wf.trigger = Object.assign({}, ORCH.wf.trigger);
+  if (k === 'required_ctx') t.required_ctx = v.split(',').map(s => s.trim()).filter(Boolean);
+  else if (k === 'static_payload') {
+    const s = v.trim();
+    if (!s) t.static_payload = '';
+    else { try { t.static_payload = JSON.parse(s); } catch (e) { t.static_payload = s; } }
+  } else t[k] = v;
+  ORCH.dirty = true;
+}
+
+function orchNodeField(id, k, v) {
+  const n = ORCH.nodes.find(x => x.id === id); if (!n) return;
+  n[k] = v; ORCH.dirty = true; orchRenderWfHead();
+  if (n.kind === 'branch' || k === 'label') orchRenderCanvas();
+}
+
+function orchParamRowsHtml(n) {
+  const rows = Object.entries(n.params || {});
+  if (!rows.length) return '<div class="text-xs text-slate-500">无参数</div>';
+  return rows.map(([k, v]) => `
+    <div class="flex gap-1">
+      <input class="w-20 text-xs" value="${esc(k)}" title="参数名" onchange="orchParamRename('${n.id}','${esc(k)}',this.value)">
+      <select class="w-20 text-xs" onchange="orchParamVType('${n.id}','${esc(k)}',this.value)">
+        <option value="literal" ${(v.value_type || 'literal') === 'literal' ? 'selected' : ''}>字面量</option>
+        <option value="field_ref" ${v.value_type === 'field_ref' ? 'selected' : ''}>上游字段</option>
+        <option value="trigger_ctx" ${v.value_type === 'trigger_ctx' ? 'selected' : ''}>触发上下文</option>
+      </select>
+      <input class="flex-1 text-xs" value="${esc(v.value != null ? v.value : '')}" placeholder="${v.value_type === 'field_ref' ? 'node:节点ID.body.字段' : v.value_type === 'trigger_ctx' ? 'trigger.字段' : '值'}"
+        oninput="orchParamValue('${n.id}','${esc(k)}',this.value)">
+      <button class="text-rose-400 text-xs" onclick="orchParamDel('${n.id}','${esc(k)}')">×</button>
+    </div>`).join('');
+}
+function _orchNode(id) { const n = ORCH.nodes.find(x => x.id === id); if (!n) return null; n.params = n.params || {}; return n; }
+function orchAddParamRow(id) {
+  const n = _orchNode(id); if (!n) return;
+  let k = 'p' + Object.keys(n.params).length; while (n.params[k]) k = k + 'x';
+  n.params[k] = { value_type: 'literal', value: '' };
+  ORCH.dirty = true; orchRenderProps();
+}
+function orchParamRename(id, oldK, newK) {
+  const n = _orchNode(id); if (!n || !newK || newK === oldK || n.params[newK]) return;
+  n.params[newK] = n.params[oldK]; delete n.params[oldK];
+  ORCH.dirty = true; orchRenderProps();
+}
+function orchParamVType(id, k, vt) { const n = _orchNode(id); if (!n) return; n.params[k] = Object.assign({}, n.params[k], { value_type: vt }); ORCH.dirty = true; }
+function orchParamValue(id, k, v) { const n = _orchNode(id); if (!n) return; n.params[k] = Object.assign({}, n.params[k], { value: v }); ORCH.dirty = true; orchRenderWfHead(); }
+function orchParamDel(id, k) { const n = _orchNode(id); if (!n) return; delete n.params[k]; ORCH.dirty = true; orchRenderProps(); }
+
+function orchRulesHtml(n, pid, b) {
+  const rules = (b.condition && b.condition.rules) || [];
+  if (!rules.length) return '<div class="text-xs text-slate-500">无条件（恒真）</div>';
+  return rules.map((r, i) => `
+    <div class="flex gap-1">
+      <input class="flex-1 text-xs" value="${esc(r.field || '')}" placeholder="node:节点ID.body.字段" oninput="orchRuleField('${n.id}','${pid}',${i},'field',this.value)">
+      <select class="w-20 text-xs" onchange="orchRuleField('${n.id}','${pid}',${i},'op',this.value)">
+        ${ORCH_OPS.map(op => `<option ${r.op === op ? 'selected' : ''}>${op}</option>`).join('')}
+      </select>
+      <input class="w-16 text-xs" value="${esc(r.value != null ? r.value : '')}" oninput="orchRuleField('${n.id}','${pid}',${i},'value',this.value)">
+      <button class="text-rose-400 text-xs" onclick="orchRuleDel('${n.id}','${pid}',${i})">×</button>
+    </div>`).join('');
+}
+function _orchBranch(n, pid) { if (!n) return null; n.branches = n.branches || {}; if (!n.branches[pid]) n.branches[pid] = { label: pid, condition: { logic: 'AND', rules: [] } }; return n.branches[pid]; }
+function orchAddRule(id, pid) {
+  const n = ORCH.nodes.find(x => x.id === id); const b = _orchBranch(n, pid); if (!b) return;
+  b.condition = b.condition || { logic: 'AND', rules: [] };
+  b.condition.rules.push({ field: '', op: 'eq', value: '' });
+  ORCH.dirty = true; orchRenderProps();
+}
+function orchRuleField(id, pid, i, k, v) {
+  const n = ORCH.nodes.find(x => x.id === id); const b = _orchBranch(n, pid); if (!b) return;
+  b.condition = b.condition || { logic: 'AND', rules: [] };
+  b.condition.rules[i] = Object.assign({}, b.condition.rules[i], { [k]: v });
+  ORCH.dirty = true; orchRenderWfHead();
+}
+function orchRuleDel(id, pid, i) {
+  const n = ORCH.nodes.find(x => x.id === id); const b = _orchBranch(n, pid); if (!b) return;
+  b.condition = b.condition || { logic: 'AND', rules: [] };
+  b.condition.rules.splice(i, 1);
+  ORCH.dirty = true; orchRenderProps();
+}
+function orchBranchField(id, pid, k, v) {
+  const n = ORCH.nodes.find(x => x.id === id); const b = _orchBranch(n, pid); if (!b) return;
+  if (k === 'logic') { b.condition = Object.assign({}, b.condition, { logic: v }); }
+  else b[k] = v;
+  ORCH.dirty = true;
+}
+function orchBranchDefault(id, pid, isDefault) {
+  const n = ORCH.nodes.find(x => x.id === id); if (!n) return;
+  if (isDefault) Object.keys(n.branches).forEach(p => { n.branches[p].is_default = false; });
+  n.branches[pid].is_default = isDefault;
+  ORCH.dirty = true; orchRenderProps(); orchRenderCanvas();
+}
+function orchBranchPortRename(id, oldPid, newPid) {
+  const n = ORCH.nodes.find(x => x.id === id); if (!n || !newPid || newPid === oldPid || n.branches[newPid]) return;
+  n.branches[newPid] = n.branches[oldPid]; delete n.branches[oldPid];
+  ORCH.edges.forEach(e => { if (e.from === id && e.from_port === oldPid) e.from_port = newPid; });
+  ORCH.dirty = true; orchRenderProps(); orchRenderCanvas();
+}
+function orchBranchDelPort(id, pid) {
+  const n = ORCH.nodes.find(x => x.id === id); if (!n) return;
+  if (Object.keys(n.branches).length <= 1) { toast('至少保留一个分支端口', 'err'); return; }
+  delete n.branches[pid];
+  ORCH.edges = ORCH.edges.filter(e => !(e.from === id && e.from_port === pid));
+  ORCH.dirty = true; orchRenderProps(); orchRenderCanvas();
+}
+function orchAddPort(id) {
+  const n = ORCH.nodes.find(x => x.id === id); if (!n) return;
+  let pid = 'p' + (Object.keys(n.branches).length + 1);
+  while (n.branches[pid]) pid = pid + 'x';
+  n.branches[pid] = { label: pid, condition: { logic: 'AND', rules: [] } };
+  ORCH.dirty = true; orchRenderProps(); orchRenderCanvas();
+}
+
+/* ---------- 保存 / 干跑 / 发布 / 运行 ---------- */
+function _orchSpec() {
+  const t = ORCH.wf.trigger || { type: 'manual' };
+  const trigger = { type: t.type };
+  if (t.type === 'event') { trigger.event_topic = t.event_topic; trigger.required_ctx = t.required_ctx; }
+  if (t.type === 'cron') {
+    trigger.cron_expr = t.cron_expr;
+    let sp = t.static_payload;
+    if (typeof sp === 'string') {
+      const s = sp.trim();
+      try { sp = s ? JSON.parse(s) : {}; } catch (e) { sp = {}; }
+    }
+    trigger.static_payload = sp || {};
+  }
+  return { name: ORCH.wf.name, description: ORCH.wf.description || '', nodes: ORCH.nodes, edges: ORCH.edges, trigger };
+}
+
+async function orchSaveWorkflow() {
+  if (!ORCH.wf) { toast('未选择工作流', 'err'); return; }
+  try {
+    const r = await api('/api/orchestration/workflows/' + ORCH.wf.id, { method: 'PUT', body: JSON.stringify(_orchSpec()) });
+    ORCH.wf = r.data; ORCH.dirty = false;
+    toast('已保存（DAG 校验通过）', 'ok');
+    orchRenderWfHead(); renderOrchWfList();
+  } catch (e) { toast('保存失败：' + e.message, 'err'); }
+}
+
+async function orchDryRun() {
+  if (!ORCH.wf) { toast('未选择工作流', 'err'); return; }
+  let payload = {};
+  const raw = ($('orchRunPayload') || {}).value;
+  if (raw && raw.trim()) { try { payload = JSON.parse(raw); } catch (e) { toast('payload 不是合法 JSON', 'err'); return; } }
+  try {
+    const r = await api('/api/orchestration/workflows/' + ORCH.wf.id + '/dry-run', { method: 'POST', body: JSON.stringify({ payload }) });
+    const d = r.data || {};
+    const box = $('orchDryRunBox'); box.classList.remove('hidden');
+    const stCls = { ok: 'bg-emerald-500/20 text-emerald-300', preview: 'bg-emerald-500/20 text-emerald-300', preview_ok: 'bg-emerald-500/20 text-emerald-300',
+      awaiting_confirmation: 'bg-amber-500/20 text-amber-300', gate_failed: 'bg-rose-500/20 text-rose-300',
+      error: 'bg-rose-500/20 text-rose-300', capability_gap: 'bg-rose-500/20 text-rose-300', not_reached: 'bg-slate-600/40 text-slate-400' };
+    $('orchDryRunResult').innerHTML = (d.nodes || []).map(n => {
+      const out = n.output_preview !== undefined ? n.output_preview : (n.output !== undefined ? n.output : (n.ports ? { selected_port: n.selected_port || null } : null));
+      const extra = [
+        n.error ? '错误：' + n.error : '',
+        n.note ? n.note : '',
+        (n.unresolved_params || []).length ? '未解析参数：' + n.unresolved_params.join('、') : '',
+      ].filter(Boolean).join(' · ');
+      return `<div class="flex items-start gap-2 border-b border-slate-800/60 py-1">
+        <span class="w-20 truncate text-slate-300">${esc(n.label || n.node_id || '')}</span>
+        <span class="px-1.5 py-0.5 rounded text-[10px] shrink-0 ${stCls[n.status] || 'bg-slate-600/40 text-slate-300'}">${esc(n.status || '')}</span>
+        <span class="text-slate-400 break-all">${esc(out ? JSON.stringify(out).slice(0, 160) : '-')}${extra ? '<div class="text-rose-300">' + esc(extra) + '</div>' : ''}</span>
+      </div>`;
+    }).join('') || '<div class="text-slate-500">无节点</div>';
+    toast(d.valid === false ? '干跑：工作流校验未通过（见下方错误）' : '干跑完成（零外部调用）', d.valid === false ? 'err' : 'ok');
+  } catch (e) { toast('干跑失败：' + e.message, 'err'); }
+}
+
+async function orchPublishToggle() {
+  if (!ORCH.wf) return;
+  const st = ORCH.wf.status || 'draft';
+  try {
+    const url = st === 'published'
+      ? '/api/orchestration/workflows/' + ORCH.wf.id + '/un-publish'
+      : '/api/orchestration/workflows/' + ORCH.wf.id + '/publish';
+    const r = await api(url, { method: 'POST' });
+    toast(((r.data || {}).status || '') === 'published' ? '已发布' : '已撤销发布', 'ok');
+    ORCH.wf = Object.assign({}, ORCH.wf, r.data);
+    orchRenderWfHead(); renderOrchWfList();
+  } catch (e) { toast('操作失败：' + e.message, 'err'); }
+}
+
+async function orchRun() {
+  if (!ORCH.wf) { toast('未选择工作流', 'err'); return; }
+  let payload = {};
+  const raw = ($('orchRunPayload') || {}).value;
+  if (raw && raw.trim()) { try { payload = JSON.parse(raw); } catch (e) { toast('payload 不是合法 JSON', 'err'); return; } }
+  try {
+    const r = await api('/api/orchestration/workflows/' + ORCH.wf.id + '/run', { method: 'POST', body: JSON.stringify({ payload }) });
+    toast('运行已提交：' + ((r.data || {}).status || ''), 'ok');
+    ORCH.selRun = (r.data || {}).run_id || null;
+    await orchLoadRuns();
+  } catch (e) { toast('运行失败：' + e.message, 'err'); }
+}
+
+async function orchLoadRuns() {
+  if (!ORCH.wf) { $('orchRunList').innerHTML = ''; return; }
+  try {
+    const r = await api('/api/orchestration/workflows/' + ORCH.wf.id + '/runs?page=1&pageSize=30');
+    ORCH.runs = (r.data && r.data.items) || [];
+    if (!ORCH.selRun && ORCH.runs.length) ORCH.selRun = ORCH.runs[0].run_id;
+    renderOrchRunList();
+    if (ORCH.selRun) orchShowRun(ORCH.selRun);
+  } catch (e) { toast('运行记录加载失败：' + e.message, 'err'); }
+}
+
+function renderOrchRunList() {
+  const el = $('orchRunList'); if (!el) return;
+  if (!ORCH.runs.length) { el.innerHTML = '<div class="text-slate-500">暂无运行</div>'; return; }
+  el.innerHTML = ORCH.runs.map(r => {
+    const c = { succeeded: 'text-emerald-300', failed: 'text-rose-300', awaiting_confirmation: 'text-amber-300', interrupted: 'text-purple-300', cancelled: 'text-slate-400', aborted: 'text-rose-300' }[r.status] || 'text-slate-300';
+    return `<div onclick="orchShowRun('${r.run_id}')" class="cursor-pointer rounded border px-2 py-1 ${r.run_id === ORCH.selRun ? 'border-blue-500 bg-blue-500/10' : 'border-slate-700'}">
+      <span class="${c}">${esc(r.status)}</span> <span class="text-slate-500">${esc((r.started_at || '').replace('T', ' ').slice(0, 19))}</span>
+      <span class="text-slate-500 ml-1">${esc(((r.trigger || {}).source || '') || '')}</span>
+    </div>`;
+  }).join('');
+}
+
+async function orchShowRun(runId) {
+  ORCH.selRun = runId; renderOrchRunList();
+  try {
+    const r = await api('/api/orchestration/runs/' + runId);
+    const run = r.data || {};
+    $('orchRunDetail').classList.remove('hidden');
+    $('orchRunMeta').textContent = `${run.status || ''} · ${((run.trigger || {}).source || '')} · ${run.started_at || ''}${run.finish_reason ? ' · ' + run.finish_reason : ''}`;
+    const ns = run.node_states || {};
+    const nstCls = { success: 'text-emerald-300', failed: 'text-rose-300', running: 'text-blue-300', awaiting_confirmation: 'text-amber-300' };
+    $('orchRunNodes').innerHTML = Object.entries(ns).map(([nid, st]) =>
+      `<div class="flex items-start gap-2 border-b border-slate-800/60 py-1">
+        <span class="w-20 truncate text-slate-300">${esc(nid)}</span>
+        <span class="px-1.5 py-0.5 rounded text-[10px] bg-slate-700/60 ${nstCls[st.status] || 'text-slate-300'}">${esc(st.status || '')}</span>
+        <span class="text-slate-500 break-all flex-1">${esc(st.error || st.confirm_title || '').slice(0, 120)}</span>
+      </div>`).join('');
+    const acts = [];
+    if (run.status === 'awaiting_confirmation' && run.pending_node) {
+      acts.push(`<button class="btn-primary text-xs" onclick="orchConfirmRun('${run.pending_node}')">签核确认</button>
+        <button class="btn-ghost text-xs" onclick="orchRejectRun('${run.pending_node}')">拒绝</button>`);
+    }
+    if (run.status === 'interrupted') acts.push(`<button class="btn-primary text-xs" onclick="orchResumeRun()">恢复（resume）</button>`);
+    $('orchRunActions').innerHTML = acts.join('');
+  } catch (e) { toast('运行详情失败：' + e.message, 'err'); }
+}
+
+async function orchConfirmRun(nodeId) {
+  try {
+    const r = await api(`/api/orchestration/runs/${ORCH.selRun}/confirm`, { method: 'POST', body: JSON.stringify({ node_id: nodeId, reason: '' }) });
+    toast('已确认：' + ((r.data || {}).status || ''), 'ok'); await orchShowRun(ORCH.selRun);
+  } catch (e) { toast('确认失败：' + e.message, 'err'); }
+}
+async function orchRejectRun(nodeId) {
+  const reason = prompt('拒绝原因（留痕）：') || '';
+  try {
+    const r = await api(`/api/orchestration/runs/${ORCH.selRun}/reject`, { method: 'POST', body: JSON.stringify({ node_id: nodeId, reason }) });
+    toast('已拒绝：' + ((r.data || {}).status || ''), 'ok'); await orchShowRun(ORCH.selRun);
+  } catch (e) { toast('拒绝失败：' + e.message, 'err'); }
+}
+async function orchResumeRun() {
+  try {
+    const r = await api(`/api/orchestration/runs/${ORCH.selRun}/resume`, { method: 'POST' });
+    toast('已恢复：' + ((r.data || {}).status || ''), 'ok'); await orchShowRun(ORCH.selRun);
+  } catch (e) { toast('恢复失败：' + e.message, 'err'); }
+}
+
+/* ---------- SOP 生成 / 片段生成 ---------- */
+async function orchGenerate() {
+  const text = ($('orchSopText') || {}).value || '';
+  if (!text.trim()) { toast('请粘贴 SOP / skill 文本', 'err'); return; }
+  const body = { text, source_type: $('orchSopType').value };
+  const name = ($('orchSopName') || {}).value.trim();
+  if (name) body.name = name;
+  try {
+    const r = await api('/api/orchestration/workflows/generate', { method: 'POST', body: JSON.stringify(body) });
+    const d = r.data || {};
+    toast(`草稿已生成：${(d.nodes || []).length} 节点 / 缺口 ${d.gap_count != null ? d.gap_count : '?'}`, 'ok');
+    await orchSelectWorkflow(d.id, true);
+    await loadOrchestration();
+  } catch (e) { toast('生成失败：' + e.message, 'err'); }
+}
+
+function orchToggleFragment() {
+  const box = $('orchFragmentBox'); box.classList.toggle('hidden');
+}
+
+async function orchGenerateFragment() {
+  if (!ORCH.wf) { toast('未选择工作流', 'err'); return; }
+  const intent = ($('orchFragmentIntent') || {}).value || '';
+  if (!intent.trim()) { toast('请输入意图', 'err'); return; }
+  const after = $('orchFragmentAfter').value || undefined;
+  try {
+    const r = await api(`/api/orchestration/workflows/${ORCH.wf.id}/generate-fragment`, { method: 'POST', body: JSON.stringify({ intent, after_node: after }) });
+    toast('片段已并入草稿（grounding 校验通过）', 'ok');
+    await orchSelectWorkflow(ORCH.wf.id, true);
+  } catch (e) { toast('片段生成失败：' + e.message, 'err'); }
 }

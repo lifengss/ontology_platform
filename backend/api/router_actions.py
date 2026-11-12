@@ -61,7 +61,7 @@ def create_action(payload: ActionCreate, project_id: str = Depends(project_id_pa
 def list_actions(
     project_id: str = Depends(project_id_param),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page_size: int = Query(default=20, ge=1, le=100, alias="pageSize"),
 ):
     page, page_size = parse_pagination(page, page_size)
     items = _store_for(project_id).all()
