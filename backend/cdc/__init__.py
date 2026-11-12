@@ -281,6 +281,8 @@ def _apply_snapshot(project_id: str, conn: dict[str, Any], norm: dict[str, Any],
         "ontology_id": maps.get("ontology_id"), "object_type": object_type,
         "candidate_id": None, "instance": inst, "imported_at": _now_iso(),
         "tx_id": None, "stable_key": norm["key_attr"], "stable_key_value": key_str,
+        # V2-02（M4-A①）：显式渠道标记——源连接型，内容值不落本地（INV-1）
+        "channel": "cdc", "content_policy": "federated",
     })
     return "inserted"
 

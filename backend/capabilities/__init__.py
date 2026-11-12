@@ -487,12 +487,31 @@ class CapabilityService:
                 return [(irec, iinst) for irec, iinst in pool
                         if all(iinst.get(k) == v for k, v in d.items())]
 
+            # V2-02（M4-A①）：lookup 命中源连接型实例且属性无本地值 → 治理身份单值回源
+            #（批量联邦读＋成本提示随 M4-A④/TP-04-06）；命中缓存避免同一实例重复回源。
+            fed_value_cache: dict[str, Any] = {}
+
+            def _fed_value(irec: dict[str, Any], iinst: dict[str, Any], a: str) -> Any:
+                if a in iinst:
+                    return iinst.get(a)
+                import content_access
+                if not content_access.is_federated(self.project_id, irec):
+                    return iinst.get(a)
+                rid = irec.get("id")
+                if rid in fed_value_cache:
+                    return fed_value_cache[rid]
+                values, _meta = content_access.federate_values(
+                    self.project_id, irec, user_id=None, attr_ids=[a])
+                v = values.get(a)
+                fed_value_cache[rid] = v
+                return v
+
             def _record(matched: list, d: dict[str, Any], rule: str,
                         total_matches: int | None = None) -> Any:
                 values = []
                 count = len(matched) if total_matches is None else total_matches
                 for irec, iinst in matched:
-                    value = iinst.get(attr) if attr else iinst
+                    value = _fed_value(irec, iinst, attr) if attr else iinst
                     code = iinst.get("attr_baseline_code") or iinst.get("attr_code") \
                         or iinst.get("attr_product_code") or irec.get("id")
                     tr.lookups.append({

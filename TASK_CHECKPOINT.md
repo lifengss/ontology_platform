@@ -1147,3 +1147,83 @@ M3 里程碑退出（docs/V2-测试用例.md 判据）：TCE2E-03 备件更换�
 - 验证：`py_compile backend/config.py` 通过；全局残留检查（frontend/backend/installer/scripts，排除 vendor）仅剩上表有意保留项。
 - 注意：运行中后端进程重启后 health 才返回 2.0.0；UI 刷新即显示新标题（静态文件）。
 - 主线不变：M4 全片（含 M4-J）＋终验＋push。
+
+## 46. M4 启动：M4-A① 数据模型改造＋存量迁移（D3 评审＋设计冻结）
+
+### 46.1 用户指令
+
+- 「开始M4的开发吧。M4的所有需求都开发完退出后再找我确认，中间小需求开发完不需要找我。」→ M4 十片连做（A→B→C→D→E→F→G→H→J→I），中间不请示，终验后统一汇报。
+
+### 46.2 D3 单独评审结论（里程碑要求"M4 启动前单独评审"）
+
+评审对象＝存量源连接型实例迁移方案 D3（一次性建关系快照、非键内容值弃用改联邦读、原三元组保留为回退底）。**结论：方案成立，采纳并细化三处语义**：
+
+1. **"回退底"落点显式化**：原三元组留在**主命名图**会随 `sync_ontology` 全量重建被清掉、且 SPARQL/NL 查询仍会发放旧值（违反"内容永远源端按需取"）。故迁移时把源连接型实例的非键值三元组从主命名图**移入独立回退图 `urn:ontology:{oid}/fallback_snapshot`**（不参与常规查询/推理/图谱）；JSONL 侧非键值移入记录内 `fallback_content` 字段（明确非 `instance` 字段，INV-1 负向断言不覆盖它）。
+2. **INV-1 负向断言口径**：① 源连接型记录的 `instance` 字段键 ⊆ {stable_key 属性, 关系 id, `_source`}；② 主命名图中这些实例主体的三元组 ⊆ {rdf:type, rdfs:label, rel_uri 关系边}。回退图/回退字段不计入（明确标注 stale）。
+3. **身份语义**：联邦读回源＝鉴权启用时**以访问者身份**（V2-14i 凭据映射，缺失即 403 不回落匿名，复用 `identity_federation.federated_read`）；MCP 通道 token 为项目级无用户映射→**治理身份**（连接自带凭据，与 M3-C `_governance_sample` 同口径）；鉴权关闭（dev/测试）同治理身份。读源失败：存量迁移实例回退 stale 值（标 `stale=true, as_of`），新实例不造值（`content_unavailable`）。
+
+### 46.3 M4-A① 设计（影响面探查结论→改动点）
+
+现状关键事实：CDC 入库**已只写键+关系边+_source**（M3-D 语义）；`tenant.instance_is_connection_type`（candidate.source_type=external_mcp 判定）与 `content_visible` 源连接特判已存在（M2-C 预留，注释即指向 M4/D3）；`federated_read`/`resolve_credential`/`_governance_sample` 按键回读模式齐备。**缺口＝external_mcp 审批入库仍落全量值（`_approve_one` router_ingest:726）＋全部读路径读本地＋无显式渠道字段＋存量未迁移**。
+
+改动清单：
+
+| # | 文件 | 改动 |
+|---|---|---|
+| 1 | `backend/content_access.py`（**新建**） | 渠道判定 `channel_of`（显式 `channel` 字段→`_source.kind=cdc`→candidate external_mcp→upload）；`relation_snapshot`/`strip_content_for_storage`（入库剥离）；`federate_values`（按键回源：访问者/治理双身份、fallback stale 回退、unavailable 不造值、来源标记 meta）；`merge_record_content`（读路径装配＋`content_resolution` 附加字段） |
+| 2 | `backend/api/router_ingest.py` `_approve_one` | external_mcp 候选：SHACL 门禁仍用候选全量值（边界校验不变）→**落库前剥离非键内容值**＋`channel=external_mcp`＋`content_policy=federated`；upload 渠道显式 `channel=upload`；同主键去重合并时联邦渠道只合并键/关系/`_source` |
+| 3 | `backend/api/router_ingest.py` update/patch/delete | 联邦渠道记录内容值写入 422 `CONTENT_NOT_LOCAL`（改源系统→CDC 同步）；删除允许（治理行为，审计） |
+| 4 | `backend/cdc/__init__.py` `_apply_snapshot` | insert/update 记录补显式 `channel=cdc`（行为不变，仅标记） |
+| 5 | `backend/api/router_ingest.py` get/list | `get_instance`：联邦渠道→`merge_record_content`（访问者/治理身份回源＋`content_resolution`）；`list_instances`：联邦渠道行加 `content_mode=federated` 标记（不做逐行回源，详情才拉值） |
+| 6 | `backend/mcp_server/__init__.py` `instance_get` | 联邦渠道记录→治理身份逐条回源合并（fields 投影作用于合并后值）；TOOLS_CONTRACT 同步说明 |
+| 7 | `backend/capabilities/__init__.py` lookup/execute | lookup 命中联邦渠道实例→治理身份按键回源取所需属性（单值回源；TP-04-06 批量＋成本提示在④步） |
+| 8 | `scripts/migrate_v2_02_source_channel.py`（**新建**） | 迁移脚本：备份 instances 目录→逐记录剥离（非键值→`fallback_content`＋`content_as_of`＋显式 `channel`）→RDF：联邦主体非键值三元组移入 `fallback_snapshot` 回退图＋主图重建（`sync_ontology`）→审计 `v2_02_migration`；`--dry-run`＋报告 JSON |
+| 9 | `scripts/verify_inv1_source_channel.py`（**新建**） | INV-1 负向断言（JSONL instance 键域＋主命名图三元组域）＋联邦读回源断言（mock 源）＋403 无映射＋源宕 stale/unavailable＋迁移后复验 |
+| 10 | `frontend` 实例列表/详情 | 联邦渠道行"联邦读取"标记；详情值带来源标记（source_connection/fetched_at/resolved_as）＋stale 警示 |
+
+不变式与回归：INV-1 本步首次验证（⑨）；迁移后立即 L5 全回归（93 条，test_vs10_e2e 的 instance_get 值断言改由治理身份回源 mock 满足）；上传型全链路零改动。回退方案：迁移前 instances 目录完整备份＋RDF 回退图，可原样还原。
+
+状态：设计冻结 ✅，开始编码。
+
+
+## 47. M4-A① 实例数据模型改造（V2-02 联邦读基础，INV-1）✅（2026-11-13）
+
+### 47.1 交付（对应 §46.4 十项清单）
+
+1. **`backend/content_access.py`（新建，核心模块）**：
+   - 渠道判定 `channel_of`/`is_federated`：显式 `channel` 字段 → `_source.kind=="cdc"` → 候选 `source_type=="external_mcp"`（经候选映射反查）→ 默认 `upload`；**源连接型权威口径＝`_source.connection_id` ∈ 真实 `mcp_connections` 集合**（`apply_field_map` 恒写 `kind="field_map"` 不可按 kind；上传通道 connection_id 是文件名不命中集合）。
+   - `keep_keys_for`：标识（id/node_id）＋对象级 `stable_key`＋关系属性＋`_source`；`object_def_for` 按 `ont["objects"]` 解析（relations 独立于 attributes）。
+   - `strip_content_for_storage`：返回剥离后 instance dict；对象定义解析失败**保守返回原值**（不破坏入库）。
+   - `federate_values`：读源连接→凭据解析（访问者→V2-14i 映射，缺失 403 `IDENTITY_MAPPING_MISSING` 不回落；治理身份用连接自带）→`mcp_client.invoke_tool(auth_override=...)`→**客户端按键复核**（mock/真实源 `/read` 忽略过滤参数返回全量，防错配）→按属性 id 抽非键值；失败三分态＝新实例 `unavailable`（不造值）/迁移后存量 `fallback`（`fallback_content`＋stale）/迁移前存量 `legacy_local`（本地残留＋stale）。
+   - `merge_record_content`：详情回源合并（顶层 `content_mode` 跟随 `meta.mode`＋`content_resolution`）。
+   - `annotate_rows`：列表轻量标注 `content_mode`（federated/local，不逐行回源避免 N+1）。
+2. **`backend/api/router_ingest.py`**：`_approve_one` 源连接型审批剥离＋回填 `channel`＋`content_policy="federated"`（stable_key 去重合并分支同剥离）；`_ensure_instance_write` 联邦内容值写入 422 `CONTENT_NOT_LOCAL`（删除允许）；`get_instance` 统一 `merge_record_content`（上传型也标 `content_mode=local`）；`list_instances` `annotate_rows`。
+3. **`backend/cdc/__init__.py`**：insert 记录补 `channel="cdc"`＋`content_policy="federated"`（CDC 本就不落内容值，仅显式标记）。
+4. **`backend/mcp_server/__init__.py`**：`instance_get` 联邦记录治理身份合并（`user_id=None`，`fields` 投影作用于合并后值）。
+5. **`backend/capabilities/__init__.py`**：lookup 命中联邦实例→治理身份单值回源（`_fed_value`；TP-04-06 批量＋成本提示留 M4-A④）。
+6. **`scripts/migrate_v2_02_source_channel.py`（新建）**：备份 instances 目录→JSONL 剥离（非键值→`fallback_content`＋`content_as_of`＋channel 回填）→RDF 非键三元组（Python 按旧值重建 N-Triples，`attr_uri`/`typed_literal` 取自 `modeling_translator`）移入 `fallback_snapshot` 回退图（DELETE WHERE 按 subject 清空＋INSERT DATA）→`sync_ontology` 重建主图→审计 `v2_02_migration`→报告 JSON；`--dry-run`/`--project`；幂等（`already_migrated`）；文件降级模式（Fuseki 不可达）回退底以记录内 `fallback_content` 为准、RDF 回退图跳过；探活 `jena_health()["jena"]=="healthy"`。
+7. **`scripts/verify_inv1_source_channel.py`（新建）**：INV-1 双域断言（①JSONL instance 键域⊆保留键 ②RDF 主命名图谓词域⊆{rdf:type, rdfs:label, rel_uri}，经 `sparql_query` 统一远端/本地）；退出码 0/1。
+8. **`frontend/app.js`**：实例行「联邦」badge（`_instanceRowHtml`）；详情弹层联邦面板 `renderFederationPanel`（源连接名＋模式文案：实时回源/回退值（旧值快照）/迁移前本地值（可能陈旧）/无可用值＋stale 警示＋error 红框）；`loadFederationDetail` 懒加载 `GET /api/ingest/instances/{id}`（列表行仅轻量标注、详情才回源合并；合并后 `content_resolution` 必存在不循环）；联邦实例属性表只读（disabled＋提示）＋`saveInstanceEdit` 联邦防护 toast（与后端 422 双保险）。
+9. **测试 `backend/tests/test_v2_02_content_access.py`（新建，10 用例）**：test_01 setup（项目/本体/连接/mock 源）／test_02 渠道判定四分支／test_02b 剥离＋保守回退／test_03 审批剥离＋联邦回源／test_04 源宕三分态（unavailable/fallback(stale)/legacy_local）／test_05 403 无映射不回落／test_06 422 CONTENT_NOT_LOCAL／test_07 上传型零联邦行为／test_08 迁移 dry-run＋幂等＋INV-1 复验／test_09 迁移后回源失败读 fallback 旧值。
+
+### 47.2 验证
+
+- 新测试 **10/10 全绿**；L5 全量回归 **103/103**（93 既有＋10 新增；`test_vs10_e2e` 兼容——断言的 orderCode 是 stable_key 保留，无 mock 停止后内容值读取）。
+- `verify_inv1_source_channel.py` dev 数据目录 **ALL PASS**（28 项目）。
+- `migrate_v2_02_source_channel.py --dry-run` dev 数据：28 项目全部 fed=0/migr=0（历史实例皆上传/LLM 通道，无源连接型存量——判定正确非漏判）。
+- 前端 `node --check` 语法通过＋read_lints 干净（浏览器冒烟随 M4-A 后续步统一做）。
+
+### 47.3 验收中修复 6 缺陷
+
+1. `JsonStore` 只有 `all()` 无 `list_records()`——`_candidates_map`/`_connection_ids_set` 误用后异常被静默吞掉判空（渠道判定全失效）→ 改 `.all()`。
+2. `_approve_one` 调 `strip_content_for_storage` 缺 `object_type` → 对象定义解析失败→保守返回原值（审批未剥离）→ 两处（新记录＋去重合并）补齐。
+3. `bypass` 在 `tenant` 模块而非 `auth`——`from auth import bypass` ImportError 被吞→鉴权关闭态误走 viewer 403 → 改 `from tenant import bypass`。
+4. `merge_record_content` 顶层 `content_mode` 硬编码 `"federated"` 掩盖 unavailable/fallback/legacy_local 三态 → 跟随 `meta.mode`。
+5. `field_map` 方向确认＝`{源字段名: 属性id}`（`dictionary.resolve_field_map` docstring「{系统字段: 本体属性id}」证实）——此前反方向实现的 `_field_map_reverse` 修正。
+6. 测试侧：回退底误断言独立 `fallback_snapshots` store——实际回退底＝记录内 `fallback_content`（文件降级模式 JSONL 为准；RDF 回退图仅 Fuseki 可达时写）→ 断言修正。
+
+### 47.4 边界与下一步
+
+- git：本切片 commit 本地不 push（M4-I 终验统一 push）。
+- 文档：API 文档待补 §30（content_mode/content_resolution 字段语义）；项目 wiki 测试用例登记 M4-A① 行。
+- 下一步：**M4-A②**（跨本体候选检测＋对齐声明＋会签）→ M4-A③（融合查询）→ M4-A④（TP-04-06 批量回源＋成本提示；含 M3-C 挂账 TP-21-08 P2、M1-B SKIP 的 TP-04-06/EP-04-03 按 D2 随 M4-A 补齐）。

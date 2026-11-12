@@ -3400,8 +3400,10 @@ function _instanceRowHtml(inst, global) {
     .map(([k, v]) => esc(k) + '=' + esc(typeof v === 'object' ? JSON.stringify(v) : v))
     .join('　');
   const active = state.selectedInstance?.id === inst.id ? 'border-amber-500/60 bg-slate-800/60' : 'border-slate-700/50 hover:border-slate-600';
+  const fedBadge = inst.content_mode === 'federated'
+    ? ' <span class="badge" style="background:#312e81;color:#a5b4fc" title="源连接型实例：内容值实时回源，不落本地">联邦</span>' : '';
   return '<div class="p-2 rounded-lg border ' + active + ' cursor-pointer" onclick="selectInstance(' + JSON.stringify(inst).replace(/"/g, '&quot;') + ')">' +
-    '<div class="flex justify-between items-center"><span class="text-sm font-medium">' + esc(data.name || data.title || inst.id || inst.node_id || '') + (global ? ' <span class="badge">' + esc(inst.object_type || '') + '</span>' : '') + '</span>' +
+    '<div class="flex justify-between items-center"><span class="text-sm font-medium">' + esc(data.name || data.title || inst.id || inst.node_id || '') + fedBadge + (global ? ' <span class="badge">' + esc(inst.object_type || '') + '</span>' : '') + '</span>' +
     '<span class="text-xs text-slate-500">' + esc((inst.id || inst.node_id || '').slice(0, 16)) + '</span></div>' +
     '<div class="text-xs text-slate-400 mt-1 truncate">' + preview + '</div></div>';
 }
@@ -3442,12 +3444,17 @@ function renderInstanceDetail(inst) {
   const ontology = state.ontologies.find(o => o.id === inst.ontology_id) || {};
   const objDef = (ontology.objects || []).find(o => o.id === inst.object_type) || {};
 
+  const isFed = inst.content_mode === 'federated' || !!inst.content_resolution;
   $('instanceModalTitle').innerHTML = esc(data.name || data.title || inst.id || inst.node_id || '实例详情') +
-    ' <span class="badge">' + esc(inst.object_type || '') + '</span>';
+    ' <span class="badge">' + esc(inst.object_type || '') + '</span>' +
+    (isFed ? ' <span class="badge" style="background:#312e81;color:#a5b4fc">联邦</span>' : '');
   $('instanceModalMeta').textContent = (inst.id || inst.node_id || '') + ' · ' + (inst.object_type || '') +
     (inst.imported_at ? ' · 入库 ' + inst.imported_at : '');
 
   let html = '';
+
+  // V2-02：源连接型实例——联邦来源面板（回源状态/回退提示）
+  if (isFed) html += renderFederationPanel(inst);
 
   // V2-06：上传型实例内容默认仅上传者可读——未开放者只见元数据，显式提示（不静默）
   if (inst.content_restricted) {
@@ -3456,15 +3463,15 @@ function renderInstanceDetail(inst) {
   }
   html += renderContentOpenPanel(inst);
 
-  // 可编辑属性
+  // 可编辑属性（联邦实例内容值只读：值实时回源，禁止本地编辑/保存）
   const attrRows = (objDef.attributes || []).map(a => {
     const val = data[a.id];
     const inputVal = (val === undefined || val === null) ? '' : String(val);
-    const input = '<input class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200" ' +
-      'data-attr="' + esc(a.id) + '" value="' + esc(inputVal) + '" />';
+    const input = '<input class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200' + (isFed ? ' opacity-50' : '') + '" ' +
+      'data-attr="' + esc(a.id) + '" value="' + esc(inputVal) + '"' + (isFed ? ' disabled' : '') + ' />';
     return '<tr><td class="border border-slate-700 p-1 text-slate-400">' + esc(a.name || a.id) + (a.required ? '*' : '') + '</td><td class="border border-slate-700 p-1">' + input + '</td></tr>';
   }).join('');
-  html += '<div><label>属性（点击表格可直接编辑）</label><table class="w-full text-xs border-collapse" id="instanceEditTable">' + attrRows + '</table></div>';
+  html += '<div><label>属性' + (isFed ? '（联邦实例：内容值实时回源，只读）' : '（点击表格可直接编辑）') + '</label><table class="w-full text-xs border-collapse" id="instanceEditTable">' + attrRows + '</table></div>';
 
   // 数据血缘（V2-08 细粒度血缘：六要素垂直链＋上游追溯，异步加载）
   html += renderLineagePanel(inst);
@@ -3473,6 +3480,44 @@ function renderInstanceDetail(inst) {
   html += renderLineage(inst, objDef, ontology);
   $('instanceDetailBody').innerHTML = html;
   loadInstanceLineage(inst); // V2-08：血缘面板异步填充（失败回退本地 _source 静态展示）
+  if (isFed && !inst.content_resolution) loadFederationDetail(inst); // V2-02：列表行仅轻量标注，详情路径回源合并
+}
+
+// V2-02：联邦来源面板——展示源连接与回源状态（federated/fallback/legacy_local/unavailable）
+function renderFederationPanel(inst) {
+  const cr = inst.content_resolution || {};
+  if (!cr.source_connection && !cr.connection_name && !cr.mode && !cr.error && !cr.stale) {
+    return '<div class="p-2 rounded border border-indigo-700/40 bg-indigo-900/20 text-xs text-indigo-300">'
+      + '⛓ 联邦实例：内容值正从源系统实时回源…</div>';
+  }
+  const modeText = {
+    federated: '实时回源',
+    fallback: '回源失败 — 展示回退值（旧值快照）',
+    legacy_local: '回源失败 — 展示迁移前本地值（可能陈旧）',
+    unavailable: '回源失败 — 无可用内容值',
+  }[cr.mode] || (cr.mode || '回源中');
+  const lines = [];
+  if (cr.connection_name || cr.source_connection) lines.push('源连接：' + (cr.connection_name || cr.source_connection));
+  if (cr.as_of) lines.push('数据时点：' + cr.as_of);
+  if (cr.stale) lines.push('⚠ 陈旧数据（源端不可达时的最后已知值）');
+  const errCls = cr.error ? 'border-rose-700/50 bg-rose-900/20 text-rose-300' : 'border-indigo-700/40 bg-indigo-900/20 text-indigo-300';
+  return '<div class="p-2 rounded border ' + errCls + ' text-xs space-y-0.5">'
+    + '<div class="font-medium">⛓ 联邦实例 · ' + esc(modeText) + '</div>'
+    + lines.map(l => '<div>' + esc(l) + '</div>').join('')
+    + (cr.error ? '<div>' + esc(String(cr.error)) + '</div>' : '')
+    + '</div>';
+}
+
+// V2-02：联邦实例懒加载回源结果（详情端点合并回源；合并后 content_resolution 必存在，不会循环）
+async function loadFederationDetail(inst) {
+  try {
+    const j = await api('/api/ingest/instances/' + encodeURIComponent(inst.id || inst.node_id));
+    const full = j.data;
+    if (state.selectedInstance && state.selectedInstance.id === (inst.id || inst.node_id)) {
+      state.selectedInstance = full;
+      renderInstanceDetail(full);
+    }
+  } catch (e) { /* 回源失败由后端在 content_resolution.error 中表达，面板按列表标注展示 */ }
 }
 
 // ---- V2-06 / M2-C：上传型实例内容开放管理（仅上传者/admin 可见）----
@@ -3861,6 +3906,11 @@ function renderSourceLineageFallback(inst) {
 async function saveInstanceEdit() {
   const inst = state.selectedInstance;
   if (!inst) return;
+  // V2-02：联邦实例内容值实时回源，本地不可写（后端亦以 422 CONTENT_NOT_LOCAL 拒绝）
+  if (inst.content_mode === 'federated' || inst.content_resolution) {
+    toast('联邦实例内容值实时回源，不支持本地编辑（请到源端系统修改）', 'err');
+    return;
+  }
   const inputs = document.querySelectorAll('#instanceEditTable input[data-attr]');
   const current = { ...(inst.instance || inst.props || inst) };
   const patch = {};

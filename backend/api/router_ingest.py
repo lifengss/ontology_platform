@@ -45,7 +45,16 @@ def _request_username(request: Request) -> str:
 
 
 def _ensure_instance_write(request: Request, project_id: str, rec: dict) -> None:
-    """V2-06：实例写权限 = 实例可见（同租户＋schema 可见）且 schema 写权限（共享只授读）。"""
+    """V2-06：实例写权限 = 实例可见（同租户＋schema 可见）且 schema 写权限（共享只授读）。
+
+    V2-02（M4-A①）：源连接型实例内容值不落地（INV-1），本地写入一律拒绝——
+    改源业务系统，平台经 CDC（M3-D）同步关系快照。
+    """
+    import content_access
+    if content_access.is_federated(project_id, rec):
+        raise ApiError("CONTENT_NOT_LOCAL",
+                       "源连接型实例内容值不在本地存储（V2-02 INV-1）：请在源业务系统修改，"
+                       "平台经 CDC 同步；本端点仅适用于上传型实例", http_status=422)
     if bypass():
         return
     user = current_user(request)
@@ -739,19 +748,33 @@ def _approve_one(rec: dict, candidate_id: str, project_id: str) -> dict:
         instance_store = _instance_store_for(project_id)
         key = _stable_key_for(ontology, rec.get("object_type"))
         uploader = rec.get("created_by")  # V2-06：上传型内容默认仅上传者可读
+        # V2-02（M4-A①）：渠道分流——源连接型（external_mcp/cdc）非键内容值永不落地（INV-1），
+        # 只持久化关系快照（键值+关系边+_source）；SHACL 门禁仍用候选全量值做边界校验（上面已完成）。
+        src_type = rec.get("source_type") or "upload"
+        is_fed_src = src_type in ("external_mcp", "cdc")
+        import content_access
         n_inserted = n_deduped = 0
         for inst in rec.get("instances", []):
+            inst_stored = (
+                content_access.strip_content_for_storage(
+                    project_id, {"ontology_id": rec.get("ontology_id"),
+                                 "object_type": rec.get("object_type"), "instance": inst})
+                if is_fed_src else inst
+            )
             instance_record = {
                 "id": inst.get("id") or f"{rec['object_type']}_{uuid.uuid4().hex}",
                 "project_id": project_id,
                 "ontology_id": rec.get("ontology_id"),
                 "object_type": rec.get("object_type"),
                 "candidate_id": candidate_id,
-                "instance": inst,
+                "instance": inst_stored,
                 "imported_at": _now(),
                 "tx_id": result.get("neo_tx_id"),
+                "channel": src_type if is_fed_src else "upload",
             }
-            if uploader:
+            if is_fed_src:
+                instance_record["content_policy"] = "federated"
+            elif uploader:
                 instance_record["uploaded_by"] = uploader
                 instance_record["content_open"] = {"users": [], "departments": []}
             key_value = inst.get(key) if key else None
@@ -761,16 +784,29 @@ def _approve_one(rec: dict, candidate_id: str, project_id: str) -> dict:
                 matched = _match_by_stable_key(instance_store, rec.get("ontology_id"),
                                                rec.get("object_type"), key, key_value)
                 if matched:
-                    merged = dict(matched.get("instance") or {})
-                    merged.update(inst)
-                    instance_store.update(matched["id"], {
+                    # 联邦渠道只合并键/关系/_source（内容值不进本地存储）；
+                    # 旧记录基线先按快照键域剥离，防止迁移前遗留的非键值借 dedup 更新残留（INV-1）
+                    if is_fed_src:
+                        merged = content_access.strip_content_for_storage(
+                            project_id,
+                            {"ontology_id": rec.get("ontology_id"),
+                             "object_type": rec.get("object_type"),
+                             "instance": matched.get("instance") or {}})
+                    else:
+                        merged = dict(matched.get("instance") or {})
+                    merged.update(inst_stored if is_fed_src else inst)
+                    patch = {
                         "instance": merged,
                         "stable_key": key,
                         "stable_key_value": key_value,
                         "candidate_id": candidate_id,
                         "imported_at": _now(),
                         "tx_id": result.get("neo_tx_id"),
-                    })
+                    }
+                    if is_fed_src:
+                        patch["channel"] = src_type
+                        patch["content_policy"] = "federated"
+                    instance_store.update(matched["id"], patch)
                     n_deduped += 1
                     continue
             instance_store.insert(instance_record)
@@ -1020,7 +1056,10 @@ def list_instances(
     items.sort(key=lambda x: x.get("imported_at") or "", reverse=True)
     total = len(items)
     start = (page - 1) * page_size
-    return success(list_payload(items[start: start + page_size], total, page, page_size))
+    # V2-02（M4-A①）：联邦渠道行加 content_mode 标记（不逐行回源，详情页按需取内容值）
+    import content_access
+    page_items = content_access.annotate_rows(project_id, items[start: start + page_size])
+    return success(list_payload(page_items, total, page, page_size))
 
 
 @router.get("/instances/{instance_id}")
@@ -1036,6 +1075,11 @@ def get_instance(instance_id: str, request: Request, project_id: str = Depends(p
                 raise ApiError("NOT_FOUND", "实例不存在", http_status=404)  # 跨共享范围：实例不可见（INV-2）
             if not content_visible(user, project_id, rec, ont):
                 return success(mask_instance_content(rec))  # 上传型内容未开放：仅元数据
+        # V2-02（M4-A①）：源连接型实例内容值按需回源（访问者身份 V2-14i；鉴权关闭走治理身份）；
+        # 上传型标注 content_mode=local（不回源）
+        import content_access
+        rec = content_access.merge_record_content(
+            project_id, rec, user_id=(user or {}).get("id") or (user or {}).get("username"))
         return success(rec)
     raise ApiError("NOT_FOUND", "实例不存在", http_status=404)
 

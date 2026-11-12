@@ -775,6 +775,14 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
                                            ((r or {}).get("instance") or {}).get("node_id"))]
         total = len(records)
         page = records[off: off + lim]
+        # V2-02（M4-A①）：源连接型实例内容值按需回源（治理身份——MCP token 为项目级无用户映射；
+        # 回退底/不可用语义见 content_access.federate_values，来源标记在 content_resolution）
+        import content_access
+        page = [
+            content_access.merge_record_content(project_id, r, user_id=None)
+            if content_access.is_federated(project_id, r) else r
+            for r in page
+        ]
         if field_list:
             page = [dict(r) for r in page]
             for r in page:
