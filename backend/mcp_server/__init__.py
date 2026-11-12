@@ -42,6 +42,7 @@ from action_engine import ActionEngine
 from config import get_settings
 from core.storage import JsonStore
 from fastapi.responses import JSONResponse
+from lineage import build_instance_lineage  # V2-08 细粒度血缘（M3-B）
 from logging_setup import get_logger
 
 logger = get_logger("mcp_server")
@@ -791,6 +792,26 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
             payload["hint"] = (f"共 {total} 条，本次返回 {off + 1}-{off + len(page)} 条。"
                                "建议加 object_type 缩小范围，或用 offset 取余下数据。")
         return json.dumps(payload, ensure_ascii=False)
+
+    @m.tool()
+    def lineage_get(instance_id: str) -> str:
+        """V2-08 细粒度血缘（M3-B）：查已落库实例的垂直链血缘（instance_id 为实例记录 ID）。
+
+        返回六要素：来源系统（MCP 连接）/源字段（field_map_source=dictionary 时附
+        字典术语解析路径）/导入批次（候选）/fetched_at/转换规则（公式能力版本＋
+        输入原始值＋lookup 命中明细）/上游实例（公式 lookup 命中的基线实例）。
+        与 REST GET /api/lineage/instances/{instance_id} 及前端实例详情面板同一装配，
+        API/MCP/UI 三通道一致。联邦读内容不持久化，故不出现联邦读血缘。
+        """
+        from core.instance_store import get_instance_store
+        rec = get_instance_store(project_id).get(instance_id)
+        if not rec:
+            raise _err(ERR_NOT_FOUND, f"实例 {instance_id} 不存在")
+        oid = rec.get("ontology_id")
+        if oid:
+            _require_published(owner, project_id, oid)
+        data = build_instance_lineage(project_id, instance_id)
+        return json.dumps(data, ensure_ascii=False)
 
     @m.tool()
     def action_invoke(action_id: str, confirmation_token: str = "") -> str:

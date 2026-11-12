@@ -3304,12 +3304,13 @@ function renderInstanceDetail(inst) {
   }).join('');
   html += '<div><label>属性（点击表格可直接编辑）</label><table class="w-full text-xs border-collapse" id="instanceEditTable">' + attrRows + '</table></div>';
 
-  // 数据血缘（来源）
-  html += renderSourceLineage(inst);
+  // 数据血缘（V2-08 细粒度血缘：六要素垂直链＋上游追溯，异步加载）
+  html += renderLineagePanel(inst);
 
   // 关系血缘
   html += renderLineage(inst, objDef, ontology);
   $('instanceDetailBody').innerHTML = html;
+  loadInstanceLineage(inst); // V2-08：血缘面板异步填充（失败回退本地 _source 静态展示）
 }
 
 // ---- V2-06 / M2-C：上传型实例内容开放管理（仅上传者/admin 可见）----
@@ -3354,9 +3355,127 @@ async function saveContentOpen(revoke) {
   }
 }
 
-function renderSourceLineage(inst) {
+// ---- V2-08 细粒度血缘（M3-B）：统一血缘面板 ----
+// 数据源与 API GET /api/lineage/instances/{id}、MCP lineage_get 同一装配（三通道一致）：
+// 来源系统 / 源字段（经字典术语）/ 导入批次 / fetched_at / 转换规则（公式能力版本）/ 上游实例
+function renderLineagePanel(inst) {
+  return '<div><label>数据血缘 / 来源（V2-08 细粒度血缘）</label>'
+    + '<div id="lineagePanel" class="text-xs text-slate-400">血缘加载中…</div></div>';
+}
+
+async function loadInstanceLineage(inst) {
+  const panel = $('lineagePanel');
+  if (!panel) return;
+  const id = inst.id || inst.node_id;
+  try {
+    const j = await api('/api/lineage/instances/' + encodeURIComponent(id));
+    panel.innerHTML = renderLineageData(j.data, inst);
+  } catch (e) {
+    // 血缘 API 不可用（如旧版本后端）回退本地 _source 静态展示，来源信息不静默丢失
+    panel.innerHTML = renderSourceLineageFallback(inst);
+  }
+}
+
+function renderLineagePanelData(d) {
+  const t = (v) => (v === undefined || v === null || v === '') ? '-' : esc(String(v));
+  let html = '';
+  const s = d.source || {};
+  const sys = s.system || {};
+  const batch = s.batch;
+
+  // 六要素概览
+  html += '<table class="w-full text-xs border-collapse mb-2">';
+  html += '<tr><td class="border border-slate-700 p-1 text-slate-400">来源系统</td><td class="border border-slate-700 p-1 text-slate-200">'
+    + (sys.display_name ? esc(sys.display_name) + ' <span class="text-slate-500">(' + esc(sys.connection_id || '') + ')</span>' : esc(sys.kind || '-')) + '</td></tr>';
+  html += '<tr><td class="border border-slate-700 p-1 text-slate-400">抽取时间</td><td class="border border-slate-700 p-1 text-slate-200">' + t(s.fetched_at) + '</td></tr>';
+  html += '<tr><td class="border border-slate-700 p-1 text-slate-400">导入批次</td><td class="border border-slate-700 p-1 text-slate-200">'
+    + (batch
+      ? esc((batch.candidate_id || '').slice(0, 16)) + ' · ' + esc(batch.source_type || '') + ' · ' + t(batch.created_at)
+        + (batch.created_by ? ' · ' + esc(batch.created_by) : '') + ' · 状态 ' + esc(batch.status || '') + ' · ' + (batch.record_count || 0) + ' 条'
+      : '无候选记录（手工/历史实例）') + '</td></tr>';
+  html += '<tr><td class="border border-slate-700 p-1 text-slate-400">原始引用</td><td class="border border-slate-700 p-1 text-slate-200">' + t(s.raw_ref) + '</td></tr>';
+  html += '<tr><td class="border border-slate-700 p-1 text-slate-400">入库时间</td><td class="border border-slate-700 p-1 text-slate-200">' + t(d.instance && d.instance.imported_at) + '</td></tr>';
+  html += '</table>';
+
+  // 字段级血缘
+  const fields = d.fields || [];
+  if (fields.length) {
+    html += '<div class="text-xs text-slate-300 mb-1">字段级血缘（源字段映射'
+      + (d.field_map_source ? ' · 映射来源: ' + esc(d.field_map_source) : '') + '）</div>';
+    html += '<table class="w-full text-xs border-collapse mb-2"><tr class="text-slate-500">'
+      + '<td class="border border-slate-700 p-1">属性</td><td class="border border-slate-700 p-1">源字段</td>'
+      + '<td class="border border-slate-700 p-1">来源</td><td class="border border-slate-700 p-1">字典术语（解析路径）</td></tr>';
+    for (const f of fields) {
+      const cap = f.capability || {};
+      const via = f.via === 'capability'
+        ? '<span class="text-amber-300">公式</span> ' + esc(cap.capability_name || cap.capability_id || '') + ' v' + esc(cap.capability_version || '')
+        : '直接';
+      const term = f.term
+        ? esc(f.term.canonical || f.term.term_id || '') + (f.term.bound && f.term.system_field ? ' → 系统字段 ' + esc(f.term.system_field) : '')
+        : '-';
+      html += '<tr><td class="border border-slate-700 p-1 text-slate-200">' + esc(f.name || f.attribute) + '</td>'
+        + '<td class="border border-slate-700 p-1 text-slate-200">' + t((f.source_field || []).join(', ')) + '</td>'
+        + '<td class="border border-slate-700 p-1">' + via + '</td>'
+        + '<td class="border border-slate-700 p-1 text-slate-300">' + term + '</td></tr>';
+    }
+    html += '</table>';
+  }
+
+  // 转换规则（M1-B 四要素溯源）
+  const tr = d.transformation;
+  if (tr) {
+    const inputs = tr.inputs || {};
+    const used = (inputs.used_inputs || []).map(i =>
+      esc(String(i.attr)) + '=' + (i.value === null || i.value === undefined ? '∅' : esc(String(i.value))).join(', ');
+    const gaps = (inputs.data_gaps || []).length ? ' · 数据缺口: ' + esc(inputs.data_gaps.join(', ')) : '';
+    html += '<div class="text-xs text-slate-300 mb-1">转换规则（公式能力 · M1-B 四要素溯源）</div>';
+    html += '<div class="text-xs border border-slate-700 rounded p-2 mb-2 bg-slate-800/40">'
+      + '<div class="text-slate-200">能力: ' + esc(tr.capability_name || tr.capability_id || '') + ' · 版本 v' + esc(tr.capability_version || '')
+      + ' · 状态: ' + esc(tr.execution_status || '') + (tr.stale ? ' · <span class="text-amber-400">stale（基线已变更未重算）</span>' : '') + '</div>'
+      + '<div class="text-slate-400 mt-1">表达式: ' + esc(tr.expression || '-') + '</div>'
+      + '<div class="text-slate-400 mt-1">输入原始值: ' + (used || '-') + gaps + '</div>'
+      + '<div class="text-slate-400 mt-1">执行时间: ' + t(tr.executed_at) + ' · 通道: ' + esc(tr.execution_channel || '-')
+      + (inputs.inputs_persisted === false ? ' · 输入未持久化（联邦读/输入覆盖）' : '') + '</div>'
+      + '</div>';
+  }
+
+  // 上游实例（点击向上追溯）
+  const ups = d.upstream || [];
+  html += '<div class="text-xs text-slate-300 mb-1">上游实例（公式 lookup 命中，点击向上追溯）</div>';
+  if (!ups.length) {
+    html += '<div class="text-xs text-slate-500">无上游实例</div>';
+  } else {
+    html += '<div class="border-l-2 border-slate-600 ml-2 pl-3 space-y-2">';
+    html += '<div class="text-xs text-slate-400">└─ 本实例: ' + esc((d.instance && d.instance.name) || d.instance_id)
+      + ' <span class="badge">' + esc(d.object_type || '') + '</span></div>';
+    for (const u of ups) {
+      html += '<div class="text-xs border border-slate-700 rounded p-2 bg-slate-800/40 cursor-pointer hover:border-amber-500/60" onclick="openInstanceById(\'' + esc(u.instance_id) + '\')">'
+        + '<div class="text-slate-200">↑ ' + esc(u.name || u.instance_id) + ' <span class="badge">' + esc(u.object_type || '') + '</span></div>'
+        + '<div class="text-slate-400 mt-1">提供属性 ' + esc(u.attribute || '-')
+        + (u.dims ? ' · 维度 ' + esc(JSON.stringify(u.dims)) : '')
+        + ' · 原始值 ' + (u.value === null ? '∅' : esc(String(u.value)))
+        + (u.matched_count ? ' · 命中 ' + u.matched_count + ' 条' : '') + '</div>'
+        + '</div>';
+    }
+    html += '</div>';
+  }
+  return html;
+}
+
+// 上游实例点击向上追溯：按实例 ID 拉取最新记录并打开详情弹层
+async function openInstanceById(id) {
+  try {
+    const j = await api('/api/ingest/instances/' + encodeURIComponent(id));
+    selectInstance(j.data);
+  } catch (e) {
+    toast('打开上游实例失败: ' + e.message, 'err');
+  }
+}
+
+// 回退展示：血缘 API 不可用时用本地 _source 静态信息（保持来源不静默丢失）
+function renderSourceLineageFallback(inst) {
   const src = (inst.instance || inst.props || inst)._source || inst._source || {};
-  let html = '<div><label>数据血缘 / 来源</label><table class="w-full text-xs border-collapse">';
+  let html = '<table class="w-full text-xs border-collapse">';
   html += '<tr><td class="border border-slate-700 p-1 text-slate-400">来源类型</td><td class="border border-slate-700 p-1 text-slate-200">' + esc(src.kind || '-') + '</td></tr>';
   html += '<tr><td class="border border-slate-700 p-1 text-slate-400">来源标识</td><td class="border border-slate-700 p-1 text-slate-200">' + esc(src.connection_id || '-') + '</td></tr>';
   html += '<tr><td class="border border-slate-700 p-1 text-slate-400">抽取时间</td><td class="border border-slate-700 p-1 text-slate-200">' + esc(src.fetched_at || '-') + '</td></tr>';

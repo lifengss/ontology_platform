@@ -25,6 +25,7 @@ from api.router_capabilities import router as capabilities_router
 from api.router_dictionary import router as dictionary_router
 from api.router_graph import router as graph_router
 from api.router_ingest import router as ingest_router
+from api.router_lineage import router as lineage_router  # V2-08 细粒度血缘（M3-B）
 from api.router_llm import router as llm_router
 from api.router_mcp import router as mcp_router
 from api.router_namespaces import router as namespaces_router
@@ -128,6 +129,7 @@ app.include_router(auth_router)  # V2-05 登录鉴权与 RBAC（M2-A）
 app.include_router(identity_router)  # V2-14i 身份联邦（M2-B）
 app.include_router(audit_router)  # V2-09 完整审计（M2-D）
 app.include_router(changesets_router)  # V2-07 变更审批流（M2-E）
+app.include_router(lineage_router)  # V2-08 细粒度血缘（M3-B）
 
 
 # VS6: 由 mcp_server 模块按项目挂载 /mcp/{project_id}，双传输（2026-10-28 MCP 接入层修复）：

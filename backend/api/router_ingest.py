@@ -351,6 +351,7 @@ def _save_candidate(
     project_id: str,
     source_ref: str,
     created_by: str | None = None,
+    field_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     rec = {
         "id": uuid.uuid4().hex,
@@ -364,6 +365,9 @@ def _save_candidate(
         "created_at": _now(),
         "approve_result": None,
     }
+    if field_map:
+        # V2-08（M3-B）：持久化字段映射，使血缘「源字段」要素可回溯（与 external_mcp 路径一致）
+        rec["mapping"] = {"field_map": field_map, "field_map_source": "file"}
     if created_by:
         rec["created_by"] = created_by  # V2-06：上传者归属（上传型内容默认仅本人可读）
     _store_for(project_id).insert(rec)
@@ -443,7 +447,8 @@ async def upload_instances(
                                f"sheet「{sheet_name}」的表头 {headers} 无法匹配对象「{obj.get('name') or matched_object_type}」的任何属性，"
                                f"请检查表头（应使用属性 id 或名称）或显式传 field_map", http_status=422)
             candidate = _build_candidate_records(ontology_id, ontology, matched_object_type, filename, records, parsed_field_map, project_id)
-            rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request))
+            rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request),
+                                  field_map=parsed_field_map)  # V2-08：血缘源字段要素
             candidates.append(rec)
     elif ext == "csv":
         if not object_type:
@@ -469,7 +474,8 @@ async def upload_instances(
                            f"CSV 表头无法匹配对象「{obj.get('name') or object_type}」的任何属性，"
                            f"请检查表头（应使用属性 id 或名称）或显式传 field_map", http_status=422)
         candidate = _build_candidate_records(ontology_id, ontology, object_type, filename, records, parsed_field_map, project_id)
-        rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request))
+        rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request),
+                              field_map=parsed_field_map)  # V2-08：血缘源字段要素
         candidates.append(rec)
     else:
         raise ApiError("VALIDATION_ERROR", "仅支持 .xlsx 或 .csv 文件", http_status=422)
@@ -574,7 +580,8 @@ async def upload_instances_smart(
                 records, _ = _parse_excel_sheet(wb[sheet_name], matched_object_type, filename, set(field_map.values()), field_map, obj)
                 if records:
                     candidate = _build_candidate_records(ontology_id, ontology, matched_object_type, filename, records, field_map, project_id)
-                    rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request))
+                    rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request),
+                                          field_map=field_map)  # V2-08：血缘源字段要素
                     candidates.append(rec)
     elif ext == "csv":
         if not object_type:
@@ -596,7 +603,8 @@ async def upload_instances_smart(
             records, _ = _parse_csv(content, object_type, filename, set(field_map.values()), field_map, obj)
             if records:
                 candidate = _build_candidate_records(ontology_id, ontology, object_type, filename, records, field_map, project_id)
-                rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request))
+                rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request),
+                                      field_map=field_map)  # V2-08：血缘源字段要素
                 candidates.append(rec)
     else:
         raise ApiError("VALIDATION_ERROR", "仅支持 .xlsx 或 .csv 文件", http_status=422)
@@ -619,6 +627,7 @@ def preview(payload: IngestPreviewRequest, request: Request, project_id: str = D
                        details={"violations": biz_errors})
 
     candidate = preview_candidate(payload, ontology)
+    preview_field_map = (payload.mapping or {}).get("field_map") if payload.mapping else None
     rec = {
         "id": uuid.uuid4().hex,
         "project_id": project_id,
@@ -632,6 +641,9 @@ def preview(payload: IngestPreviewRequest, request: Request, project_id: str = D
         "approve_result": None,
         "created_by": _request_username(request),  # V2-06：上传者归属
     }
+    if preview_field_map:
+        # V2-08（M3-B）：持久化字段映射，使血缘「源字段」要素可回溯
+        rec["mapping"] = {"field_map": preview_field_map, "field_map_source": "file"}
     _store_for(project_id).insert(rec)
     logger.info("ingest preview candidate_id=%s project_id=%s source=%s instances=%d",
                 rec["id"], project_id, rec["source_type"], len(rec["instances"]))

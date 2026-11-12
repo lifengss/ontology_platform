@@ -1087,3 +1087,35 @@
 - L5 回归 `backend/tests` **93/93** 全绿。
 - 前端（`frontend/app.js`＋`index.html`）：连接表新增「schema 健康」列（未检查/正常/探测失败/超阈值/停更/待处理数）、行内「检查schema」「漂移」按钮、键漂移顶部告警横幅、漂移面板（明细＋人工确认恢复）、联邦查询结果漂移标记渲染。
 - 边界（如实标注）：探测仅比对字段名/类型 family，不含嵌套结构语义（V2 源均为平面记录）；`cdc_status` 恒为 `planned_m3d`（流式 CDC 属 M3-D，未上线前不显示假健康）；周期探测线程在 `PROBE_ENABLED=false` 时不启动（测试/单实例部署可关）。
+
+## 26. 细粒度血缘查询（V2-08 / M3-B，2026-11-12）
+
+**只读装配，不写任何存储**：`GET /api/lineage/instances/{instance_id}`、MCP 工具 `lineage_get`、前端实例详情面板三通道共用 `lineage.build_instance_lineage()`，返回同一结构（TP-08-05 断言逐字段相等）。联邦读（能力执行 inputs 覆盖 / 术语联邦查询）不产生新实例、不落持久化血缘——输入覆盖仅写 `__capability__` 元数据（`inputs_persisted=False`＋`input_overrides` 留痕），联邦读内容不出现在任何实例的 `_source`/`__capability__`。
+
+### 26.1 血缘六要素（响应 `data`）
+
+| 要素 | 数据源 | 说明 |
+|---|---|---|
+| `source.kind` / `source.system` 来源系统 | **候选优先**：候选 `source_type=external_mcp` → `source_ref` 查连接（`display_name/name/origin`）；`field_map/file_upload` → 文件名 | `ingestion.apply_field_map` 恒写 `_source.kind="field_map"`（上传=文件名、MCP=连接id），无法区分文件/MCP，故不可单独采信；无候选才回退 `_source`（manual 等） |
+| `fields[*].source_field` 源字段 | 候选 `mapping.field_map`（{源字段: 属性id}）反查 | `mapping.field_map_source=dictionary` 时附 `fields[*].term`（词条 canonical＋`system_bindings[connection_id]` 系统字段＋bound 标记，TP-08-03） |
+| `source.batch` 导入批次 | 候选记录 | `{candidate_id, source_type, source_ref, object_type, status, created_at, created_by, record_count}`；审批后 `status="imported"`（`ingestion.approve` 落值，非 "approved"） |
+| `source.fetched_at` 拉取时间 | 实例 `_source.fetched_at` | MCP 读取通道有值；文件上传为上传时刻 |
+| `transformation` 转换规则 | 实例 `__capability__`＋能力记录 | 能力版本＋该版本 expression＋输入原始值（`trace.inputs`）＋`input_overrides`/`inputs_persisted`＋lookup 命中明细；`fields[*].via="capability"` 标记公式字段（TP-08-02） |
+| `upstream` 上游实例 | `__capability__.trace.lookups[*].matched_record_id` | 公式 lookup 命中的基线实例（instance_id/object_type/matched_code/attr/dims/value/matched_count/selection_rule/via=capability_lookup） |
+
+`data` 顶层：`{instance_id, object_type, instance:{id, ontology_id, object_type, name, stable_key, stable_key_value, imported_at, updated_at, tx_id}, source:{kind, system, fetched_at, raw_ref, batch}, field_map_source, fields:[{attribute, name, via, source_field, term, capability}], transformation, upstream}`。
+
+### 26.2 端点
+
+| 方法 / 路径 | 说明 | 响应 / 错误 |
+|---|---|---|
+| `GET /api/lineage/instances/{instance_id}` | 实例血缘查询（`?project_id=`） | `success(data)`；实例不存在 → 404 `NOT_FOUND`（EP-08-01）；跨租户 404（§24 `project_tenant_guard`，不泄露存在性） |
+| MCP 工具 `lineage_get(instance_id)` | 与 REST 同一装配 | JSON 字符串（同 `data`）；实例不存在 → `isError`＋`NOT_FOUND`；本体须已发布（MCP P0-3 `_require_published`） |
+
+### 26.3 验收
+
+- `scripts/verify_m3b_lineage.py` **PASS=43/FAIL=0**（临时 DATA_DIR＋双进程内 mock 源系统（显式映射/字典映射）＋TestClient＋进程内 MCPServer 直调工具）：TP-08-01（六要素，file_upload 与 external_mcp 双通道）、TP-08-02（公式字段 via=capability vs 直映 via=direct＋源字段）、TP-08-03（字典术语解析路径 canonical＋系统字段绑定）、TP-08-04（联邦读不持久化负断言：不产生实例、原属性不变、`inputs_persisted=False`＋覆盖留痕、术语联邦查询不落库）、TP-08-05（API/MCP/UI 三通道一致）、EP-08-01（REST 404 / MCP isError NOT_FOUND）。
+- L5 回归 `backend/tests` **93/93** 全绿。
+- 前端（`frontend/app.js`）：实例详情「血缘」面板渲染六要素表＋字段级血缘表＋转换规则块＋上游链（点击上游实例跳转追溯）；REST 失败回退仅展示 `_source` 原始信息。
+- 候选 `mapping` 持久化（V2-08 配套）：`router_ingest` 全部候选创建点（xlsx/csv/智能 xlsx/智能 csv/preview）落 `mapping={"field_map": {...}, "field_map_source": "file"|"dictionary"}`，供源字段要素反查。
+- 边界（如实标注）：血缘为**读时装配**（不维护独立血缘表），依赖候选/能力记录留存——候选被清理后 `batch` 与源字段要素缺失（`source` 仍由 `_source` 回退给出）；`term` 仅标注与候选映射来源一致的字典路径，不做猜测匹配。
