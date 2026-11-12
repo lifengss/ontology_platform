@@ -955,4 +955,4 @@
 - 本 checkpoint ＋ 用户级 wiki（raw 快照 `2026-11-12-M3-E-回写风险分级.md`/进展与测试/实体页/log/对话历史 #39）同步。
 
 ### 40.4 状态
-- M3-E **已交付，待 commit**（16 文件 +1182/-181；M3-G 退出统一 push）。工作区仅余成本核算业务线未提交项（docs/数据缺口*.md M、cost_baseline_kit/、docs/备份/、docs/成本核算*.md，与平台代码无关、有意保留，不提交）。M3 剩余：F Action编排（V2-14 主体）→G 退出＋push；随后 M4 全片＋终验＋push。
+- M3-E **已交付并 commit** `176c495`（16 文件 +1811/-144；M3-G 退出统一 push）。工作区仅余成本核算业务线未提交项（docs/数据缺口*.md M、cost_baseline_kit/、docs/备份/、docs/成本核算*.md，与平台代码无关、有意保留，不提交）。M3 剩余：F Action编排（V2-14 主体）→G 退出＋push；随后 M4 全片＋终验＋push。
