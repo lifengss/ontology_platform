@@ -98,6 +98,24 @@ class Settings:
         self.data_quality_sample_size: int = _env_int("ONTOLOGY_DATA_QUALITY_SAMPLE_SIZE", 50)
         self.data_quality_source_enabled: bool = _env_bool("ONTOLOGY_DATA_QUALITY_SOURCE_ENABLED", True)
 
+        # M3-D（V2-12）流式 CDC + 连接健康视图：
+        # 全局开关 / 消费轮询周期 / binlog 长轮询等待（mock subscribe wait_ms 上限 15s）/
+        # 单批事件上限（积压限流）/ 单轮最多连续批数 / 批间停顿（限流）/
+        # 事件滞后告警阈值（秒）/ 断流（停滞）告警阈值（秒）/
+        # 熔断连续失败阈值 / 熔断冷却基础秒（指数退避翻倍）/
+        # CDC 未支持连接的降级周期拉取间隔（秒）
+        self.cdc_enabled: bool = _env_bool("ONTOLOGY_CDC_ENABLED", True)
+        self.cdc_poll_interval_seconds: int = _env_int("ONTOLOGY_CDC_POLL_INTERVAL_SECONDS", 5)
+        self.cdc_subscribe_wait_ms: int = min(15000, _env_int("ONTOLOGY_CDC_SUBSCRIBE_WAIT_MS", 2000))
+        self.cdc_max_batch: int = _env_int("ONTOLOGY_CDC_MAX_BATCH", 100)
+        self.cdc_max_batches_per_poll: int = _env_int("ONTOLOGY_CDC_MAX_BATCHES_PER_POLL", 10)
+        self.cdc_batch_pause_ms: int = _env_int("ONTOLOGY_CDC_BATCH_PAUSE_MS", 100)
+        self.cdc_lag_alert_seconds: int = _env_int("ONTOLOGY_CDC_LAG_ALERT_SECONDS", 60)
+        self.cdc_stale_seconds: int = _env_int("ONTOLOGY_CDC_STALE_SECONDS", 120)
+        self.cdc_circuit_threshold: int = _env_int("ONTOLOGY_CDC_CIRCUIT_THRESHOLD", 5)
+        self.cdc_circuit_cooldown_seconds: int = _env_int("ONTOLOGY_CDC_CIRCUIT_COOLDOWN_SECONDS", 30)
+        self.cdc_fallback_pull_seconds: int = _env_int("ONTOLOGY_CDC_FALLBACK_PULL_SECONDS", 300)
+
     def ensure_dirs(self) -> None:
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)

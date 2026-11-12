@@ -365,8 +365,10 @@ def main() -> int:
                     "probe_interval_seconds", "stale_threshold_seconds", "stale",
                     "snapshot_auto_update", "open_drifts", "cdc_status"]
             check("TP-11-11: health 返回全部约定字段", all(k in hA for k in need), str(hA))
-            check("TP-11-11: cdc_status=planned_m3d（CDC 未上线前不显示假健康）",
-                  hA.get("cdc_status") == "planned_m3d", str(hA.get("cdc_status")))
+            # M3-D 落地后 cdc_status 为真实状态机（running/stopped_drift/not_supported/
+            # circuit_open/disabled）；本用例连接未启用 CDC → disabled（不显示假健康）
+            check("TP-11-11: cdc_status=disabled（该连接未启用 CDC，M3-D 状态机真实值）",
+                  hA.get("cdc_status") == "disabled", str(hA.get("cdc_status")))
             check("TP-11-11: probe_interval_seconds 来自配置（300）",
                   hA.get("probe_interval_seconds") == 300, str(hA.get("probe_interval_seconds")))
 

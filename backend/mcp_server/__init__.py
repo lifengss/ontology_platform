@@ -835,6 +835,21 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
         return json.dumps({"health": health, "trend": trend}, ensure_ascii=False)
 
     @m.tool()
+    def connection_health(connection_id: str) -> str:
+        """V2-12 连接健康视图（M3-D）：查外部系统连接的健康状态（查询类调用，AI 判定数据新鲜度用）。
+
+        覆盖三类连接调用的成功率/时延/最近成功（read 手工拉取 / cdc 流式变更 /
+        federation 联邦查询）＋ CDC 状态（running/not_supported/disabled/
+        stopped_drift/circuit_open：通道/游标/熔断/最近事件/最近告警）＋
+        最近 schema 检查（V2-11，时间+距今 xx小时xx分xx秒）。
+        cdc_status=not_supported 时新鲜度降级为周期拉取+联邦读；
+        AI 被问及"是否在库"等实时性问题时，应据此判断平台快照时效并回源联邦查询。
+        与 REST GET /api/mcp/connections/{id}/health 同一口径（schema_drift.health_info）。
+        """
+        from schema_drift import health_info
+        return json.dumps(health_info(project_id, connection_id), ensure_ascii=False)
+
+    @m.tool()
     def action_invoke(action_id: str, confirmation_token: str = "") -> str:
         """确认执行 Action（需先通过 /api/actions/{id}/execute 获取 confirmation_token）。"""
         rec = actions.get(action_id)

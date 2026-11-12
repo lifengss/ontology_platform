@@ -545,6 +545,26 @@ function connHealthHtml(c) {
   return html;
 }
 
+const CDC_STATUS_LABELS = {
+  running: ['text-emerald-400', '运行中'],
+  not_supported: ['text-slate-400', 'CDC 未支持'],
+  disabled: ['text-slate-500', '未启用'],
+  stopped_drift: ['text-rose-400', '漂移停更'],
+  circuit_open: ['text-rose-400', '熔断中'],
+};
+function connCdcHtml(c) {
+  // V2-12：CDC 状态摘要（运行中/未支持/未启用/漂移停更/熔断中 + 通道 + 最近事件）
+  const st = (c.schema_health || {}).cdc_status || (c.cdc_status) || 'disabled';
+  const cdc = (c.schema_health || {}).cdc || {};
+  const [cls, label] = CDC_STATUS_LABELS[st] || ['text-slate-500', st];
+  let html = '<span class="' + cls + '">' + label + '</span>';
+  if (cdc.channel) html += ' · ' + esc(cdc.channel);
+  if (st === 'not_supported') html += '<div class="text-slate-500">降级：周期拉取＋联邦读</div>';
+  if (st === 'circuit_open') html += '<div class="text-rose-400">冷却后自动半开探测</div>';
+  if (cdc.last_event_at) html += '<div class="text-slate-500">事件 ' + esc(String(cdc.last_event_at).slice(5, 16)) + ' · lsn ' + esc(String(cdc.last_event_lsn ?? 0)) + '</div>';
+  return html;
+}
+
 function renderConnections() {
   const tb = $('connTableBody');
   if (!tb) return;
@@ -562,7 +582,7 @@ function renderConnections() {
     }
   }
   if (!connList.length) {
-    tb.innerHTML = '<tr><td colspan="8" class="p-3 text-center text-slate-500">暂无连接。点右上「＋ 新建连接」配置业务系统 MCP Server。</td></tr>';
+    tb.innerHTML = '<tr><td colspan="9" class="p-3 text-center text-slate-500">暂无连接。点右上「＋ 新建连接」配置业务系统 MCP Server。</td></tr>';
     return;
   }
   tb.innerHTML = connList.map(c => {
@@ -579,11 +599,13 @@ function renderConnections() {
       '<td class="p-1.5 text-xs">' + authLabel + '</td>' +
       '<td class="p-1.5 text-xs">' + esc(maps.ontology_id || '-') + (maps.object_type ? '<div class="text-slate-500">' + esc(maps.object_type) + ' · ' + Object.keys(maps.field_map || {}).length + ' 字段映射</div>' : '') + '</td>' +
       '<td class="p-1.5 text-xs">' + connHealthHtml(c) + '</td>' +
+      '<td class="p-1.5 text-xs">' + connCdcHtml(c) + '</td>' +
       '<td class="p-1.5 font-mono text-xs text-slate-400">' + esc(allow || '（全部）') + '</td>' +
       '<td class="p-1.5">' +
         '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="testConnection(\'' + c.connection_id + '\')">测试</button> ' +
         '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="readConnection(\'' + c.connection_id + '\')">读取→候选</button> ' +
         '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="schemaCheckConn(\'' + c.connection_id + '\')">检查schema</button> ' +
+        '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="openConnHealth(\'' + c.connection_id + '\')">健康</button> ' +
         '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="openDriftPanel(\'' + c.connection_id + '\')">漂移</button> ' +
         '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="openConnEditor(\'' + c.connection_id + '\')">编辑</button> ' +
         '<button class="btn danger" style="padding:2px 8px;font-size:12px" onclick="deleteConnection(\'' + c.connection_id + '\')">删除</button>' +
@@ -620,6 +642,13 @@ async function openConnEditor(id) {
       '<div class="col-span-4"><label class="text-xs text-slate-400">缺省读取工具</label><input id="connReadTool" class="w-full" value="' + esc(connEditMaps.read_tool || '') + '" placeholder="如 query_accounts；「读取→候选」未显式指定工具时用此值"></div>' +
       '<div class="col-span-12" id="connFieldMapBox"></div>' +
       '<div class="col-span-6"><label class="text-xs text-slate-400">工具白名单（逗号分隔；留空=该连接工具全部可用）</label><input id="connAllowlist" class="w-full" value="' + esc(((c && c.tool_allowlist) || []).join(', ')) + '" placeholder="query_accounts, query_orders"></div>' +
+      '<div class="col-span-12 border-t border-slate-700/50 pt-2 grid grid-cols-12 gap-2">' +
+      '<div class="col-span-4 flex items-end gap-2"><label class="flex items-center gap-1.5 text-xs text-slate-400"><input id="connCdcEnabled" type="checkbox"' + ((c && c.cdc && c.cdc.enabled) ? ' checked' : '') + '> 启用 CDC（流式变更 → 关系快照）</label></div>' +
+      '<div class="col-span-4"><label class="text-xs text-slate-400">变更通道</label><select id="connCdcChannel" class="w-full">' +
+        ['auto', 'binlog', 'mq', 'cursor', 'none'].map(ch => '<option value="' + ch + '"' + (((c && c.cdc && c.cdc.channel) || 'auto') === ch ? ' selected' : '') + '>' + ch + (ch === 'auto' ? '（自动探测源端支持）' : ch === 'none' ? '（无变更通道 → 周期拉取＋联邦读）' : '') + '</option>').join('') +
+      '</select></div>' +
+      '<div class="col-span-4 self-end text-xs text-slate-500 pb-1.5">CDC 为数据面独立通道（不经 MCP 协议）；只更新关系快照（键/关系边），不同步内容值。</div>' +
+      '</div>' +
       '<div class="col-span-6 flex items-end gap-2">' +
         '<button class="btn" type="button" onclick="saveConnection()">保存</button>' +
         '<button class="btn secondary" type="button" onclick="closeConnEditor()">取消</button>' +
@@ -742,11 +771,20 @@ async function saveConnection() {
     },
     read_schedule: 'manual',
   };
+  let savedId = connEditId;
   try {
     if (connEditId) {
       await api('/api/mcp/connections/' + connEditId, { method: 'PUT', body: JSON.stringify(body) });
     } else {
-      await api('/api/mcp/connections', { method: 'POST', body: JSON.stringify(body) });
+      const cj = await api('/api/mcp/connections', { method: 'POST', body: JSON.stringify(body) });
+      savedId = (cj.data && (cj.data.connection_id || cj.data.id)) || null;
+    }
+    // V2-12（M3-D）：CDC 通道配置（独立端点，配置后 supported 重新探测）
+    if (savedId) {
+      const cdcOn = $('connCdcEnabled') ? $('connCdcEnabled').checked : false;
+      const cdcCh = $('connCdcChannel') ? $('connCdcChannel').value : 'auto';
+      await api('/api/cdc/channels/' + savedId + '/config',
+        { method: 'POST', body: JSON.stringify({ enabled: cdcOn, channel: cdcCh }) });
     }
     closeConnEditor();
     toast(connEditId ? '连接已更新' : '连接已创建', 'ok');
@@ -875,6 +913,96 @@ async function resolveDrift(connId, driftId) {
 function closeDriftPanel() {
   driftConnId = null;
   const box = $('connDriftPanel');
+  if (!box) return;
+  box.classList.add('hidden');
+  box.innerHTML = '';
+}
+
+// ---- V2-12（M3-D）：连接健康视图（schema 检查 + CDC + 三类调用统计） ----
+let connHealthId = null;
+async function openConnHealth(id) {
+  connHealthId = id;
+  const box = $('connHealthPanel');
+  box.classList.remove('hidden');
+  box.innerHTML = '<div class="text-xs text-slate-500">加载连接健康视图…</div>';
+  try {
+    const j = await api('/api/mcp/connections/' + id + '/health');
+    renderConnHealth(j.data || {});
+  } catch (e) {
+    box.innerHTML = '<div class="text-xs text-rose-400">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function _statLine(label, s) {
+  if (!s || (!s.calls && s.calls !== 0)) return label + '：-';
+  const rate = s.success_rate == null ? '-' : (Math.round(s.success_rate * 100) + '%');
+  const ms = s.last_ms == null ? '-' : s.last_ms + 'ms';
+  const at = s.last_at ? String(s.last_at).slice(5, 16) : '-';
+  return label + '：' + rate + '（最近 ' + s.window_calls + ' 次）· 时延 ' + ms + ' · 最近 ' + at;
+}
+
+function renderConnHealth(d) {
+  const box = $('connHealthPanel');
+  if (!box || connHealthId === null) return;
+  const cdc = d.cdc || {};
+  const cdcSt = d.cdc_status || 'disabled';
+  const [cls, label] = CDC_STATUS_LABELS[cdcSt] || ['text-slate-500', cdcSt];
+  const circuit = cdc.circuit || {};
+  const cdcBlock =
+    '<div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">' +
+    '<div>CDC 状态：<span class="' + cls + ' font-medium">' + label + '</span>' +
+      (cdc.channel ? ' · 通道 <b>' + esc(cdc.channel) + '</b>' : '') + '</div>' +
+    '<div>最近成功消费：' + (cdc.last_success_at ? esc(String(cdc.last_success_at).slice(0, 19)) : '无') +
+      (cdc.last_success_at ? '（' + _humanAgeLocal(cdc.last_success_at) + '）' : '') + '</div>' +
+    '<div>最近事件：' + (cdc.last_event_at ? esc(String(cdc.last_event_at).slice(5, 16)) + ' · lsn ' + esc(String(cdc.last_event_lsn ?? 0)) : '无') + '</div>' +
+    '<div>游标 last_lsn：' + esc(String(cdc.last_lsn ?? 0)) + ' · 累计应用 ' + esc(String(cdc.applied_total ?? 0)) +
+      ' · 去重跳过 ' + esc(String((cdc.skipped_dup_total ?? 0) + (cdc.skipped_stale_total ?? 0))) +
+      ' · 转人工 ' + esc(String(cdc.review_total ?? 0)) + '</div>' +
+    '<div>熔断：<span class="' + (circuit.state === 'open' ? 'text-rose-400' : circuit.state === 'half_open' ? 'text-amber-300' : 'text-emerald-400') + '">' + esc(circuit.state || 'closed') + '</span>' +
+      ' · 连续失败 ' + esc(String(circuit.fail_count ?? 0)) + (circuit.cooldown_seconds ? ' · 冷却 ' + circuit.cooldown_seconds + 's' : '') + '</div>' +
+    (cdc.last_fallback_pull_at ? '<div>降级周期拉取：' + esc(String(cdc.last_fallback_pull_at).slice(5, 16)) + '（CDC 未支持 → 周期拉取＋联邦读）</div>' : '') +
+    '</div>';
+  const alerts = (cdc.alerts || []).slice(-5).reverse();
+  const alertHtml = alerts.length
+    ? '<div class="text-xs text-slate-400 mt-1">' + alerts.map(a =>
+        '<span class="text-amber-300">' + esc(a.type) + '</span> ' + esc(a.detail) + ' <span class="text-slate-500">' + esc(String(a.ts).slice(5, 16)) + '</span>').join('<br>') + '</div>'
+    : '<div class="text-xs text-slate-500 mt-1">无最近告警</div>';
+  const statsBlock = '<div class="text-xs space-y-0.5 mt-1">' +
+    '<div>' + _statLine('手工拉取/读取', (d.stats || {}).read) + '</div>' +
+    '<div>' + _statLine('CDC 消费', (d.stats || {}).cdc) + '</div>' +
+    '<div>' + _statLine('联邦查询', (d.stats || {}).federation) + '</div>' +
+    '</div>';
+  box.innerHTML =
+    '<div class="flex justify-between items-center mb-2">' +
+    '<b class="text-sm">连接健康视图</b>' +
+    '<div>' +
+    '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="schemaCheckConn(\'' + esc(connHealthId) + '\'); openConnHealth(\'' + esc(connHealthId) + '\')">手动 schema 检查</button> ' +
+    '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="api(\'/api/cdc/channels/' + esc(connHealthId) + '/poll\', {method:\'POST\', body:\'{}\'}).then(j => { toast(\'poll: \' + (j.data.status) + \' applied=' + (j.data.applied ?? 0), \'info\', 5000); openConnHealth(\'' + esc(connHealthId) + '\'); }).catch(e => toast(\'poll 失败: \' + e.message, \'err\'))">手动 poll</button> ' +
+    '<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="closeConnHealth()">关闭</button></div></div>' +
+    '<div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">' +
+    '<div>最近 schema 检查：' + (d.last_schema_check_at ? esc(String(d.last_schema_check_at).slice(0, 19)) : '未检查') +
+      (d.last_schema_check_at ? '（距上次 ' + esc(d.schema_check_age_human || '-') + '）' : '') +
+      (d.last_schema_check_ok === false ? ' · <span class="text-rose-400">探测失败</span>' : '') +
+      (d.stale ? ' · <span class="text-amber-300">超阈值未检查</span>' : '') + '</div>' +
+    '<div>快照自动更新：' + (d.snapshot_auto_update === 'stopped' ? '<span class="text-rose-400 font-medium">已停止（键漂移）</span>' : 'active') +
+      ' · 待处理漂移 ' + esc(String(d.open_drifts ?? 0)) + ' 条</div>' +
+    '</div>' +
+    '<div class="mt-2 p-2 rounded border border-slate-700/60 bg-slate-950/30">' + cdcBlock + alertHtml + '</div>' +
+    '<div class="mt-2 p-2 rounded border border-slate-700/60 bg-slate-950/30">' + statsBlock + '</div>';
+}
+
+function _humanAgeLocal(isoStr) {
+  const t = Date.parse(isoStr);
+  if (isNaN(t)) return '';
+  let s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  const h = Math.floor(s / 3600); s %= 3600;
+  const m = Math.floor(s / 60); s %= 60;
+  return h + '小时' + m + '分' + s + '秒';
+}
+
+function closeConnHealth() {
+  connHealthId = null;
+  const box = $('connHealthPanel');
   if (!box) return;
   box.classList.add('hidden');
   box.innerHTML = '';

@@ -1,6 +1,7 @@
 """MCP 接入路由（UC3/UC4 / VS6,VS7,VS9）：连接配置 CRUD + 连通测试 + 读取 + Server 发布 + V2-11 schema 漂移。"""
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -166,7 +167,23 @@ def read_connection(
         raise ApiError("VALIDATION_ERROR", f"连接缺少 maps_to_ontology.object_type 或 field_map{hint}", http_status=422)
     eff_rec = {**rec, "maps_to_ontology": {**maps, "field_map": field_map}}
 
-    raw = _client.read(eff_rec, tool or "read", params or {})
+    _t0 = time.time()
+    _read_ok = False
+    _read_err: str | None = None
+    try:
+        raw = _client.read(eff_rec, tool or "read", params or {})
+        _read_ok = True
+    except Exception as e:  # noqa: BLE001——统计后原样抛出（主流程行为不变）
+        _read_err = f"{type(e).__name__}: {e}"[:300]
+        raise
+    finally:
+        # V2-12（M3-D）连接健康视图：读取调用统计（read 类，成功率/时延）
+        try:
+            from conn_stats import record_conn_stat
+            record_conn_stat(project_id, connection_id, "read", ok=_read_ok,
+                             ms=int((time.time() - _t0) * 1000), error=_read_err)
+        except Exception:  # noqa: BLE001
+            pass
     records = raw.get("records", [])
 
     # V2-11 TP-11-07：快照更新（入库读取）时结构比对——源字段缺失作为漂移信号（不阻断本次读取）
@@ -241,7 +258,9 @@ def drift_resolve(request: Request, connection_id: str, drift_id: str, project_i
 def connection_health(connection_id: str, project_id: str = Depends(project_id_param)):
     """V2-11：连接健康视图——上次 schema 检查时间/距上次秒/探测周期/超阈值「长期未检查」标记。
 
-    成功率/熔断/CDC 状态随 M3-D（V2-12）补齐（cdc_status 先返回 planned_m3d）。
+    M3-D（V2-12）起含 `cdc_status` 状态机（running/stopped_drift/not_supported/
+    circuit_open/disabled）＋CDC 摘要块＋read/cdc/federation 三类调用统计，
+    与 MCP 工具 `connection_health` 同口径（详见 API 文档 §28）。
     """
     return success(health_info(project_id, connection_id))
 

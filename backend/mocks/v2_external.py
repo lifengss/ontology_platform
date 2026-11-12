@@ -532,6 +532,9 @@ class ControllableMockSystem:
                     for r in system._records:
                         if fld in r:
                             r[new] = r.pop(fld)
+                    # 注意：键字段重命名不更新 key_field（保持 M3-A 已验证的漂移语义：
+                    # 重命名后的新键名按 new_unmapped 提示）。因此键重命名后往该源写数据
+                    # 需同时在 payload 携带旧键名（mock 按键名取 key 的保真简化）。
                 elif action == "add" and fld and fld not in names:
                     outer.fields.append({"name": fld, "type": body.get("type", "string")})
                 elif action == "remove" and fld and fld in names and fld != outer.key_field:

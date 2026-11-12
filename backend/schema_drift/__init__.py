@@ -405,9 +405,10 @@ def field_feedback(
 
 
 def health_info(project_id: str, connection_id: str) -> dict[str, Any]:
-    """V2-11 连接健康视图（schema 检查部分）：上次检查时间/距上次(秒)/周期/超阈值标记。
+    """连接健康视图：schema 检查（V2-11）+ CDC/调用统计（V2-12，M3-D）。
 
-    成功率/熔断/ CDC 状态 随 M3-D（V2-12）补齐，先以占位返回。
+    覆盖三类连接调用（手工拉取 read / CDC cdc / 联邦查询 federation）的成功率、时延、
+    最近成功；熔断状态；最近 schema 检查时间 + 距上次（秒 + xx小时xx分xx秒）；CDC 状态。
     """
     settings = get_settings()
     conn = _conn_store(project_id).get(connection_id)
@@ -439,10 +440,79 @@ def health_info(project_id: str, connection_id: str) -> dict[str, Any]:
         "last_schema_check_ms": conn.get("last_schema_check_ms"),
         "last_schema_check_error": conn.get("last_schema_check_error"),
         "last_schema_version": conn.get("last_schema_version"),
+        "schema_check_age_human": _human_age(age_seconds),
         "snapshot_auto_update": conn.get("snapshot_auto_update") or "active",
         "open_drifts": len(open_drifts(project_id, connection_id)),
-        "cdc_status": "planned_m3d",
+        # V2-12（M3-D）：CDC 状态 + CDC 块 + 三类调用统计（read/cdc/federation）
+        "cdc_status": _cdc_status_of(conn),
+        "cdc": _summarize_cdc(conn.get("cdc") or {}),
+        "stats": _summarize_conn_stats(conn),
     }
+
+
+def _human_age(seconds: int | None) -> str | None:
+    """距上次(秒) → 「xx小时xx分xx秒」（V2-12 TP-12-07）。"""
+    if seconds is None:
+        return None
+    s = max(0, int(seconds))
+    return f"{s // 3600}小时{(s % 3600) // 60}分{s % 60}秒"
+
+
+def _cdc_status_of(conn: dict[str, Any]) -> str:
+    cdc = conn.get("cdc") or {}
+    if not cdc.get("enabled"):
+        return "disabled"
+    if conn.get("snapshot_auto_update") == "stopped":
+        return "stopped_drift"
+    if cdc.get("supported") is False:
+        return "not_supported"
+    circuit = cdc.get("circuit") or {}
+    if circuit.get("state") == "open":
+        return "circuit_open"
+    return "running"
+
+
+def _summarize_cdc(cdc: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": bool(cdc.get("enabled")),
+        "channel": cdc.get("channel"),
+        "supported": cdc.get("supported"),
+        "supported_channel": cdc.get("supported_channel"),
+        "status": cdc.get("status"),
+        "last_lsn": cdc.get("last_lsn"),
+        "last_event_at": cdc.get("last_event_at"),
+        "last_event_lsn": cdc.get("last_event_lsn"),
+        "last_success_at": cdc.get("last_success_at"),
+        "last_poll_at": cdc.get("last_poll_at"),
+        "last_fallback_pull_at": cdc.get("last_fallback_pull_at"),
+        "circuit": cdc.get("circuit") or {"state": "closed", "fail_count": 0},
+        "applied_total": cdc.get("applied_total", 0),
+        "skipped_dup_total": cdc.get("skipped_dup_total", 0),
+        "skipped_stale_total": cdc.get("skipped_stale_total", 0),
+        "review_total": cdc.get("review_total", 0),
+        "errors_total": cdc.get("errors_total", 0),
+        "alerts": (cdc.get("alerts") or [])[-10:],
+    }
+
+
+def _summarize_conn_stats(conn: dict[str, Any]) -> dict[str, Any]:
+    """三类调用统计（read/cdc/federation）：累计计数 + 最近 50 次窗口成功率/时延。"""
+    stats = conn.get("stats") if isinstance(conn.get("stats"), dict) else {}
+    out: dict[str, Any] = {}
+    for kind in ("read", "cdc", "federation"):
+        b = stats.get(kind) if isinstance(stats.get(kind), dict) else None
+        recent = b.get("recent") if isinstance(b, dict) and isinstance(b.get("recent"), list) else []
+        n = len(recent)
+        ok_n = sum(1 for r in recent if isinstance(r, dict) and r.get("ok"))
+        out[kind] = {
+            "calls": (int(b.get("ok", 0)) + int(b.get("fail", 0))) if b else 0,
+            "window_calls": n,
+            "success_rate": round(ok_n / n, 4) if n else None,
+            "last_ms": b.get("last_ms") if b else None,
+            "last_at": b.get("last_at") if b else None,
+            "last_error": b.get("last_error") if b else None,
+        }
+    return out
 
 
 def _probe_loop() -> None:

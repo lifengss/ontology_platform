@@ -34,7 +34,7 @@ os.chdir(BACKEND)
 TMP_DATA = os.path.join(BACKEND, "data", "_m3c_verify")
 shutil.rmtree(TMP_DATA, ignore_errors=True)
 os.makedirs(TMP_DATA, exist_ok=True)
-os.environ["ONTOLOGY_DATA_DIR"] = TMP_DATA
+os.environ["DATA_DIR"] = TMP_DATA
 os.environ["ONTOLOGY_AUTH_ENABLED"] = "false"
 os.environ["M3C_PART_TOKEN"] = "tok-part"
 os.environ.setdefault("ONTOLOGY_MOCK_MODE", "true")

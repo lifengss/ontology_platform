@@ -623,6 +623,15 @@ def federated_lookup(project_id: str, input_term: str, value: str = "",
     for sid, r in results.items():
         if r.get("status") == "ok" and r.get("latency_ms"):
             conn_store.update(sid, {"last_latency_ms": int(r["latency_ms"])})
+        # V2-12（M3-D）连接健康视图：联邦查询调用统计（成功率/时延，与 read/cdc 同口径）
+        try:
+            from conn_stats import record_conn_stat
+            record_conn_stat(project_id, sid, "federation",
+                             ok=bool(r.get("status") == "ok"),
+                             ms=r.get("latency_ms"),
+                             error=str(r.get("error") or r.get("code") or "") or None)
+        except Exception:  # noqa: BLE001——统计永不阻断主流程
+            pass
 
     ok = [sid for sid, r in results.items() if r.get("status") == "ok"]
     per_system = {sid: {k: r.get(k) for k in

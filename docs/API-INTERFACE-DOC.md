@@ -1065,7 +1065,7 @@
 | `POST /api/mcp/connections/{id}/schema-check` | 手动检查（source=manual） | 探测成功：`{"status":"ok","connection_id","severity":"key\|attribute\|unmapped\|null","items":[漂移明细],"snapshot_auto_update":"active\|stopped"}`；探测失败：`{"status":"probe_failed","connection_id","error":"...","severity":null,"items":[]}`（HTTP 200） |
 | `GET /api/mcp/connections/{id}/drifts?status=all` | 漂移记录列表（`?status=open|resolved|all`，默认 all） | 列表信封 `{items, total, page, pageSize}`；记录：`{id, connection_id, detected_at, last_detected_at, source, last_detected_source, items:[{field, property, kind, severity, expected, actual}], status, resolved_at, resolved_by}` |
 | `POST /api/mcp/connections/{id}/drifts/{drift_id}/resolve` | 人工确认恢复 | `{"drift_id","status":"resolved","resolved_by","resumed_snapshot_auto_update":bool,"remaining_open":int}`；重复确认 409 `ALREADY_RESOLVED` |
-| `GET /api/mcp/connections/{id}/health` | 健康摘要 | `{"last_schema_check_at","last_schema_check_ok","last_schema_check_ms","last_schema_check_error","schema_version","age_seconds","never_checked","probe_interval_seconds","stale_threshold_seconds","stale","snapshot_auto_update","open_drifts","cdc_status":"planned_m3d"}` |
+| `GET /api/mcp/connections/{id}/health` | 健康摘要（M3-D 后 `cdc_status` 为真实状态机值） | `{"last_schema_check_at","last_schema_check_ok","last_schema_check_ms","last_schema_check_error","schema_version","age_seconds","never_checked","probe_interval_seconds","stale_threshold_seconds","stale","schema_check_age_human","snapshot_auto_update","open_drifts","cdc_status":"running\|stopped_drift\|not_supported\|circuit_open\|disabled","cdc":{见 §28.3 summarize 字段},"stats":{read,cdc,federation 三类调用统计}}` |
 | `GET /api/mcp/connections`（既有） | 列表项新增内嵌 `schema_health`（= health 响应，无检查记录时 `last_schema_check_at=null, never_checked=true`） | — |
 | `POST /api/mcp/connections/{id}/read`（既有） | 门禁：存在 key 级 open 漂移 → 409 `SCHEMA_DRIFT_STOPPED` | — |
 
@@ -1086,7 +1086,7 @@
 - `scripts/verify_m3a_schema_drift.py` **PASS=47/FAIL=0**（临时 DATA_DIR＋进程内 ControllableMockSystem schema 热变＋TestClient）：TP-11-01（手动通道＋探测失败≠漂移）、TP-11-02（键重命名→停更＋409 门禁＋列表 schema_health）、TP-11-03（人工确认恢复＋重复 409＋审计）、TP-11-04（同源他连接不误报）、TP-11-05（periodic 通道 source 标记）、TP-11-06（明细字段＋状态过滤）、TP-11-07（入库结构比对不阻断）、TP-11-08/EP-11-03（联邦读显式标记/缺失显式空值）、TP-11-09（未映射仅提示）、TP-11-10（stale/never_checked）、TP-11-11（health 全字段）；EP-11-01/02 覆盖。
 - L5 回归 `backend/tests` **93/93** 全绿。
 - 前端（`frontend/app.js`＋`index.html`）：连接表新增「schema 健康」列（未检查/正常/探测失败/超阈值/停更/待处理数）、行内「检查schema」「漂移」按钮、键漂移顶部告警横幅、漂移面板（明细＋人工确认恢复）、联邦查询结果漂移标记渲染。
-- 边界（如实标注）：探测仅比对字段名/类型 family，不含嵌套结构语义（V2 源均为平面记录）；`cdc_status` 恒为 `planned_m3d`（流式 CDC 属 M3-D，未上线前不显示假健康）；周期探测线程在 `PROBE_ENABLED=false` 时不启动（测试/单实例部署可关）。
+- 边界（如实标注）：探测仅比对字段名/类型 family，不含嵌套结构语义（V2 源均为平面记录）；`cdc_status` 自 M3-D（§28）起为真实状态机值（`running/stopped_drift/not_supported/circuit_open/disabled`，M3-D 前曾为占位 `planned_m3d`）；周期探测线程在 `PROBE_ENABLED=false` 时不启动（测试/单实例部署可关）。
 
 ## 26. 细粒度血缘查询（V2-08 / M3-B，2026-11-12）
 
@@ -1157,3 +1157,65 @@
 - `scripts/verify_m3c_data_health.py` **PASS=56/FAIL=0**（临时 DATA_DIR＋进程内 ControllableMockSystem 可控源（read/write 计数）＋TestClient＋进程内 MCPServer 直调工具）：TP-21-01（脏批次健康卡：缺键/批内重复/存量重复/枚举出域/必填填充率/新鲜度 basis=now＋GET 重算一致）、TP-21-02（基线 is_baseline＋趋势序列＋audit `quality_evaluated` 可归因）、TP-21-03（草稿本体加 enum 约束→constraint_hash 变＋`caliber_changed`＋违规率升不误导）、TP-21-04（规模 7→8 `scale_changed`，未改口径 `caliber_changed=false`）、TP-21-05（MCP 对象级＋属性级钻取数据与 REST summary 相等）、TP-21-06（脏批次审批仍被 SHACL 门禁拦截 imported=0，健康卡仍可读，观测不阻断）、TP-21-07（四执行通道：local_snapshot/local_full/governance_sampled（真实读源 read_calls 增长＋源端漂移 P-101→archived 反映到枚举/SHACL）/source_required（采样关闭显式标记）＋新鲜度陈旧判定 fetched_at 40 天）、EP-21-01（候选损坏→主流程 200＋健康卡 200 带 error）、EP-21-02（无快照即时计算 is_snapshot=false＋趋势空 baseline_hint＋不落快照）、EP-21-05（REST 404 NOT_FOUND / MCP 错误结构）。TP-21-08（扩展维度，P2）依赖 V2-01/02，挂 M4-A。
 - L5 回归 `backend/tests` **93/93** 全绿。
 - 前端（`frontend/app.js` + `index.html`）：「数据健康度」tab（四维卡片/对象表/属性级钻取/新鲜度/趋势表）＋人工确认卡批次健康卡（`renderBatchHealthCard`）。
+
+## 28. 流式 CDC（V2-12 / M3-D，2026-11-12）
+
+**独立数据面**（不经 MCP 工具调用）：平台按连接配置轮询源端 CDC 通道标准端点消费增量事件，幂等归一后**只写键＋关系快照**（内容值不落盘——内容仍走联邦读，TP-12-03 负向断言）。低风险事件（create／仅键与关系属性的 update）自动入库；`schema_change` 事件与高风险变更进**人工确认候选**（`source_type=cdc`，走 V2 审批链）。与 V2-11 联动：键级漂移 → `snapshot_auto_update=stopped` → poll 返回 `stopped_drift` 早退**不消费**（事件保留在源端，lsn 不前进）；人工 `resolve` 为唯一恢复路径，恢复后续消费停更期间事件。
+
+### 28.1 通道与探测
+
+| 通道 | 源端点 | 语义 |
+|---|---|---|
+| `cursor` | `POST /cdc/cursor` | 轮询：body `{since, limit}` → 200 `{events:[{lsn, op, key, after}], next_cursor}` |
+| `mq` | `POST /cdc/mq` | 长轮询队列消费（`subscribe_wait_ms`） |
+| `binlog` | `POST /cdc/subscribe` | 订阅式（`subscribe_wait_ms`） |
+| `auto` | — | 探测顺序 **hint→binlog→mq→cursor**；命中后 `supported_channel` 落盘锁定；源端换通道后重新 `config channel=auto` 触发重探测（TP-12-05e） |
+
+- 源端 **409** `{error: NOT_SUPPORTED, supported_channel: ...}`：连接标记 `supported=false`＋`supported_channel` 提示 → 健康视图 `cdc_status=not_supported`；**降级**＝`fallback-pull` 周期拉取（数据面补增量）＋联邦读（内容），既有数据与治理不受影响（TP-12-05）。
+- **幂等**：lsn 单调，重投递 → `skipped_dup`／`skipped_stale` 零副作用（TP-12-02：源端 offset 重置后 applied=0）。
+
+### 28.2 归一与写入
+
+- `field_map` 归一：源字段 → 本体属性；稳定键＝映射到键属性（`stable_key`）的源字段值；实例 `_source.kind="cdc"`（＋`connection_id`）。
+- 只写**键＋关系属性**快照（关系 many_to_one → 关系属性值）；内容属性值不持久化。
+- 分批限流：`max_batch`（默认 100）×`max_batches_per_poll`（10）×`batch_pause_ms`；350 事件 → 4 批零丢失零重复（EP-12-03）。
+
+### 28.3 熔断、告警与健康
+
+- **熔断状态机**：`closed → open`（连续失败 ≥ `circuit_threshold`；poll 命中 open 早退 `circuit_open` 不再打源）`→ half_open`（`circuit_cooldown_seconds` 到期后单探测）`→ closed`（成功）。
+- **告警**（连接级环形缓冲，`GET .../alerts`）：`stalled`（> `stale_seconds` 无成功）／`stalled_recovered`／`lag`（事件时间戳滞后 > `lag_alert_seconds`，**仅告警不熔断**）／`lag_recovered`。
+- **`cdc_status` 状态机**（健康视图，优先级顺序）：`disabled`（连接未启用 CDC）→ `stopped_drift`（键漂移停更）→ `not_supported`（源端不支持）→ `circuit_open` → `running`。
+- **CDC 块**（`summarize_cdc`，health 的 `cdc` 字段与 `/api/cdc/channels` item 同源平铺）：`enabled, channel, supported, supported_channel, status, last_lsn, last_event_at, last_event_lsn, last_success_at, last_poll_at, last_fallback_pull_at, circuit{state, fail_count}, applied_total, skipped_dup_total, skipped_stale_total, review_total, errors_total, alerts[-10:]`。
+- **三类调用统计** `stats`（read/cdc/federation：`calls/window_calls/success_rate/last_ms/last_at/last_error`）；REST health 与 MCP 工具 `connection_health` 同口径（TP-12-07 逐字段相等）。
+
+### 28.4 端点
+
+| 方法 / 路径 | 说明 | 响应 / 错误 |
+|---|---|---|
+| `GET /api/cdc/channels` | 通道列表（**扁平**：`connection_id, display_name, transport, cdc_status`＋§28.3 CDC 块字段平铺顶层） | `success({items, total})` |
+| `POST /api/cdc/channels/{id}/config` | 通道配置 `{channel: cursor\|mq\|binlog\|auto, enabled: bool}` | `success(cdc)`；连接不存在 → 404 `NOT_FOUND`；channel 变更复位 `supported` 触发重探测 |
+| `POST /api/cdc/channels/{id}/poll` | 手动单轮拉取（验收/运维；后台循环同 `poll_connection` 管道） | 200 `data={status: ok\|stopped_drift\|not_supported\|circuit_open\|disabled\|not_found, events, applied, skipped_dup, skipped_stale, review, batches, backlog, lag_seconds, error?}`；**模块"不抛错"设计**：连接不存在 → 200 `status=not_found` |
+| `POST /api/cdc/channels/{id}/fallback-pull` | 降级周期拉取（not_supported 时补增量） | 200 `data={status: ok\|not_found, pulled, applied}` |
+| `GET /api/cdc/channels/{id}/alerts?limit=50` | 告警环形缓冲 | `success({items, total})`；连接不存在 → 404 `NOT_FOUND` |
+
+### 28.5 配置（环境变量）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ONTOLOGY_CDC_ENABLED` | `true` | 后台轮询循环总开关（false 时仅手动 poll 可用；验收 Phase A 即用 false 保证确定性） |
+| `ONTOLOGY_CDC_POLL_INTERVAL_SECONDS` | `5` | 后台循环节拍 |
+| `ONTOLOGY_CDC_SUBSCRIBE_WAIT_MS` | `2000`（上限 15000） | mq/binlog 订阅等待 |
+| `ONTOLOGY_CDC_MAX_BATCH` | `100` | 单批事件数 |
+| `ONTOLOGY_CDC_MAX_BATCHES_PER_POLL` | `10` | 单轮最大批数 |
+| `ONTOLOGY_CDC_BATCH_PAUSE_MS` | `100` | 批间停顿（限流保护源端） |
+| `ONTOLOGY_CDC_LAG_ALERT_SECONDS` | `60` | 滞后告警阈值（仅告警） |
+| `ONTOLOGY_CDC_STALE_SECONDS` | `120` | stalled 判定阈值 |
+| `ONTOLOGY_CDC_CIRCUIT_THRESHOLD` | `5` | 连续失败熔断阈值 |
+| `ONTOLOGY_CDC_CIRCUIT_COOLDOWN_SECONDS` | `30` | half_open 冷却 |
+| `ONTOLOGY_CDC_FALLBACK_PULL_SECONDS` | `300` | fallback-pull 周期（降级通道） |
+
+### 28.6 验收
+
+- `scripts/verify_m3d_streaming_cdc.py` **PASS=46/FAIL=0**（临时 DATA_DIR＋三进程内 ControllableMockSystem（cursor/mq/binlog 各一）＋TestClient；确定性设计：Phase A 全部 TP 走手动 poll（`ONTOLOGY_CDC_ENABLED=false` 不起后台循环），Phase B 起真实 `_cdc_loop` 后台线程（1s 节拍）验证自动熔断/续消费，零手动 poll）：TP-12-01（三通道增/改/删＋关系＋`_source.kind=cdc`）、TP-12-02（源端 offset 重置 → dup/stale 零副作用）、TP-12-03（内容值不落盘负向断言）、TP-12-04（stalled/lag/熔断状态机）、TP-12-05（409 not_supported 降级：read_calls 不变＋fallback pulled=3＋联邦读三系统 covered＋源端切 cursor 后 auto 重探测）、TP-12-06（三通道均实际消费）、TP-12-07（健康视图 REST/MCP 同口径＋404/not_found 契约＋disabled）、TP-12-08（键重命名 → schema_change 人工候选＋key 漂移停更＋门禁拦截＋field_map 修复（PUT 全量）＋schema-check 归零＋resolve 恢复续消费；plm 新增未映射字段仅 new_unmapped 不停更）、EP-12-01（手动断流恢复无重复＋后台自动熔断 open→half_open→closed 续消费 applied 仅 +1）、EP-12-03（350 洪峰 4 批零丢失零重复）。
+- 回归：L5 `backend/tests` **93/93**；M3-A **47/47**（TP-11-11 `cdc_status` 断言由占位 `planned_m3d` 更新为状态机真实值 `disabled`——该用例连接未启用 CDC）；M3-C **56/56**；VS2-00 **50/50**。
+- mock 保真注记（如实标注）：`ControllableMockSystem` 的 schema rename **不更新 `key_field`**（保持 M3-A 已验证语义：重命名后的新键名按 `new_unmapped` 提示）；因此键重命名后向该源写数据，payload 须同时携带旧键名（mock 按 `key_field` 取 key 的简化）。
