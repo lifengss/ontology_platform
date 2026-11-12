@@ -1000,7 +1000,7 @@ M3-F 后端已在前一阶段交付（commit e3aa175，verify_m3f_orchestration.
 - 用户级 wiki：raw 快照 2026-11-12-M3-F-Action编排与前端三面板.md（新）＋进展与测试 M3-F 节＋实体页（状态/sources/导航表 M3-F 行）＋log＋对话历史 #40 同步。
 
 ### 41.7 状态
-- M3-F **已交付**：后端 e3aa175＋本阶段前端三面板/生成修复/pageSize 别名/2 文档本地 commit（不 push，M3-G 退出统一 push）。
+- M3-F **已交付**：后端 e3aa175＋本阶段前端三面板/生成修复/pageSize 别名/2 文档本地 commit `1b486d8`（不 push，M3-G 退出统一 push）。
 - 工作区仅余成本核算业务线未提交项（docs/数据缺口*.md M、cost_baseline_kit/、docs/备份/、docs/成本核算*.md，与平台代码无关、有意保留）。
 - 临时文件已清理（scripts/_check_edits.py、scripts/_orch_chunk2.js、误存 --full-page）；backend/_boot.log、_boot_err.log 被后端进程占用，进程停止后清理。
 - 下一步：M3-G 里程碑退出（TCE2E-03/07 端到端联验＋退出报告＋统一 push）→M4 全片＋终验＋push。
