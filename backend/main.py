@@ -30,6 +30,7 @@ from api.router_cdc import router as cdc_router  # V2-12 流式 CDC（M3-D）
 from api.router_quality import router as quality_router  # V2-21 数据健康度（M3-C）
 from api.router_llm import router as llm_router
 from api.router_mcp import router as mcp_router
+from api.router_orchestration import router as orchestration_router  # V2-14 Action 编排（M3-F）
 from api.router_namespaces import router as namespaces_router
 from api.router_ontologies import router as ontologies_router
 from api.router_projects import router as projects_router
@@ -134,6 +135,7 @@ app.include_router(changesets_router)  # V2-07 变更审批流（M2-E）
 app.include_router(lineage_router)  # V2-08 细粒度血缘（M3-B）
 app.include_router(cdc_router)  # V2-12 流式 CDC（M3-D）
 app.include_router(quality_router)  # V2-21 数据健康度（M3-C）
+app.include_router(orchestration_router)  # V2-14 Action 编排（M3-F）
 
 
 # VS6: 由 mcp_server 模块按项目挂载 /mcp/{project_id}，双传输（2026-10-28 MCP 接入层修复）：
@@ -164,6 +166,16 @@ async def _start_schema_drift_probe():
         from schema_drift import _probe_loop
 
         threading.Thread(target=_probe_loop, name="schema-drift-probe", daemon=True).start()
+
+
+@app.on_event("startup")
+async def _start_orchest_services():
+    # V2-14（M3-F）：启动时恢复在途运行（running/awaiting → interrupted 留痕，可 resume），
+    # 并启动后台 cron 调度器（daemon 线程；ONTOLOGY_ORCH_SCHEDULER_INTERVAL_SECONDS<=0 禁用）。
+    from orchestration import orchestrator, start_scheduler
+
+    orchestrator.recover_interrupted()
+    start_scheduler()
 
 
 @app.on_event("startup")

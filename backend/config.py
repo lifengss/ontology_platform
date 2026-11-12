@@ -127,6 +127,12 @@ class Settings:
         self.writeback_confirm_ttl_seconds: int = _env_int("ONTOLOGY_WRITEBACK_CONFIRM_TTL_SECONDS", 600)
         self.writeback_ai_timeout_seconds: int = _env_int("ONTOLOGY_WRITEBACK_AI_TIMEOUT_SECONDS", 30)
 
+        # M3-F（V2-14）Action 编排：
+        # - orch_confirm_ttl_seconds：编排 confirm 节点确认 TTL（秒），超时未确认 → 运行取消并留痕（<=0 不过期）
+        # - orch_scheduler_interval_seconds：cron 触发调度器轮询周期（秒）；<=0 禁用后台调度
+        self.orch_confirm_ttl_seconds: int = _env_int("ONTOLOGY_ORCH_CONFIRM_TTL_SECONDS", 3600)
+        self.orch_scheduler_interval_seconds: int = _env_int("ONTOLOGY_ORCH_SCHEDULER_INTERVAL_SECONDS", 15)
+
     def ensure_dirs(self) -> None:
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)

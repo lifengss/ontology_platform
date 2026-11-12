@@ -1,0 +1,38 @@
+{
+  "_doc": "V2-14 编排生成 golden dataset（TC-14-06/09/12）。4 样例类：S1 纯匹配 / S2 混合缺口 / S3 多缺口+干扰项 / S4 多匹配+高危确认。expected_steps 按步骤序给出期望：action 的 action_id（引用本环境生成目录 gen_send/gen_datasync/gen_report/gen_archiveold，名称须与 verify_m3f 创建的一致）或 GAP（能力缺口，不得静默丢弃）。阈值冻结于 thresholds（frozen_at 之后不得为通过而调整，只能走变更评审）。评估对象=确定性生成器（LLM 未配置时的回退通道，保证可复现）；AI 通道可用时同法评估。",
+  "frozen_at": "2026-11-12",
+  "frozen_by": "M3-F 验收",
+  "thresholds": {
+    "node_mapping_precision_min": 0.85,
+    "node_mapping_recall_min": 0.9,
+    "edge_accuracy_min": 0.95,
+    "gap_recall_min": 1.0,
+    "high_risk_confirm_attach_min": 1.0
+  },
+  "samples": [
+    {
+      "id": "S1",
+      "title": "纯匹配：三步全部可 grounded",
+      "text": "1. 数据同步 到主数据库\n2. 发送通知 给负责人\n3. 导出报表 给审计部门",
+      "expected_steps": ["gen_datasync", "gen_send", "gen_report"]
+    },
+    {
+      "id": "S2",
+      "title": "混合缺口：中间步骤无对应能力",
+      "text": "1. 发送通知 客户确认收到\n2. 人工打电话回访\n3. 归档旧数据",
+      "expected_steps": ["gen_send", "GAP", "gen_archiveold"]
+    },
+    {
+      "id": "S3",
+      "title": "多缺口+干扰项：含与已有能力词汇相近的未覆盖步骤",
+      "text": "1. 导出报表 月度版\n2. 系统自动发送邮件给高管\n3. 数据同步 增量\n4. 清理临时文件",
+      "expected_steps": ["gen_report", "GAP", "gen_datasync", "GAP"]
+    },
+    {
+      "id": "S4",
+      "title": "多匹配+高危：首步为高风险归档，须自动挂确认",
+      "text": "1. 归档旧数据 超过一年的\n2. 数据同步 全量\n3. 发送通知 管理员\n4. 导出报表 年终",
+      "expected_steps": ["gen_archiveold", "gen_datasync", "gen_send", "gen_report"]
+    }
+  ]
+}

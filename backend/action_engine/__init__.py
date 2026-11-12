@@ -865,3 +865,7 @@ class ActionEngine:
                     "identity": identity}, identity
         except Exception as e:  # noqa: BLE001
             return {"status": 0, "error": str(e), "identity": identity}, identity
+
+
+# 模块级单例：编排引擎 / MCP / 路由共用入口（引擎无实例状态，存储均为模块级 JsonStore）
+engine = ActionEngine()
