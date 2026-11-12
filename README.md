@@ -1,4 +1,4 @@
-# 格物 Lattice（企业业务本体平台）— Beta V1.0（内测版）
+# 格物 Lattice（企业业务本体平台）— Beta V2.0（内测版）
 
 本地网页服务 + Docker Compose（FastAPI + Jena/Fuseki + Neo4j + Postgres/pgvector + 浏览器前端）。
 定位：大模型 Agent 的**语义底座**（约束数据使用逻辑、降低幻觉）。详见 `proj_wiki/` 下的设计方案与 PRD。

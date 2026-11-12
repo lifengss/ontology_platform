@@ -1,6 +1,6 @@
 ; setup.nsi - Enterprise Ontology Platform Windows installer (ASCII only; Chinese strings live in PS-generated .bat/.lnk)
 !define PRODUCT_NAME "Enterprise Ontology Platform"
-!define PRODUCT_VERSION "1.0.2"
+!define PRODUCT_VERSION "2.0.0"
 !define PRODUCT_PUBLISHER "lifengss"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 

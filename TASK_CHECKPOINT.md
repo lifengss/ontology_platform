@@ -1117,3 +1117,33 @@ M3 里程碑退出（docs/V2-测试用例.md 判据）：TCE2E-03 备件更换�
 - 需求定稿 ✅（纯文档，无代码改动）。
 - 排期：**M4-J**（M4 顺序执行，M4-H 之后、M4-I 终验之前）；测试点 TP-22-xx 由正常流生成后登记。
 - 主线不变：M4 全片（含 M4-J）＋终验＋push。
+
+## 45. 项目版本号 V1.0 → V2.0（2026-11-12）
+
+### 45.1 用户指令
+
+- 「现在开发的内容都已经属于V2了，UI上仍旧是beta V1.0，修改一下项目版本号吧。」
+
+### 45.2 改动（6 处，纯版本标识）
+
+| 位置 | 旧 | 新 |
+|---|---|---|
+| `frontend/index.html` `<title>` | Beta V1.0 | **Beta V2.0** |
+| `frontend/index.html` 顶栏 `<h1>` | Beta V1.0 | **Beta V2.0** |
+| `README.md` 标题 | Beta V1.0（内测版） | **Beta V2.0（内测版）** |
+| `backend/config.py` `APP_VERSION` 默认 | 1.0.2 | **2.0.0**（FastAPI openapi version／`/api/health` version 字段／`/api/system` 信息均取此值） |
+| `installer/setup.nsi` `PRODUCT_VERSION` | "1.0.2" | **"2.0.0"**（下次打包 = `OntologyPlatform-Setup-2.0.0.exe`＋ARP DisplayVersion） |
+| `installer/docs/产品说明.md` 安装包文件名 | Setup-1.0.2.exe | **Setup-2.0.0.exe** |
+
+### 45.3 未动（有意保留）
+
+- `installer/payload/**`（仍是 1.0.2 旧快照）：`build.ps1` [1/6] 每次打包**清空重建** payload（RoboCopy 从 backend/frontend 源码新拷），下次打包自动覆盖，无需手改。
+- `installer/scripts/install-deps.ps1:339` 注释「1.0.2 起默认安装目录已改 LOCALAPPDATA\Programs」＝历史事实（记载改动时点），保留。
+- `scripts/verify_m1b_capabilities.py:439`「v1.0.0」＝**能力**版本号（TC-04-04 引用锁），与平台版本无关。
+- docs/ 历史打包记录（v1.0.1/v1.0.2）＝历史事实，保留。
+
+### 45.4 状态
+
+- 验证：`py_compile backend/config.py` 通过；全局残留检查（frontend/backend/installer/scripts，排除 vendor）仅剩上表有意保留项。
+- 注意：运行中后端进程重启后 health 才返回 2.0.0；UI 刷新即显示新标题（静态文件）。
+- 主线不变：M4 全片（含 M4-J）＋终验＋push。
