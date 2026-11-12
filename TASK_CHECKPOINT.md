@@ -848,3 +848,29 @@
 
 ### 36.4 状态
 - M3-A **已交付并 commit**（见 git log）；M3 剩余：B 血缘→C 数据健康度→D 流式CDC→E 回写风险→F Action编排→G 退出＋push；随后 M4 全片＋终验＋push。里程碑退出时才 push（用户指令）。
+
+## 37. M3-B 交付——V2-08 细粒度血缘（2026-11-12）
+
+### 37.1 指令与交付
+- 用户指令：「继续未完成的任务」（同一全权授权延续：按里程碑顺序、不询问、进度存 wiki、M3-G 统一 push）。
+- **后端**：
+  - `backend/lineage/__init__.py`（新，~330 行）：`build_instance_lineage(project_id, instance_id)`——**读时装配，不写任何存储**，REST/MCP/UI 三通道共用。六要素：①来源系统 **候选 source_type 优先**（`external_mcp`→`source_ref` 查连接 display_name/name/origin；`field_map/file_upload`→文件名 `{kind:"file_upload",source_ref}`；无候选回退 `instance._source`；`source.kind` 输出语义 kind file_upload/external_mcp/manual）②源字段=候选 `mapping.field_map`（{源字段:属性id}）反查＋`field_map_source=dictionary` 时 `fields[*].term`（词条 canonical＋`system_bindings[connection_id]` 系统字段＋bound 标记）③导入批次=候选记录（candidate_id/source_type/source_ref/object_type/**status="imported"**/created_at/created_by/record_count）④`_source.fetched_at` ⑤转换规则=`__capability__`＋能力版本＋该版本 expression＋`trace.inputs` 输入原值＋`input_overrides`/`inputs_persisted`＋`fields[*].via="capability"` ⑥上游实例=`trace.lookups[*].matched_record_id`（via=capability_lookup）。
+  - `backend/api/router_lineage.py`（新）：`GET /api/lineage/instances/{instance_id}?project_id=`——404 `NOT_FOUND`，`project_tenant_guard`（跨租户 404 不泄露存在性）；`main.py` 注册。
+  - `backend/mcp_server/__init__.py`：MCP 工具 `lineage_get(instance_id)`（同装配，JSON 字符串返回，`_require_published`，`_err(ERR_NOT_FOUND,...)`）。
+  - `backend/api/router_ingest.py`：`_save_candidate(..., field_map=None)`——全部候选创建点（xlsx/csv/智能 xlsx/智能 csv/preview）落 `rec["mapping"]={"field_map":{...},"field_map_source":"file"}`（MCP 读通道候选原本已有 mapping）。
+- **前端**（`frontend/app.js`）：实例详情「血缘」面板 `renderLineagePanel/loadInstanceLineage/renderLineagePanelData`（六要素表＋字段级血缘表＋转换规则块＋上游链 `openInstanceById` 点击跳转追溯）；REST 失败回退 `renderSourceLineageFallback`（仅 `_source` 原始信息）。
+- **设计口径**：①**联邦读不持久化血缘**（负断言 TP-08-04）：能力 `inputs` 覆盖（术语联邦查询合并值）不落新实例/不落属性，仅 `__capability__` 留痕（`inputs_persisted=False`＋`input_overrides`，血缘展示覆盖原值）；术语联邦查询内容不产生实例/候选。②三通道一致（TP-08-05 逐字段断言 MCP==REST）。③血缘为读时装配（无独立血缘表）：依赖候选/能力记录留存——候选清理后 batch/源字段要素缺失（source 仍由 `_source` 回退）。
+
+### 37.2 验收
+- `scripts/verify_m3b_lineage.py` **PASS=43/FAIL=0**（临时 DATA_DIR `_m3b_verify`＋**双**进程内 `ControllableMockSystem`（partdb-explicit 显式映射 P-1xx / partdb-dict 字典映射 P-2xx，3 词条绑定字典连接）＋TestClient with 模式＋进程内 MCPServer `_register_tools` 直调 `tool_fn`；三通道入库：CSV 上传 orders+parts / external_mcp 显式 field_map / external_mcp 字典 resolve_field_map；公式能力 `lookup('part',{'part_code':this.part_code},'unit_price')*this.qty`，qty=3→30.0）：TP-08-01（六要素双通道）/02（字段级 capability vs direct）/03（字典术语解析路径）/04（联邦读不持久化 4 负断言）/05（API/MCP/UI 三通道一致）/EP-08-01（REST 404＋MCP isError NOT_FOUND）。
+- L5 回归 `python -m pytest tests/ -q` **93/93** 全绿无回归。
+- **关键坑**：①`ingestion.apply_field_map` **恒写 `_source.kind="field_map"`**（上传 connection_id=文件名、MCP=connection_id）——`_source.kind` 无法区分文件/MCP，来源判定必须候选 source_type 优先；上传通道候选 source_type 也是 `"field_map"`（`_build_candidate_records` 用 `source={"kind":"field_map"}`），语义 kind 在血缘层解析为 file_upload。②候选审批后 `status="imported"`（`ingestion.approve`，非 "approved"）。③能力表达式必须 `this.<attr>` 访问实例属性——裸标识符定义期 `validate()` 即 `UNKNOWN_IDENTIFIER`（首轮 12 项 FAIL 根因之一；M1-B 全绿脚本均用 `this.xxx`）。④CapabilityCreate 传 `ontology_id` 更稳（HF-05 批量执行按本体过滤）。⑤inputs 覆盖执行**重写** `__capability__`——三通道一致性断言前须重新拉 REST 最新数据。⑥`resolve_field_map`（dictionary 源）只生成**已绑定词条**的属性映射——字典连接 mock 须把用到字段全部绑定词条，否则候选缺必填属性。⑦双 mock 源系统用不同 part_code 段（P-1xx/P-2xx）避免 stable_key 冲突。
+
+### 37.3 文档/wiki
+- `docs/API-INTERFACE-DOC.md`：新增 **§26**（六要素表/端点契约/验收/边界——联邦读不持久化、读时装配依赖候选留存如实标注）。
+- `docs/V2-开发里程碑.md`：M3-A 补 ✅ 完成标记＋交付结果（上会话漏更）、M3-B ✅＋交付结果、总表 M3 行更新（M3-A ✅、M3-B ✅）。
+- 项目 wiki `source-V2-测试用例.md`「测试脚本链接登记」登记 M3-B 行（43/43 通过＋L5 93/93）。
+- 本 checkpoint ＋ 用户级 wiki（raw 快照 `2026-11-12-M3-B-细粒度血缘.md`/进展与测试/实体页/log/对话历史 #36）同步。
+
+### 37.4 状态
+- M3-B **已交付并 commit** `d0bd238`（10 文件 +965/-11）；不 push（用户指令：M3-G 退出统一 push）。M3 剩余：C 数据健康度（V2-21 核心四维）→D 流式CDC（V2-12）→E 回写风险（V2-13）→F Action编排（V2-14 主体）→G 退出＋push；随后 M4 全片＋终验＋push。
