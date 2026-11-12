@@ -390,17 +390,22 @@
 ```json
 {
   "action_id": "sync_customer_to_crm",
+  "name": "同步客户到 CRM",
+  "description": "把主数据客户档案 upsert 到目标 CRM",
   "target_connection": "crm-sf-mcp",
   "invoke": { "kind": "mcp_tool", "tool": "upsert_contact" },
   "input_map": { "name": "$.Customer.name", "email": "$.Customer.email" },
   "idempotency_key": "customer::{Customer.id}",
-  "confirmation": "human_required",
-  "dry_run_supported": true,
+  "risk_level": "medium",
+  "risk_level_history": [
+    { "ts": "2026-11-12T10:00:00+08:00", "from": null, "to": "medium", "by": "admin", "reason": "初始分级" }
+  ],
   "created_at": "2026-10-19T10:00:00+08:00",
   "updated_at": "2026-10-19T10:00:00+08:00"
 }
 ```
-- `invoke.kind`：`mcp_tool` / `webhook` / `rest`。`confirmation`：当前仅 `human_required`。`side_effect`：Action 恒为 `true`（外部写操作）；与 Function（元模型，无副作用）相对。
+- `invoke.kind`：`mcp_tool` / `webhook` / `rest`。`side_effect`：Action 恒为 `true`（外部写操作）；与 Function（元模型，无副作用）相对。
+- `risk_level`（V2-13，M3-E）：`low` / `medium`（默认）/ `high`，回写风险分级，见 §6.2 与 §29；**仅管理员可调整**（专用端点 `PUT .../risk-level`，常规 `PUT` 端点带 `risk_level` 变更一律 403 `RISK_LEVEL_LOCKED`，含管理员——防降级绕过）；每次调整追加 `risk_level_history`（含 `downgrade` 标记与操作人）。
 
 ### 6.2 端点
 | 方法 | 路径 | 说明 |
@@ -408,18 +413,22 @@
 | POST | `/api/actions` | 定义 Action（HTTP 201） |
 | GET | `/api/actions` | Action 列表（分页） |
 | GET | `/api/actions/{id}` | 读取 Action |
-| PUT | `/api/actions/{id}` | 更新 |
+| PUT | `/api/actions/{id}` | 更新（**禁止携带 `risk_level` 变更** → 403 `RISK_LEVEL_LOCKED`） |
 | DELETE | `/api/actions/{id}` | 删除 |
-| POST | `/api/actions/{id}/execute` | 触发执行（返回确认令牌，未确认不真正回写） |
-| POST | `/api/actions/{id}/confirm` | 人工确认后真正回写 |
+| PUT | `/api/actions/{id}/risk-level` | **（V2-13）风险等级调整，仅管理员**；body `{ "risk_level": "low\|medium\|high", "reason" }`；返回完整 Action（含 `risk_level_history`）；非管理员 403 `FORBIDDEN`（审计 `action_risk_level_denied`），无变化 400 `NO_CHANGE` |
+| POST | `/api/actions/{id}/execute` | 触发执行。low 风险门通过后**直接自动回写**（`auto_executed=true`）；medium 风险 AI 三条件评估，通过自动、未通过升级人工（返回 `confirmation_token`）；high 风险仅生成 `confirmation_token`（未确认不回写） |
+| POST | `/api/actions/{id}/confirm` | 人工确认后真正回写（签核标识=身份+时间戳，随日志与审计留痕） |
+| POST | `/api/actions/{id}/reject` | **（V2-13）拒绝待确认回写**；body `{ "confirmation_token", "reason" }`；取消并记录原因与操作人（审计 `action_writeback`，`trigger_source=reject`）；token 已消费/不存在 → 409 `TOKEN_INVALID` |
+| POST | `/api/actions/{id}/logs/{log_id}/replay` | **（V2-13）失败场景重放**：以原 `planned_payload`＋幂等键重新执行；仅 `failed/cancelled/gate_failed` 日志可重放，已生效（success/simulated）→ 409 `REPLAY_NOT_ALLOWED`；重放同样过熔断与退避 |
 | GET | `/api/actions/{id}/logs` | 读取 Action 执行日志（分页） |
 
 - `POST .../execute` 请求体：`{ "input": { "Customer": { "id":"c1","name":"张三" } }, "dry_run": false }`。
-- `POST .../execute` 响应：`data = { "confirmation_token": "uuid", "dry_run": false, "planned_payload": { "tool":"upsert_contact", "args": { "name":"张三" } }, "idempotency_key": "customer::c1" }`。**此时未回写**。
-- `POST .../confirm` 请求体：`{ "confirmation_token": "uuid" }`；响应：`data = { "executed": true, "idempotency_hit": false, "external_response": { ... }, "log_id": "uuid" }`。
+- `POST .../execute` 响应（high 路径，此时未回写）：`data = { "confirmation_token": "uuid", "dry_run": false, "planned_payload": { "tool":"upsert_contact", "args": { "name":"张三" } }, "idempotency_key": "customer::c1", "risk_level": "high", "outcome": "awaiting_confirmation" }`。
+- `POST .../execute` 响应（low/medium 自动路径）：`data = { "executed": true, "auto": true, "auto_executed": true, "outcome": "success\|simulated\|idempotency_hit", "log_id": "uuid", "risk_level": "low", "identity": "mapped\|none", "external_response": { ... }, "evaluation": { ... }（仅 medium） }`；low 门失败：`{ "gate_failed": true, "gate_failures": [...], "executed": false, "outcome": "gate_failed" }`（不回写、不落外部调用）；medium 升级人工：`{ "confirmation_token": "uuid", "escalated": true, "evaluation": { "verdict": "fail\|undecidable", "conditions": { "no_unexpected_external_impact": bool\|null, "atomicity": bool\|null, "completeness": bool\|null }, "source": "llm\|unavailable", "error"?: "..." }, "outcome": "escalated_to_human" }`（**失败/超时/无法判断均升级人工，失败≠通过**）。
+- `POST .../confirm` 请求体：`{ "confirmation_token": "uuid" }`；响应：`data = { "executed": true, "idempotency_hit": false, "external_response": { ... }, "log_id": "uuid", "outcome": "success\|simulated\|failed", "risk_level": "high", "identity": "mapped\|none", "signer": { "user_id", "username", "role", "signed_at" } }`；确认超时（`WRITEBACK_CONFIRM_TTL_SECONDS`，默认 3600s）：`{ "executed": false, "cancelled": true, "cancel_reason": "confirmation_timeout", "signer": { ... } }`（不落日志、审计留痕）。
 - 回写健壮性（PRD §6.6 护栏 4）：webhook/rest 回写对可重试失败（网络/超时/5xx）做**指数退避重试**（`ACTION_MAX_RETRIES`，默认 2；4xx 含 401/403 不重试），重试携带 `Idempotency-Key` 防重复写；**按外部端点**连续失败达 `ACTION_BREAKER_FAILURE_THRESHOLD`（默认 3）触发**熔断**（OPEN，冷却 `ACTION_BREAKER_COOLDOWN_SECONDS` 默认 30s），OPEN 期间 confirm 立即快速失败、不外呼、不落日志：响应 `data = { "executed": false, "circuit_open": true, "retry_after": <秒> }`（不计入幂等，重试不会被误判「已执行」）。冷却期后 HALF_OPEN 试探，成功恢复 CLOSED、失败重新 OPEN。
-- `GET .../logs` 响应：分页列表，每条日志含 `log_id/action_id/confirmation_token/idempotency_key/planned_payload/external_response/executed_at`。
-- 护栏：相同 `idempotency_key` 重复确认不产生重复回写（幂等）；`dry_run=true` 时 `execute` 直接返回 `planned_payload` 且 `confirmation_token=null`，不发起外部调用。
+- `GET .../logs` 响应：分页列表，每条日志含 `log_id/action_id/confirmation_token/idempotency_key/planned_payload/external_response/executed_at`，V2-13 追加 `risk_level/trigger_source（api\|mcp\|reject\|replay）/actor/signer（身份+时间戳）/evaluation（medium 评估报告）/auto/auto_reason/identity/replay_of/outcome（success\|simulated\|failed\|cancelled\|gate_failed\|escalated_to_human）/gate_failures/cancel_reason/reject_reason`。
+- 护栏：相同 `idempotency_key` 且已生效（success/simulated）的回写，重复触发/确认/重放不产生新外部调用（`idempotency_hit=true`）；**失败不阻塞重放**；`dry_run=true` 时 `execute` 直接返回 `planned_payload`＋`gate`（`passed`/`failures` 映射门校验结果）且不回写；`WRITEBACK_ENABLED=false`（默认）时全部回写走展示模式（`outcome=simulated`、不外呼）。
 
 ---
 
@@ -502,7 +511,7 @@
 | `ontology_query` | `{ "ontology_id": "本体名称或 uuid（可选）", "query": "对象 id/名称子串（可选）" }` | **`ontology_id` 留空 → 返回已发布本体清单** `{ published, count, ontologies: [{ontology_id, name, object_count}], hint }`（P2-①）；否则按名称/ID 解析后返回本体结构摘要（对象列表 + 属性/关系计数） |
 | `inference_trace` | `{ "ontology_id": "本体名称或 uuid" }` | OWL2-RL 风格推理链路 steps（同 §4 inference） |
 | `instance_get` | `{ "ontology_id": "本体名称或 uuid", "object_type": "obj_x（可选）", "instance_id": "（可选）", "limit": 50, "offset": 0, "fields": "attr1,attr2"（可选，逗号分隔字符串或数组） }` | 实例读取（P1-4）：**limit 默认 50/上限 200**、offset 翻页、fields 属性白名单投影（**字符串优先**，与 stdio bridge 一致；数组仍兼容）；返回 `{ ontology_id, total, offset, limit, has_more, count, instances }`，截断且未过滤时附 `hint` |
-| `action_invoke`(VS8) | `{ "action_id": "uuid", "confirmation_token": "uuid" }` | 确认执行 Action（**side_effect=true**；令牌须先经 `POST /api/actions/{id}/execute` 获取） |
+| `action_invoke`(VS8, V2-13) | `{ "action_id": "uuid", "confirmation_token": "uuid"?, "input": "JSON 对象字符串（触发执行时）", "dry_run": false }` | **触发/确认执行 Action（side_effect=true）**，`trigger_source=mcp`：传 `input` 按 risk_level 分流（low 门通过自动回写；medium AI 三条件评估通过自动、否则返回 `confirmation_token` 升级人工；high 返回 `confirmation_token` 待确认）；传 `confirmation_token` 确认回写（签核标识=`mcp`+时间戳）；`dry_run=true` 仅预览；失败场景可经 REST `.../logs/{log_id}/replay` 重放 |
 | `term_lookup`(M1-A) | `{ "term": "词条/同义词", "value": "键值（可选）", "dry_run": false, "confirm_cost": false }` | 数据字典解析＋多系统联邦并行查询（来源标记/未覆盖显式/冲突并存）；`dry_run=true` 仅返回成本预估、确认前零外呼 |
 | `capability_call`(M1-B) | `{ "capability": "能力 name 或 id", "instance_id": "record_id", "dry_run": false, "inputs": {...} }` | 执行**已发布(active)**能力并返回四要素溯源（能力版本＋输入实例＋输入属性原值＋lookup 命中 record_id/编码/原始值）；`inputs`（M1-E）接收联邦读结果为临时输入覆盖，**不落库**，返回 `input_overrides/data_gaps/inputs_persisted=false`；`capability` 留空返回已发布能力清单；`dry_run=true` 不写回；draft 调用 `FORBIDDEN_DRAFT`(403) |
 
@@ -1219,3 +1228,52 @@
 - `scripts/verify_m3d_streaming_cdc.py` **PASS=46/FAIL=0**（临时 DATA_DIR＋三进程内 ControllableMockSystem（cursor/mq/binlog 各一）＋TestClient；确定性设计：Phase A 全部 TP 走手动 poll（`ONTOLOGY_CDC_ENABLED=false` 不起后台循环），Phase B 起真实 `_cdc_loop` 后台线程（1s 节拍）验证自动熔断/续消费，零手动 poll）：TP-12-01（三通道增/改/删＋关系＋`_source.kind=cdc`）、TP-12-02（源端 offset 重置 → dup/stale 零副作用）、TP-12-03（内容值不落盘负向断言）、TP-12-04（stalled/lag/熔断状态机）、TP-12-05（409 not_supported 降级：read_calls 不变＋fallback pulled=3＋联邦读三系统 covered＋源端切 cursor 后 auto 重探测）、TP-12-06（三通道均实际消费）、TP-12-07（健康视图 REST/MCP 同口径＋404/not_found 契约＋disabled）、TP-12-08（键重命名 → schema_change 人工候选＋key 漂移停更＋门禁拦截＋field_map 修复（PUT 全量）＋schema-check 归零＋resolve 恢复续消费；plm 新增未映射字段仅 new_unmapped 不停更）、EP-12-01（手动断流恢复无重复＋后台自动熔断 open→half_open→closed 续消费 applied 仅 +1）、EP-12-03（350 洪峰 4 批零丢失零重复）。
 - 回归：L5 `backend/tests` **93/93**；M3-A **47/47**（TP-11-11 `cdc_status` 断言由占位 `planned_m3d` 更新为状态机真实值 `disabled`——该用例连接未启用 CDC）；M3-C **56/56**；VS2-00 **50/50**。
 - mock 保真注记（如实标注）：`ControllableMockSystem` 的 schema rename **不更新 `key_field`**（保持 M3-A 已验证语义：重命名后的新键名按 `new_unmapped` 提示）；因此键重命名后向该源写数据，payload 须同时携带旧键名（mock 按 `key_field` 取 key 的简化）。
+
+## 二十九、Action 回写风险分级（V2-13，M3-E，2026-11-12）
+
+> V2 需求「回写风险分级」＋「三类回写统一入审计」的独立落地切片。MVP 护栏（单 Action 人工确认）升级为**按风险分级的自动/人工混合策略**；端点与字段详见 §6.2 / §11.2。
+
+### 29.1 风险分级矩阵（`risk_level`：low / medium / high，默认 medium）
+| 风险级 | 触发后行为 | 人工介入 |
+|---|---|---|
+| `low` | 映射/幂等门禁（dry-run 可先跑）通过 → **直接自动回写**（`auto_executed=true`） | 无 |
+| `medium` | **AI 三条件评估**：无误伤外部影响（`no_unexpected_external_impact`）＋可原子（`atomicity`）＋可完整（`completeness`）→ 通过自动回写、未通过升级人工 | 仅评估未通过/无法判断时 |
+| `high` | 仅生成 `confirmation_token` 待确认，**未确认不回写** | 必须人工确认 |
+
+- **AI 三条件评估**（medium）：LLM 输出结构化 JSON 三条件＋rationale；**评估报告随执行日志留痕**（`log.evaluation`：verdict/conditions/source/model/evaluated_at）并在响应返回 `evaluation`。**失败≠通过**：LLM 异常/超时（`WRITEBACK_AI_TIMEOUT_SECONDS`）→ `verdict=undecidable, source=unavailable`；条件为 null（无法判断）→ `undecidable`；任一条件 false → `fail`——三种情形一律**升级人工**（`escalated=true`＋`confirmation_token`，不落外部调用），升级后人工确认仍可通过（人工判断优先）。
+- **签核标识**（high 与人工接管路径）：`signer = { user_id, username, role, signed_at }`（身份＋时间戳），随日志与审计留痕；MCP 触发时签核身份记为 `mcp`。
+- **确认超时**：待确认 token 超过 `WRITEBACK_CONFIRM_TTL_SECONDS`（默认 3600s）→ confirm 返回 `cancelled=true, cancel_reason=confirmation_timeout`（记录操作人，不回写）。
+
+### 29.2 风险等级管控（仅管理员，防降级绕过）
+- 专用端点 `PUT /api/actions/{id}/risk-level`（body `{ risk_level, reason }`）：**非管理员 403 `FORBIDDEN`**（审计 `action_risk_level_denied`）；管理员成功（审计 `action_risk_level_change`，detail 含 from/to/**downgrade** 标记）；目标等级与当前相同 400 `NO_CHANGE`。
+- **常规 `PUT /api/actions/{id}` 携带 `risk_level` 变更一律 403 `RISK_LEVEL_LOCKED`（含管理员）**——降级只能走专用端点留痕。
+- 每次调整追加 `risk_level_history`（ts/from/to/by/reason/downgrade）。
+
+### 29.3 横切护栏（三级同等生效）
+- **幂等**：`idempotency_key` 渲染后写入外部请求头 `Idempotency-Key`＋本地日志；**已生效（success/simulated）回写**重复触发/确认/重放 → `idempotency_hit=true`、零新外部调用；**失败不阻塞重放**；low 风险要求幂等键可解析（空键/不可解析 → 门禁失败）。
+- **指数退避重试**：外部 5xx/网络错误按 1s×2^n 退避重试 `ACTION_MAX_RETRIES` 次（默认 2）；重试复用同一幂等键。
+- **熔断**：按目标连接（MCP 连接 ID / webhook URL）独立计数；连续 `ACTION_BREAKER_FAILURE_THRESHOLD`（默认 5）次确认级失败 → OPEN，期间触发**直接失败**（`circuit_open=true`、零外部调用）＋告警（审计 `action_circuit_open`，detail.alert）；冷却 `ACTION_BREAKER_COOLDOWN_SECONDS`（默认 120s）后 HALF_OPEN 单探测，成功→CLOSED、失败→OPEN 重置。
+- **外部失败**：重试耗尽 → 日志 `outcome=failed`（含 error/attempt），可经 29.4 重放。
+
+### 29.4 失败场景重放
+`POST /api/actions/{id}/logs/{log_id}/replay`：以原 `planned_payload`＋幂等键重新执行（同样过门禁/熔断/退避）；仅 `failed/cancelled/gate_failed` 日志可重放；**已生效（success/simulated）→ 409 `REPLAY_NOT_ALLOWED`**；响应含 `replay_of`（原日志 ID）与签核标识。
+
+### 29.5 三类回写统一审计
+- 引擎对**每次真实回写尝试**（含幂等命中）记录 `action_writeback`（**API/MCP 入口一致**，路由不重复记录），`detail` 固定含：`risk_level`（low|medium|high）、`trigger_source`（api|mcp|reject|replay）、`signer`（签核人 username，自动路径为 null）、`signer_at`、`identity`（mapped|none）、`auto`/`auto_reason`、`evaluation_verdict`、`replay_of`、`idempotency_hit`、`circuit_open`、`cancel_reason`（cancelled 时）。
+- 取消/拒绝同样入审计：`trigger_source=reject`（detail 含 reject_reason）/ `cancel_reason=confirmation_timeout`。
+- `GET /api/audit` 新增过滤参数 `risk_level` / `trigger_source` / `signer`（可组合，与既有 action/project_id/actor 叠加）——支撑按**等级、触发来源、签核人**检索三类回写记录。
+- 其它事件：`action_execute`（触发）、`action_risk_level_change` / `action_risk_level_denied`（等级管控）、`action_circuit_open`（熔断告警）。
+
+### 29.6 配置（环境变量）
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ONTOLOGY_WRITEBACK_ENABLED` | `false` | 真实回写总开关（默认关：展示模式 `outcome=simulated`、零外呼） |
+| `ONTOLOGY_WRITEBACK_CONFIRM_TTL_SECONDS` | `3600` | 待确认 token 有效窗口（秒） |
+| `ONTOLOGY_WRITEBACK_AI_TIMEOUT_SECONDS` | `30` | 中风险三条件评估 LLM 超时（秒；超时→undecidable 升级人工） |
+| `ONTOLOGY_ACTION_MAX_RETRIES` | `2` | 外部 5xx 指数退避重试次数 |
+| `ONTOLOGY_ACTION_BREAKER_FAILURE_THRESHOLD` | `5` | 连续失败熔断阈值（按目标连接） |
+| `ONTOLOGY_ACTION_BREAKER_COOLDOWN_SECONDS` | `120` | 熔断冷却窗口（秒，之后 HALF_OPEN 单探测） |
+
+### 29.7 验收
+- `scripts/verify_m3e_writeback_risk.py`（backend/ 下运行，临时 DATA_DIR＋4 进程内可控外部 mock＋LLM 三条件桩＋admin/modeler 双角色）**149/149 通过**：TP-13-01 低风险自动（无人工、dry-run 门预览）／TP-13-02 中风险三条件（通过自动＋报告随日志留痕、未通过升级）／TP-13-03 高风险人工确认＋签核标识（身份+时间戳）／TP-13-04 等级仅管理员（非管理员 403＋审计、管理员成功＋history 降级标记、常规端点 `RISK_LEVEL_LOCKED`）／TP-13-05 幂等·退避·熔断**三级同等**生效／TP-13-06 统一审计组合检索（risk_level×trigger_source×signer，admin-only 守卫）；TCE-13-01 门失败不回写（原因留痕）／TCE-13-02 AI 失败·无法判断升级（不自动执行，失败≠通过）／TCE-13-03 拒绝·超时取消（原因＋操作人）／TCE-13-04 失败重放（幂等键复用、已生效拒绝重放 409）。
+- 回归：L5 `backend/tests` **93/93**。

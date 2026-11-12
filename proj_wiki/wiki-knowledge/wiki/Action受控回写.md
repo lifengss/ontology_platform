@@ -2,8 +2,8 @@
 title: Action受控回写
 type: concept
 created: 2026-10-13
-updated: 2026-10-13
-sources: [设计方案-修订稿v1.1.md, PRD-需求文档.md]
+updated: 2026-11-12
+sources: [设计方案-修订稿v1.1.md, PRD-需求文档.md, V2-功能需求描述.md, V2-开发里程碑.md]
 tags: [Action, 回写, 安全, 概念]
 ---
 
@@ -28,8 +28,19 @@ tags: [Action, 回写, 安全, 概念]
 4. 失败指数退避 + 熔断；
 5. 外部通常不可回滚，优先幂等创建/更新。
 
+## V2-13 回写风险分级（M3-E，2026-11-12 已落地）
+MVP"一律人工确认"升级为**按 `risk_level`（low/medium/high，默认 medium）分级的自动/人工混合策略**（`backend/action_engine/`，API 文档 §6.2/§29）：
+- **low**：映射/幂等门禁（dry-run 可先跑）通过 → 直接自动回写（`auto_executed=true`）；
+- **medium**：AI 三条件评估（`no_unexpected_external_impact`/`atomicity`/`completeness`，LLM 结构化 JSON；报告随日志 `log.evaluation` 留痕）→ 通过自动、**失败/超时/无法判断一律升级人工（失败≠通过）**；
+- **high**：必须人工确认，签核标识 `signer={user_id,username,role,signed_at}`（身份+时间戳；MCP 触发记 `mcp`）；确认 TTL 超时取消。
+- **风险等级仅管理员可调**：专用端点 `PUT .../risk-level`（审计 change/denied，`risk_level_history` 含 downgrade 标记）；常规 `PUT` 携带 `risk_level` 一律 403 `RISK_LEVEL_LOCKED`（防降级绕过）。
+- **横切护栏（三级同等）**：幂等（已生效挡重、失败不阻塞重放）＋指数退避＋按目标连接熔断（OPEN 零外呼＋告警）；**失败场景可重放**（`POST .../logs/{log_id}/replay`，已生效 409）。
+- **三类回写统一审计**：引擎记 `action_writeback`（API/MCP 入口一致；detail 含 `risk_level`/`trigger_source`(api|mcp|reject|replay)/`signer`/`evaluation_verdict`/`replay_of` 等），`GET /api/audit` 支持按等级/触发来源/签核人组合检索。
+- 展示模式：`ONTOLOGY_WRITEBACK_ENABLED=false`（默认）全部 `simulated` 零外呼。
+- 验收：`scripts/verify_m3e_writeback_risk.py` 149/149（TC/TCE-13 十验收点全分支）；L5 回归 93/93。
+
 ## 与范围的关系
-无条件自动回写、复杂编排、统一身份联邦后置 V2。见 [[范围与版本规划]]。
+无条件自动回写（已由 V2-13 风险分级取代"一律人工"）、复杂编排（M3-F）、统一身份联邦（M2-B 已落地）见 [[范围与版本规划]]、[[V2开发里程碑]]。
 
 ## See Also
 - [[外部数据源MCP接入]]

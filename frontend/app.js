@@ -4982,7 +4982,7 @@ function renderActionList() {
         '<div class="flex gap-3">' +
           '<div class="w-9 h-9 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-lg">' + _actionIcon(a.category) + '</div>' +
           '<div>' +
-            '<div class="font-medium">' + esc(a.name || a.action_id) + '</div>' +
+            '<div class="font-medium">' + esc(a.name || a.action_id) + ' ' + _actionRiskBadge(a.risk_level || 'high') + '</div>' +
             '<div class="text-xs text-slate-400 mt-1">' + _actionCategoryBadge(a.category) + ' · ' + esc(_actionKindLabel(a.invoke?.kind)) + ' · ' + esc(a.target_connection || '无连接') + '</div>' +
             (a.description ? '<div class="text-xs text-slate-500 mt-1">' + esc(a.description) + '</div>' : '') +
           '</div>' +
@@ -5056,7 +5056,7 @@ function renderActionList() {
         '<div class="flex gap-3">' +
           '<div class="w-9 h-9 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-lg">' + _actionIcon(a.category) + '</div>' +
           '<div>' +
-            '<div class="font-medium">' + esc(a.name || a.action_id) + '</div>' +
+            '<div class="font-medium">' + esc(a.name || a.action_id) + ' ' + _actionRiskBadge(a.risk_level || 'high') + '</div>' +
             '<div class="text-xs text-slate-400 mt-1">' + _actionCategoryBadge(a.category) + ' · ' + esc(_actionKindLabel(a.invoke?.kind)) + ' · ' + esc(a.target_connection || '无连接') + '</div>' +
             (a.description ? '<div class="text-xs text-slate-500 mt-1">' + esc(a.description) + '</div>' : '') +
           '</div>' +
@@ -5074,6 +5074,71 @@ function onActionKindChange() {
   $('actionMethodWrap').classList.toggle('hidden', kind !== 'webhook' && kind !== 'rest');
 }
 
+// ---- V2-13 回写风险分级（M3-E） ----
+const _RISK_META = {
+  low:    { label: '低风险', cls: 'ok', desc: '映射门禁通过即自动回写' },
+  medium: { label: '中风险', cls: 'warn', desc: 'AI 三条件评估通过自动执行，否则升级人工确认' },
+  high:   { label: '高风险', cls: 'err', desc: '必须人工确认（签核标识=身份+时间戳）' },
+};
+function _actionRiskBadge(level) {
+  const m = _RISK_META[level] || _RISK_META.high;
+  return '<span class="badge ' + m.cls + '" title="' + esc(m.desc) + '">' + m.label + '</span>';
+}
+function _isAdminUser() {
+  const me = _meUser();
+  return !me || me.role === 'admin'; // dev/未启用鉴权：不限制（与后端 bypass 一致）
+}
+async function adjustActionRisk() {
+  const a = state.currentAction;
+  if (!a) return;
+  if (!_isAdminUser()) { toast('调整风险等级需要平台管理员权限', 'err'); return; }
+  const current = a.risk_level || 'high';
+  const opts = Object.entries(_RISK_META).map(([k, v]) =>
+    k === current ? k + '（当前）' : k + '（' + v.label + '）').join('\n');
+  const ans = prompt('将回写风险等级调整为（输入 low / medium / high）：\n' + opts + '\n\n当前: ' + current);
+  if (!ans) return;
+  const next = ans.trim().toLowerCase();
+  if (!['low', 'medium', 'high'].includes(next)) { toast('无效的风险等级', 'err'); return; }
+  const reason = prompt('调整原因（留痕审计）：', '') || '';
+  try {
+    await api('/api/actions/' + a.id + '/risk-level', {
+      method: 'PUT', body: JSON.stringify({ risk_level: next, reason })
+    });
+    toast('风险等级已调整为 ' + next, 'ok');
+    await loadActions();
+    selectAction(a.id);
+  } catch (e) { toast('调整失败: ' + e.message, 'err'); }
+}
+async function runActionReject() {
+  if (!state.currentAction || !state.actionToken) { toast('没有待确认的执行令牌', 'err'); return; }
+  const reason = prompt('拒绝原因（将随签核标识留痕）：', '业务方未准备好') || '';
+  try {
+    const j = await api('/api/actions/' + state.currentAction.id + '/reject', {
+      method: 'POST', body: JSON.stringify({ confirmation_token: state.actionToken, reason })
+    });
+    const d = j.data || {};
+    state.actionToken = null;
+    $('actionPendingBox').classList.add('hidden');
+    $('actionResultBox').classList.remove('hidden');
+    $('actionResult').innerHTML = renderActionResult(d);
+    toast('回写已拒绝并留痕', 'ok');
+    loadActionLogs();
+  } catch (e) { toast('拒绝失败: ' + e.message, 'err'); }
+}
+async function replayActionLog(logId) {
+  const a = state.currentAction;
+  if (!a) return;
+  if (!confirm('以原 payload/幂等键重放该失败场景的回写？')) return;
+  try {
+    const j = await api('/api/actions/' + a.id + '/logs/' + logId + '/replay', { method: 'POST' });
+    const d = j.data || {};
+    $('actionResultBox').classList.remove('hidden');
+    $('actionResult').innerHTML = renderActionResult(d);
+    toast(d.executed ? '重放回写成功' : '重放未完成（outcome=' + (d.outcome || '?') + '）', d.executed ? 'ok' : 'err');
+    loadActionLogs();
+  } catch (e) { toast('重放失败: ' + e.message, 'err'); }
+}
+
 function startCreateAction() {
   state.currentAction = null;
   state.actionToken = null;
@@ -5089,6 +5154,7 @@ function startCreateAction() {
   renderActionInputMapList({});
   $('actionIdempotency').value = '';
   $('actionConfirmation').value = 'human_required';
+  if ($('actionRiskLevel')) $('actionRiskLevel').value = 'high';
   $('actionDryRun').checked = true;
   onActionKindChange();
   $('actionEditor').classList.remove('hidden');
@@ -5130,17 +5196,22 @@ function selectAction(id) {
 
 function renderActionRunnerHeader(a) {
   const el = $('actionRunnerHeader');
+  const riskBtn = _isAdminUser()
+    ? '<button class="text-xs text-amber-400" onclick="adjustActionRisk()" title="V2-13：风险等级调整仅平台管理员，变更全程审计（防降级绕过）">调整风险等级</button>'
+    : '';
   el.innerHTML =
     '<div class="flex items-start justify-between">' +
       '<div class="flex gap-3">' +
         '<div class="w-10 h-10 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-xl">' + _actionIcon(a.category) + '</div>' +
         '<div>' +
-          '<div class="font-medium text-base">' + esc(a.name || a.action_id) + '</div>' +
+          '<div class="font-medium text-base">' + esc(a.name || a.action_id) + ' ' + _actionRiskBadge(a.risk_level || 'high') + '</div>' +
           '<div class="text-xs text-slate-400 mt-1">' + _actionCategoryBadge(a.category) + ' · ' + esc(_actionKindLabel(a.invoke?.kind)) + ' · ' + esc(a.target_connection || '无连接') + '</div>' +
           (a.description ? '<div class="text-xs text-slate-500 mt-1">' + esc(a.description) + '</div>' : '') +
         '</div>' +
       '</div>' +
+      '<div class="flex gap-3">' + riskBtn +
       '<button class="text-xs text-blue-400" onclick="editAction(\'' + a.id + '\')">编辑</button>' +
+      '</div>' +
     '</div>';
 }
 
@@ -5160,6 +5231,7 @@ function editAction(id) {
   renderActionInputMapList(a.input_map || {});
   $('actionIdempotency').value = a.idempotency_key || '';
   $('actionConfirmation').value = a.confirmation || 'human_required';
+  if ($('actionRiskLevel')) $('actionRiskLevel').value = a.risk_level || 'high';
   $('actionDryRun').checked = a.dry_run_supported !== false;
   onActionKindChange();
   $('actionEditor').classList.remove('hidden');
@@ -5230,6 +5302,7 @@ async function saveAction() {
     input_map: getActionInputMap(),
     idempotency_key: $('actionIdempotency').value.trim(),
     confirmation: $('actionConfirmation').value,
+    risk_level: $('actionRiskLevel') ? $('actionRiskLevel').value : 'high',
     dry_run_supported: $('actionDryRun').checked,
   };
   try {
@@ -5305,13 +5378,71 @@ function gatherActionFormInput() {
   return result;
 }
 
+const _OUTCOME_META = {
+  success: { label: '回写成功', cls: 'ok' },
+  simulated: { label: '回写成功（展示模式模拟）', cls: 'ok' },
+  idempotency_hit: { label: '幂等命中（已生效，未重复回写）', cls: 'ok' },
+  failed: { label: '回写失败（可重放）', cls: 'err' },
+  gate_failed: { label: '映射门禁失败（未回写）', cls: 'err' },
+  cancelled: { label: '回写已取消', cls: 'warn' },
+  circuit_open: { label: '熔断开启（快速失败，未回写）', cls: 'warn' },
+  awaiting_confirmation: { label: '待人工确认', cls: 'warn' },
+  escalated_to_human: { label: 'AI 评估未通过，已升级人工确认', cls: 'warn' },
+};
 function renderActionResult(d) {
-  const status = d.executed ? 'success' : (d.dry_run ? 'info' : 'warning');
-  const statusText = { success: '执行成功', info: 'Dry Run 预览', warning: '未执行' }[status];
-  let html = '<div class="p-3 rounded-lg border ' + (status === 'success' ? 'border-emerald-600/40 bg-emerald-900/20' : 'border-slate-700/50 bg-slate-800/30') + '">';
-  html += '<div class="flex items-center gap-2 mb-2"><span class="badge ' + (status === 'success' ? 'ok' : 'text-slate-400') + '">' + statusText + '</span>';
+  const om = _OUTCOME_META[d.outcome] || null;
+  const success = om ? om.cls === 'ok' : (d.executed ? true : (d.dry_run ? null : false));
+  const statusText = om ? om.label : (d.dry_run ? 'Dry Run 预览' : (d.executed ? '执行成功' : '未执行'));
+  const border = success === true ? 'border-emerald-600/40 bg-emerald-900/20' : (success === false ? 'border-red-600/40 bg-red-900/10' : 'border-slate-700/50 bg-slate-800/30');
+  let html = '<div class="p-3 rounded-lg border ' + border + '">';
+  html += '<div class="flex items-center gap-2 mb-2 flex-wrap">';
+  html += '<span class="badge ' + (om ? om.cls : (d.dry_run ? 'text-slate-400' : (success ? 'ok' : 'err'))) + '">' + statusText + '</span>';
+  if (d.risk_level) html += _actionRiskBadge(d.risk_level);
+  if (d.auto_executed) html += '<span class="badge ok">自动回写</span>';
+  if (d.escalated) html += '<span class="badge warn">已升级人工</span>';
   if (d.idempotency_key) html += '<span class="text-xs text-slate-500">幂等键: ' + esc(d.idempotency_key) + '</span>';
   html += '</div>';
+  // V2-13：映射门禁预览/失败原因
+  if (d.gate && Array.isArray(d.gate.failures)) {
+    html += '<div class="text-xs mb-2 ' + (d.gate.passed ? 'text-slate-500' : 'text-red-400') + '">映射门禁：' +
+      (d.gate.passed ? '通过' : '未通过 → ' + d.gate.failures.map(esc).join('；')) + '</div>';
+  }
+  if (d.gate_failures && d.gate_failures.length) {
+    html += '<div class="text-xs mb-2 text-red-400">门禁失败原因（未回写，已留痕）：' + d.gate_failures.map(esc).join('；') + '</div>';
+  }
+  // V2-13：AI 三条件评估报告（中危）
+  if (d.evaluation) {
+    const ev = d.evaluation;
+    const condLabels = { no_unexpected_external_impact: '无预期外外部影响', atomicity: '原子性', completeness: '完整性' };
+    const condHtml = Object.entries(condLabels).map(([k, lab]) => {
+      const v = ev.conditions ? ev.conditions[k] : null;
+      const t = v === true ? '<span class="ok">通过</span>' : (v === false ? '<span class="text-red-400">不通过</span>' : '<span class="text-slate-500">无法判定</span>');
+      return '<div>' + esc(lab) + '：' + t + '</div>';
+    }).join('');
+    const verdict = { pass: '<span class="ok">通过 → 自动执行</span>', fail: '<span class="text-red-400">不通过 → 升级人工</span>', undecidable: '<span class="warn">无法判定 → 升级人工（失败≠通过）</span>' }[ev.verdict] || esc(ev.verdict);
+    html += '<div class="text-xs mb-2 p-2 rounded border border-slate-700/50 bg-slate-800/40">' +
+      '<div class="mb-1 text-slate-300">AI 三条件评估报告（' + esc(ev.source || '') + (ev.model ? ' / ' + esc(ev.model) : '') + '）：结论 ' + verdict + '</div>' +
+      condHtml +
+      (ev.rationale ? '<div class="text-slate-500 mt-1">依据：' + esc(ev.rationale) + '</div>' : '') +
+      (ev.error ? '<div class="text-amber-400 mt-1">' + esc(ev.error) + '</div>' : '') +
+      '</div>';
+  }
+  // V2-13：签核标识（身份+时间戳）
+  if (d.signer) {
+    html += '<div class="text-xs text-slate-400 mb-2">签核标识：' + esc(d.signer.username || '?') +
+      (d.signer.role ? '（' + esc(d.signer.role) + '）' : '') + ' @ ' + esc(d.signer.signed_at || '') + '</div>';
+  }
+  if (d.cancel_reason) {
+    html += '<div class="text-xs text-amber-400 mb-2">取消原因：' +
+      (d.cancel_reason === 'confirmation_timeout' ? '确认超时（TTL 内未完成确认）' : (d.cancel_reason === 'rejected' ? '人工拒绝' : esc(d.cancel_reason))) +
+      (d.reject_reason ? '：' + esc(d.reject_reason) : '') + '</div>';
+  }
+  if (d.identity && d.identity !== 'not_applicable' && d.identity !== 'none') {
+    html += '<div class="text-xs text-slate-500 mb-2">回写身份：' + (d.identity === 'mapped' ? '身份联邦映射身份（M2-B）' : esc(d.identity)) + '</div>';
+  }
+  if (d.circuit_open) {
+    html += '<div class="text-xs text-amber-400 mb-2">熔断开启，约 ' + esc(d.retry_after ?? '?') + 's 后自动重试（期间快速失败，已产生熔断告警）</div>';
+  }
   if (d.planned_payload) {
     html += '<div class="text-xs text-slate-400 mb-1">计划发送给外部系统的数据</div>';
     html += '<pre class="text-xs mb-3">' + esc(JSON.stringify(d.planned_payload, null, 2)) + '</pre>';

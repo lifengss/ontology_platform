@@ -116,6 +116,17 @@ class Settings:
         self.cdc_circuit_cooldown_seconds: int = _env_int("ONTOLOGY_CDC_CIRCUIT_COOLDOWN_SECONDS", 30)
         self.cdc_fallback_pull_seconds: int = _env_int("ONTOLOGY_CDC_FALLBACK_PULL_SECONDS", 300)
 
+        # M3-E（V2-13）回写风险分级：
+        # - writeback_enabled：真实回写开关（false=展示模式，confirm 后不真实外部调用，
+        #   保留 MVP 默认行为；true 时按风险分级真实执行低/中/高危回写）
+        # - writeback_confirm_ttl_seconds：确认 token 有效期（秒），超时未确认 → 回写取消
+        #   并记录取消原因与操作者（EP-13-03；<=0 表示不过期）
+        # - writeback_ai_timeout_seconds：中危 AI 三条件评估超时（秒），
+        #   超时/评估失败/无法判定 → 升级人工确认（失败≠通过，EP-13-02）
+        self.writeback_enabled: bool = _env_bool("ONTOLOGY_WRITEBACK_ENABLED", False)
+        self.writeback_confirm_ttl_seconds: int = _env_int("ONTOLOGY_WRITEBACK_CONFIRM_TTL_SECONDS", 600)
+        self.writeback_ai_timeout_seconds: int = _env_int("ONTOLOGY_WRITEBACK_AI_TIMEOUT_SECONDS", 30)
+
     def ensure_dirs(self) -> None:
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)

@@ -45,9 +45,11 @@ def _require_admin(request: Request) -> None:
 
 def _filters(actor: Optional[str], action: Optional[str], project_id: Optional[str],
              target: Optional[str], target_id: Optional[str], start: Optional[str],
-             end: Optional[str]) -> dict:
+             end: Optional[str], risk_level: Optional[str] = None,
+             trigger_source: Optional[str] = None, signer: Optional[str] = None) -> dict:
     return dict(actor=actor, action=action, project_id=project_id, target=target,
-                target_id=target_id, start=start, end=end)
+                target_id=target_id, start=start, end=end, risk_level=risk_level,
+                trigger_source=trigger_source, signer=signer)
 
 
 @router.get("")
@@ -60,11 +62,18 @@ def list_audit(request: Request,
                start: Optional[str] = Query(default=None, description="起始时间 ISO"),
                end: Optional[str] = Query(default=None, description="结束时间 ISO"),
                page: int = Query(default=1, ge=1),
-               page_size: int = Query(default=50, ge=1, le=500)):
-    """审计检索页（操作者＋时间＋对象组合；倒序；前值/后值随记录返回）。"""
+               page_size: int = Query(default=50, ge=1, le=500),
+               risk_level: Optional[str] = Query(default=None,
+                                                 description="V2-13 回写风险等级 low/medium/high"),
+               trigger_source: Optional[str] = Query(default=None,
+                                                     description="V2-13 触发来源 api/mcp/replay"),
+               signer: Optional[str] = Query(default=None,
+                                             description="V2-13 签核人 username")):
+    """审计检索页（操作者＋时间＋对象＋V2-13 回写等级/触发来源/签核人；倒序；前值/后值随记录返回）。"""
     _require_admin(request)
     res = audit_svc.query(page=page, page_size=page_size, **_filters(
-        actor, action, project_id, target, target_id, start, end))
+        actor, action, project_id, target, target_id, start, end,
+        risk_level, trigger_source, signer))
     return success(res)
 
 
@@ -77,10 +86,14 @@ def export_audit(request: Request,
                  target: Optional[str] = Query(default=None),
                  target_id: Optional[str] = Query(default=None),
                  start: Optional[str] = Query(default=None),
-                 end: Optional[str] = Query(default=None)):
+                 end: Optional[str] = Query(default=None),
+                 risk_level: Optional[str] = Query(default=None),
+                 trigger_source: Optional[str] = Query(default=None),
+                 signer: Optional[str] = Query(default=None)):
     """导出 CSV / JSONL（与检索页同条件、同内容，TC-09-03）。"""
     _require_admin(request)
-    rows = audit_svc.export_rows(**_filters(actor, action, project_id, target, target_id, start, end))
+    rows = audit_svc.export_rows(**_filters(actor, action, project_id, target, target_id,
+                                            start, end, risk_level, trigger_source, signer))
 
     if format == "jsonl":
         def gen_jsonl():

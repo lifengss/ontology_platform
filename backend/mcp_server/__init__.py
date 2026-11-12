@@ -88,8 +88,10 @@ TOOLS_CONTRACT = {
     },
     "action_invoke": {
         "reads": ["Action定义", "目标外部系统"], "writes": ["外部系统", "本地执行日志"],
-        "preconditions": ["Action 已定义", "本次执行已人工确认"],
-        "postconditions": ["幂等键已写入", "执行结果已留痕"], "side_effect": True,
+        "preconditions": ["Action 已定义",
+                          "V2-13 风险分级：low 映射门禁通过自动回写 / medium AI 三条件评估通过自动回写（否则升级人工确认）/ high 需 confirmation_token 人工确认"],
+        "postconditions": ["幂等键已写入（已生效回写防重）", "执行结果+评估报告/签核标识已留痕（可重放失败场景）"],
+        "side_effect": True,
     },
     "term_lookup": {
         "reads": ["数据字典", "外部系统（经已配置 MCP 连接并行只读查询）"], "writes": [],
@@ -850,12 +852,39 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
         return json.dumps(health_info(project_id, connection_id), ensure_ascii=False)
 
     @m.tool()
-    def action_invoke(action_id: str, confirmation_token: str = "") -> str:
-        """确认执行 Action（需先通过 /api/actions/{id}/execute 获取 confirmation_token）。"""
+    def action_invoke(action_id: str, confirmation_token: str = "",
+                      input: str = "", dry_run: bool = False) -> str:
+        """触发/确认执行 Action（V2-13 回写风险分级，trigger_source=mcp）。
+
+        - 传 input（JSON 字符串）触发执行：按 risk_level 分流——
+          low 映射门禁通过即自动回写；medium AI 三条件评估通过自动回写、
+          否则返回 confirmation_token 升级人工确认；high 返回 confirmation_token 待确认。
+        - 传 confirmation_token 确认回写（签核标识=当前调用者身份+时间戳）。
+        - dry_run=true 仅预览 planned_payload 与映射门禁结果，不回写。
+        未启用真实回写（ONTOLOGY_WRITEBACK_ENABLED=false）时返回展示模式结果。
+        """
         rec = actions.get(action_id)
         if not rec:
             raise _err(ERR_NOT_FOUND, f"Action {action_id} 不存在")
-        result = owner._action_engine.confirm(confirmation_token, {"action": rec})
+        # MCP 层无用户会话：调用者身份记为 mcp（与平台其它 MCP 操作 actor 口径一致），
+        # 签核标识 = mcp + 时间戳（V2-13）
+        mcp_actor = {"username": "mcp", "role": "mcp"}
+        if confirmation_token:
+            result = owner._action_engine.confirm(confirmation_token,
+                                                  {"action": rec, "project_id": project_id},
+                                                  actor=mcp_actor, trigger_source="mcp")
+        else:
+            parsed_input: dict = {}
+            if input.strip():
+                try:
+                    parsed_input = json.loads(input)
+                    if not isinstance(parsed_input, dict):
+                        raise ValueError("input 必须是 JSON 对象")
+                except Exception as e:
+                    raise _err(ERR_INVALID_ARGUMENT, f"input 不是合法 JSON 对象：{e}")
+            result = owner._action_engine.execute(rec, {"input": parsed_input, "dry_run": dry_run},
+                                                  project_id=project_id,
+                                                  actor=mcp_actor, trigger_source="mcp")
         return json.dumps(result, ensure_ascii=False)
 
     @m.tool()

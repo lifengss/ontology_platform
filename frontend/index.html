@@ -939,7 +939,7 @@
             </div>
           </div>
           <div class="mb-3">
-            <span class="badge draft" title="当前业务动作模块仅展示与 Dry Run 预览；回写业务系统（webhook/MCP 外呼）为未开发能力，后端已拦截。">仅展示 · 回写未开发</span>
+            <span class="badge" title="V2-13 回写风险分级：低风险映射门禁通过自动回写 / 中风险 AI 三条件评估（无预期外外部影响+原子性+完整性） / 高风险人工确认（签核标识=身份+时间戳）；风险等级调整仅平台管理员，全程审计。">回写风险分级（V2-13）</span>
           </div>
           <div class="mb-3">
             <select id="actionCategoryFilter" class="w-full text-xs" onchange="renderActionList()">
@@ -1005,6 +1005,14 @@
               </select>
             </div>
           </div>
+          <div class="mb-3">
+            <label>回写风险等级（V2-13，创建后仅管理员可调整）</label>
+            <select id="actionRiskLevel" class="w-full" title="low：映射门禁通过即自动回写；medium：AI 三条件评估通过自动执行、失败/超时/无法判定升级人工确认（失败≠通过）；high：必须人工确认。">
+              <option value="high" selected>高风险（人工确认）</option>
+              <option value="medium">中风险（AI 三条件评估）</option>
+              <option value="low">低风险（门禁通过自动回写）</option>
+            </select>
+          </div>
           <div class="flex items-center gap-2 mb-2"><input id="actionDryRun" type="checkbox" checked /> <label class="m-0 inline">支持 dry-run</label></div>
           <p class="text-xs text-slate-400">Action 默认 <code>side_effect=true</code>，会触发外部系统写操作；执行前建议先用 Dry Run 预览。</p>
         </div>
@@ -1015,10 +1023,10 @@
             <h3 class="font-medium">输入参数</h3>
             <div class="flex gap-2">
               <button class="btn secondary" onclick="runActionDry()">Dry Run 预览</button>
-              <button class="btn" id="actionExecuteBtn" onclick="runActionExecute()" disabled title="回写业务系统为未开发能力（仅展示模式）">触发执行（未开放）</button>
+              <button class="btn" id="actionExecuteBtn" onclick="runActionExecute()" title="按风险分级触发：低危门禁通过自动回写 / 中危 AI 评估 / 高危生成确认令牌">触发执行</button>
             </div>
           </div>
-          <div class="mb-3 p-2 rounded-lg bg-slate-800/40 text-xs text-slate-500">当前业务动作页为「仅展示」模式：可定义动作与 Dry Run 预览执行计划；「触发执行 / 确认回写」待回写能力开发后开放（后端已拦截外呼）。</div>
+          <div class="mb-3 p-2 rounded-lg bg-slate-800/40 text-xs text-slate-500">V2-13 回写风险分级：低风险映射门禁通过即自动回写；中风险 AI 三条件评估（无预期外外部影响+原子性+完整性）通过自动执行、失败/超时/无法判定升级人工确认（失败≠通过）；高风险必须人工确认（签核标识=身份+时间戳）。幂等防重、指数退避、熔断告警全程生效；失败场景可重放。</div>
           <div id="actionForm" class="mb-3 space-y-4"></div>
           <div id="actionPendingBox" class="hidden mb-3 p-3 rounded-lg border border-amber-600/40 bg-amber-900/20">
             <div class="flex items-center justify-between mb-2">
@@ -1026,7 +1034,10 @@
               <span class="text-xs text-slate-400" id="actionToken"></span>
             </div>
             <pre id="actionPlanned" class="mb-2"></pre>
-            <button class="btn success" id="actionConfirmBtn" onclick="runActionConfirm()" disabled title="回写业务系统为未开发能力（仅展示模式）">确认并回写（未开放）</button>
+            <div class="flex gap-2">
+              <button class="btn success" id="actionConfirmBtn" onclick="runActionConfirm()" title="人工确认（签核标识=身份+时间戳）；确认超时将自动取消并留痕">确认并回写</button>
+              <button class="btn secondary" id="actionRejectBtn" onclick="runActionReject()" title="拒绝本次回写（EP-13-03：取消原因与操作者留痕）">拒绝</button>
+            </div>
           </div>
           <div id="actionResultBox" class="hidden">
             <label>执行结果</label>

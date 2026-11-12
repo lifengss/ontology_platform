@@ -927,4 +927,32 @@
 - 本 checkpoint ＋ 用户级 wiki（raw 快照 `2026-11-12-M3-D-流式CDC.md`/进展与测试/实体页/log/对话历史）同步。
 
 ### 39.4 状态
-- M3-D **已交付并 commit**（见 git log，M3-G 退出统一 push）。M3 剩余：E 回写风险（V2-13）→F Action编排（V2-14 主体）→G 退出＋push；随后 M4 全片＋终验＋push。
+- M3-D **已交付并 commit** `e08d61c`（21 文件；M3-G 退出统一 push）。工作区仅余成本核算业务线未提交项（docs/数据缺口*.md M、cost_baseline_kit/、docs/备份/、docs/成本核算*.md，与平台代码无关、有意保留）。M3 剩余：E 回写风险（V2-13）→F Action编排（V2-14 主体）→G 退出＋push；随后 M4 全片＋终验＋push。
+
+## 40. M3-E 交付——V2-13 回写风险分级（2026-11-12）
+
+### 40.1 指令与交付
+- 用户指令：「按之前的方案处理，进度写入wiki，按需披露加载。继续为完成的任务」（同一全权授权延续：按里程碑顺序、不询问、进度存 wiki、M3-G 统一 push）。
+- **后端**：
+  - `backend/schemas/action.py`：`ActionDefinition`/`ActionCreate` 增 `risk_level`（low/medium/high，**默认 high 最保守**）＋`field_validator` 校验；新增 `ActionRejectRequest`（confirmation_token+reason，EP-13-03 拒绝留痕）与 `ActionRiskLevelUpdate`（risk_level+reason，防降级绕过）。
+  - `backend/action_engine/__init__.py`（核心，+638 行）：三档执行流——**low**：dry-run/映射校验门禁（mapping_gate）通过→自动回写无人工，门禁失败→不回写、失败原因落日志（EP-13-01）；**medium**：`ai_three_condition_evaluate` 三条件键 `no_unexpected_external_impact`/`atomicity`/`completeness`，全过→自动执行，评估失败/超时（`writeback_ai_timeout_seconds`）/输出非法/无法判定→**升级人工确认（失败≠通过，EP-13-02）**，评估报告（嵌套 `conditions`）随回写日志与审计留存；**high**：必须人工确认，确认记录**签核标识＝身份＋时间戳**；确认超时（`writeback_confirm_ttl_seconds` TTL）→取消并记录取消原因与操作者（EP-13-03），`reject(token, reason)` 同理。幂等＝**仅「已生效」回写挡重**（`_already_executed` 查 outcome=success 日志），失败/取消/门禁失败不挡重试（保留可重放，EP-13-04）；失败指数退避＋**按目标连接熔断**（`CircuitBreaker`，OPEN 瞬间 `action_circuit_open` 审计告警），三档同等生效；**统一审计** `_record_writeback_audit(project_id, action, trigger_source, actor, after, detail)` 记 `action_writeback`（API/MCP 入口一致、路由不重复记，detail 固定含 risk_level/trigger_source(api|mcp|reject|replay)/signer，落库失败仅 warning 不阻断主流程）——确认/拒绝/超时/幂等命中/重放均由引擎记录；`_do_writeback` 返回补 `result["evaluation"]`（自动路径响应可见评估报告）；`replay(action, log_id, ...)` 以原 payload/幂等键重放（已生效→409 REPLAY_NOT_ALLOWED，detail.replay_of 指向原日志）；展示模式（`ONTOLOGY_WRITEBACK_ENABLED=false`，MVP 默认）行为保留。
+  - `backend/api/router_actions.py`：常规 `PUT /{id}` 携带 risk_level 一律 **403 RISK_LEVEL_LOCKED**（防降级绕过，TP-13-04）；新增 `PUT /{id}/risk-level`（**仅平台管理员**，审计记旧值→新值入 risk_level_history）；新增 `POST /{id}/reject` 与 `POST /{id}/logs/{log_id}/replay`；confirm/reject/replay 三路由**删除路由级审计**（改由引擎统一记录）。
+  - `backend/audit.py`＋`backend/api/router_audit.py`：审计检索新增 `risk_level`/`trigger_source`/`signer` 过滤（存于 detail 结构字段，`_match`/`query`/`export_rows` 与 GET/导出端点全透传）。
+  - `backend/config.py`：3 个 `ONTOLOGY_WRITEBACK_*` 环境变量——`ENABLED`（默认 false＝展示模式）/`CONFIRM_TTL_SECONDS`（600，<=0 不过期）/`AI_TIMEOUT_SECONDS`（30）。
+  - `backend/mcp_server/__init__.py`：`action_invoke` 工具签名补齐 `input`/`dry_run`/`confirmation_token`；MCP 无会话→`mcp_actor={"username":"mcp","role":"mcp"}` 传入 confirm/execute（trigger_source="mcp"，审计与 REST 同源）。
+- **前端**（`frontend/app.js`＋`index.html`）：Action 列表/详情风险徽章 `_actionRiskBadge`（_RISK_META low 绿/medium 黄/high 红）；Action 表单新增 risk_level 下拉（创建/编辑）；**仅管理员**「调整风险等级」按钮（`adjustActionRisk`→PUT risk-level 带 reason）；结果区徽章「自动回写」「已升级人工」＋取消原因展示（confirmation_timeout 确认超时/rejected 人工拒绝）；执行面板「拒绝」按钮（`runActionReject`）与失败日志「重放」按钮（`replayActionLog` 二次确认）。
+- **设计口径**：①风险等级调整**仅管理员**专用端点（防降级绕过），常规 update 拦截 403；②中危 AI 评估**失败≠通过**（失败/超时/非法/无法判定一律升级人工）；③审计**单点记录**在引擎（API/MCP 入口一致），路由不重复记；④幂等只挡「已生效」，失败场景可重放；⑤展示模式（writeback 开关 false）保留 MVP 默认行为，验收/生产由 `ONTOLOGY_WRITEBACK_ENABLED=true` 启用真实外呼。
+
+### 40.2 验收
+- `scripts/verify_m3e_writeback_risk.py`（新）**PASS=149/FAIL=0**（临时 DATA_DIR `_m3e_verify`＋**四**进程内 `ControllableMockSystem`（ok 正常/resil 失败后恢复/cb 持续失败触发熔断/replay 失败后可重放）＋**LLM 三条件桩**（`_fake_call_llm` monkeypatch，pass/fail/null/error 四种输出）＋admin/modeler 双角色（登录须 `?mode=bearer` 才返回 token）＋**TTL 白盒回拨**（`action_engine._pending_tokens[tok]["created_ts"] -= 1000`）＋`action_engine._sleep_fn = lambda s: None` 免退避等待；sys.path 需同时插 `backend/` 与 `scripts/`）：S1 low（门禁过→自动回写外部调用+1、审计 trigger_source=api；门禁失败→零外呼、失败原因落日志 EP-13-01）/S2 medium（三条件全过→自动执行、响应 evaluation.conditions 可见）/S3 high（确认前零外呼 awaiting_confirmation、确认→外呼＋签核标识身份+时间戳入审计）/S4 risk-level 仅管理员（admin PUT 成功 history 记 by=用户名；常规 PUT 带 risk_level→403 RISK_LEVEL_LOCKED TP-13-04；modeler 调 risk-level→403）/S5 三档护栏（幂等仅挡已生效：成功重提挡重、失败/取消可重做；resil 退避重试成功；cb 连续失败→OPEN＋action_circuit_open 审计＋后续早退）/S6 审计统一（confirm/reject/replay 均引擎 `action_writeback` 且无路由重复、detail 含 risk_level/trigger_source/signer、MCP 直调 tool_fn trigger_source=mcp 与 REST 一致、risk_level/trigger_source/signer 过滤 GET＋export 生效）/S7 门禁失败（EP-13-01）/S8 AI 失败升级（fail/null/error/超时四桩全部升级人工、零自动外呼，EP-13-02）/S9 high 拒绝＋TTL 超时（取消原因与操作者留痕，EP-13-03）/S10 重放（已生效→409 REPLAY_NOT_ALLOWED；失败场景 replay 成功、detail.replay_of 指向原日志，EP-13-04）。
+- L5 回归 `python -m pytest tests/ -q` **93/93** 全绿无回归。
+- **关键坑**：①AI 三条件键名为 `no_unexpected_external_impact`/`atomicity`/`completeness`（**非** `unexpected_side_effects`）；评估报告嵌套 `conditions`（断言读 `ev["conditions"]` 而非顶层）。②登录须 `/api/auth/login?mode=bearer` 才在 body 返回 token（默认走 httpOnly Cookie，body 无 token）。③`ActionDefinition`/`ActionCreate` 必填 `target_connection`/`invoke`/`idempotency_key` 等——常规 PUT 只发 `{"risk_level"}` 会 422，须补全完整 payload。④门禁失败信息含字段名 `missing`（非 `absent` 路径写法）。⑤`risk_level_history` 的 `by` 是**字符串** username（非 dict）。
+
+### 40.3 文档/wiki
+- `docs/API-INTERFACE-DOC.md`：§6.1 Action 模型增 `risk_level`/`risk_level_history` 字段；§6.2 端点表（risk-level/reject/replay 新增＋execute/confirm 响应细化）；§11.2 `action_invoke` 行（input/dry_run/confirmation_token 参数）；文末新增 **§29**（29.1 分级矩阵～29.7 验收 149/149）。
+- `docs/V2-开发里程碑.md`：M3-E 标题改「✅（2026-11-12 完成：验收 149/149，L5 回归 93/93）」＋完整交付结果段；M3 行与状态行更新（M3-C/D/E ✅）。
+- 项目 wiki：`source-V2-测试用例.md`「测试脚本链接登记」新增 M3-E 行（TC-13-01~06/TCE-13-01~04 全分支，PASS=149/FAIL=0＋L5 93/93＋关键坑）；`V2开发里程碑.md` M3 总览行＋M3-A~E 切片行补✅与脚本引用；`Action受控回写.md` frontmatter updated 2026-11-12＋新增「V2-13 回写风险分级（M3-E）」章节。
+- 本 checkpoint ＋ 用户级 wiki（raw 快照 `2026-11-12-M3-E-回写风险分级.md`/进展与测试/实体页/log/对话历史 #39）同步。
+
+### 40.4 状态
+- M3-E **已交付，待 commit**（16 文件 +1182/-181；M3-G 退出统一 push）。工作区仅余成本核算业务线未提交项（docs/数据缺口*.md M、cost_baseline_kit/、docs/备份/、docs/成本核算*.md，与平台代码无关、有意保留，不提交）。M3 剩余：F Action编排（V2-14 主体）→G 退出＋push；随后 M4 全片＋终验＋push。

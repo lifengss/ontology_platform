@@ -149,7 +149,9 @@ def _ts_key(value: str) -> tuple:
 def _match(r: dict[str, Any], actor: Optional[str], action: Optional[str],
            project_id: Optional[str], tenant_id: Optional[str],
            target_type: Optional[str], target_id: Optional[str],
-           target: Optional[str], start: Optional[str], end: Optional[str]) -> bool:
+           target: Optional[str], start: Optional[str], end: Optional[str],
+           risk_level: Optional[str] = None, trigger_source: Optional[str] = None,
+           signer: Optional[str] = None) -> bool:
     if actor and r.get("actor") != actor:
         return False
     if action and r.get("action") != action:
@@ -166,6 +168,14 @@ def _match(r: dict[str, Any], actor: Optional[str], action: Optional[str],
         hay = f"{r.get('target_id', '')} {r.get('target_name', '')}".lower()
         if target.lower() not in hay:
             return False
+    # V2-13（M3-E）：按回写风险等级/触发来源/签核人检索（存于 detail 结构字段）
+    detail = r.get("detail") or {}
+    if risk_level and detail.get("risk_level") != risk_level:
+        return False
+    if trigger_source and detail.get("trigger_source") != trigger_source:
+        return False
+    if signer and detail.get("signer") != signer:
+        return False
     # 时间过滤：按绝对时间比较（ISO 带时区，跨时区安全）；任一侧不可解析时回退字符串比较
     ts = r.get("ts", "")
     ts_dt = _parse_ts(ts)
@@ -190,10 +200,13 @@ def query(actor: Optional[str] = None, action: Optional[str] = None,
           project_id: Optional[str] = None, tenant_id: Optional[str] = None,
           target_type: Optional[str] = None, target_id: Optional[str] = None,
           target: Optional[str] = None, start: Optional[str] = None,
-          end: Optional[str] = None, page: int = 1, page_size: int = 50) -> dict[str, Any]:
-    """组合检索（操作者＋时间范围＋对象），默认倒序（最新在前）。"""
+          end: Optional[str] = None, page: int = 1, page_size: int = 50,
+          risk_level: Optional[str] = None, trigger_source: Optional[str] = None,
+          signer: Optional[str] = None) -> dict[str, Any]:
+    """组合检索（操作者＋时间范围＋对象＋V2-13 回写等级/触发来源/签核人），默认倒序（最新在前）。"""
     items = [r for r in _iter_all() if _match(
-        r, actor, action, project_id, tenant_id, target_type, target_id, target, start, end)]
+        r, actor, action, project_id, tenant_id, target_type, target_id, target, start, end,
+        risk_level=risk_level, trigger_source=trigger_source, signer=signer)]
     items.sort(key=lambda r: (_ts_key(r.get("ts", "")), r.get("id", "")), reverse=True)
     total = len(items)
     page = max(1, page)
@@ -206,9 +219,12 @@ def export_rows(actor: Optional[str] = None, action: Optional[str] = None,
                 project_id: Optional[str] = None, tenant_id: Optional[str] = None,
                 target_type: Optional[str] = None, target_id: Optional[str] = None,
                 target: Optional[str] = None, start: Optional[str] = None,
-                end: Optional[str] = None) -> list[dict[str, Any]]:
+                end: Optional[str] = None, risk_level: Optional[str] = None,
+                trigger_source: Optional[str] = None,
+                signer: Optional[str] = None) -> list[dict[str, Any]]:
     """导出（与检索同条件，全量倒序；CSV/JSONL 由调用方序列化）。"""
     items = [r for r in _iter_all() if _match(
-        r, actor, action, project_id, tenant_id, target_type, target_id, target, start, end)]
+        r, actor, action, project_id, tenant_id, target_type, target_id, target, start, end,
+        risk_level=risk_level, trigger_source=trigger_source, signer=signer)]
     items.sort(key=lambda r: (_ts_key(r.get("ts", "")), r.get("id", "")), reverse=True)
     return items
