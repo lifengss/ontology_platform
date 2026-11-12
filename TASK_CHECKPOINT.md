@@ -1004,3 +1004,91 @@ M3-F 后端已在前一阶段交付（commit e3aa175，verify_m3f_orchestration.
 - 工作区仅余成本核算业务线未提交项（docs/数据缺口*.md M、cost_baseline_kit/、docs/备份/、docs/成本核算*.md，与平台代码无关、有意保留）。
 - 临时文件已清理（scripts/_check_edits.py、scripts/_orch_chunk2.js、误存 --full-page）；backend/_boot.log、_boot_err.log 被后端进程占用，进程停止后清理。
 - 下一步：M3-G 里程碑退出（TCE2E-03/07 端到端联验＋退出报告＋统一 push）→M4 全片＋终验＋push。
+
+## 42. M3-G 里程碑退出——TCE2E-03/07＋TCEE-04 端到端联验＋统一 push（2026-11-12）
+
+### 42.1 背景
+M3 里程碑退出（docs/V2-测试用例.md 判据）：TCE2E-03 备件更换完整回写链路（风险分级＋签核证据链）、TCE2E-07 编排→干跑（零外呼）→发布→事件触发→状态/审计/血缘页、TCEE-04 中断→重新登录（新 token）→续接（无半写、无悬挂）。退出动作：验收全绿＋退出报告＋**统一 push**（M3 各片 commit 此前不 push）。
+
+### 42.2 验收（scripts/verify_m3g_exit.py，进程内白盒）
+**PASS=34/FAIL=0**（临时 DATA_DIR＋bootstrap 登录＋4 进程内 mock（wh/pur/crm 闭包工厂 ThreadingHTTPServer 随机端口）＋LLM 强制不可用 127.0.0.1:9）：
+- **Phase A TCE2E-03（19 断言）**：组合链 start→a_query(low)→br(stock==0)→a_po(high)→c_sign→a_stock(low)→a_crm(medium)→end。低危自动零人工；branch 缺货分支；高危 confirmation_token（越序确认 409）；签核后 /po 外呼；中危 undecidable→escalated 人工；全链 succeeded；action_writeback×4（高危 signer+signer_at/低危 auto=true 无 signer）；confirmed×3；started/finished（target_id=run_id）。
+- **Phase B TCE2E-07（8 断言）**：event 触发 wf（topic=stock.low/required_ctx=[pn]）→干跑高危 awaiting_confirmation **零外呼**→发布→POST /events 自动启动 trigger.source=event→缺 ctx 负断言 TRIGGER_CTX_MISSING→确认后 succeeded→审计 workflow_event_dispatched。
+- **Phase C TCEE-04（7 断言）**：中断于确认点→**新 token 续接**（node_states.awaiting_confirmation，无半写：确认前 /po 零外呼）→确认后 succeeded（/po +1 不重复）→终态再确认 409→reject→cancelled 零外呼＋审计 actor+reason；无悬挂。
+- 脚本自身 bug 修复：`req()` 在 params=None 时不注入 project_id→请求落 default 项目→Action 422；改 `p=dict(params or {}); p.setdefault("project_id", pid)`。
+
+### 42.3 浏览器全链路（agent-browser，真实 UI）
+真实后端 8000＋常驻 mock 9712（/calls 留痕）＋静态服务 8124（新 origin 绕 JS 缓存）：登录→编排页点节点库加 3 action 节点（属性面板 action_id＋pn=trigger.pn）＋事件触发器（stock.low/required_ctx=pn）＋端口连线 start→a1→a2→a3→end＋保存→**干跑**（preview_ok×2/awaiting_confirmation/mock 零外呼）→**发布**→API 派事件（pn=PN-9001）自动启动中断于签核卡（/query 已调 1 次）→**UI 签核确认**→succeeded（mock 三次真实外呼按序 n=3）→**审计页证据链**（action_writeback signer=admin/signer_at/auto=false；run_started after.source=event）→**血缘页**（V2-08 实例详情 #lineagePanel：来源系统 field_map/源标识 instance_import_batch2.xlsx/时间戳）→**TCEE-04 浏览器侧**：再派事件（PN-9002）→中断（n=4，/po 未调无半写）→location.reload(true) 模拟重新登录→会话保持状态续接→UI 签核→succeeded（n=6 恰每执行 3 次无重复）→pendingRuns=0 无悬挂。截图 docs/备份/m3g-02~08（7 张）。
+
+### 42.4 退出期发现并修复的 EP 级前端 bug
+`frontend/app.js` `orchRenderCanvas` 输出端口 `onclick="orchPortClick(event,'${n.id}',${JSON.stringify(p)})"`：`JSON.stringify('default')` 产生未转义双引号→HTML 属性截断→内联 handler 编译失败未安装（el.onclick===null 但 attribute 存在）→**真实浏览器点输出端口连线完全无效**（TCE2E-07 ①被阻断时暴露）。修复 `.replace(/"/g,'&quot;')`（同文件其余 5 处惯例）。排查路径：probe 包 orchPortClick 零调用→显式 addEventListener 也不触发内联 handler→对比 attribute 与 onclick property 发现截断→构造 `onclick="f(1,\"x")"` 复现确认根因。
+
+### 42.5 回归与提交
+- L5 `cd backend; python -m pytest tests/ -q` **93/93** 终态复核；M3-G 验收 34/34 终态复核。
+- commit **`1c5db27`**（4 files +505/-3：frontend/app.js 端口 fix＋scripts/verify_m3g_exit.py＋docs/V2-开发里程碑.md＋proj_wiki source-V2-测试用例.md）；**统一 push `ec182df..1c5db27 main→main`**（M3 全部 4 提交 e3aa175/1b486d8/f6e6630/1c5db27 已上 origin/main）。git push stderr 在 PowerShell 下误报 RemoteException，非真失败。
+- 排除业务线文件（docs/数据缺口*.md 157 行改动非本次，有意保留不提交）。
+
+### 42.6 清理
+- 测试项目 a39bcbc3 DELETE（含其 actions/workflows/runs/审计）；临时进程停止（mock 9712/静态 8123·8124/headless Chrome CDP 9222），仅留开发后端 8000；临时脚本删除（_dbg_seed.py/_m3g_browse_seed.py/_m3g_browse_ctx.json/_m3g_mock_server.py/_m3g_git_commit.py/_chrome_m3g/）。
+
+### 42.7 文档/wiki
+- docs/V2-开发里程碑.md：M3 行 M3-G ✅（M3 退出）＋M3-G 节完成细节。
+- proj_wiki source-V2-测试用例.md「测试脚本链接登记」：M3-G 行（TCE2E-03/07＋TCEE-04，34 断言，PASS=34/FAIL=0，2026-11-12）。
+- 用户级 wiki：raw 快照 2026-11-12-M3-G-里程碑退出.md（新）＋进展与测试 M3-G 节（sources 补 M3-F/M3-G）＋实体页（状态/sources/导航表）＋log＋对话历史 #41。
+
+### 42.8 状态
+- **M3 全量完成并退出（M3-A~G ✅，2026-11-12，统一 push 完成）**。
+- 工作区仅余成本核算业务线未提交项（docs/数据缺口*.md M、cost_baseline_kit/、docs/备份/、docs/成本核算*.md，与平台代码无关、有意保留）。
+- 下一步：**M4 全片＋终验＋push**（TP-04-06/EP-04-03 按 D2 随 M4-A；M4 范围见 docs/V2-开发里程碑.md）。
+
+## 43. 主题切换（浅色/深色）前端功能（2026-11-12）
+
+### 43.1 背景
+
+- 新需求（非 M3/M4 里程碑项）：用户「前端UI左上角位置增加一个太阳/月亮的按钮标识吧，用来切换主题为浅色或深色 @skill://UI设计Skill」，与 M3-G 收口并行交付。
+- 范围：仅 frontend/index.html ＋ frontend/app.js；零后端/零 API 改动。
+
+### 43.2 方案（三层）
+
+1. **CSS 变量集**：默认深色 = `:root`（既有 9 变量＋补 10 画布变量）；浅色 = `html[data-theme="light"]` 全套（7 基础＋10 画布）。
+2. **Tailwind 覆盖表约 90 条**：约 900 处硬编码暗色类→约 120 种唯一变体；slate 中性族全映射＋语义色 200~400→600~700 深调＋hover:＋透明度 /40~/60＋`.bg-[#0f1627]`；属性+类特异性高于 CDN 单类，免 !important（仅 #loginError 例外）。
+3. **画布变量化**：SVG presentation attribute 不支持 var()→一律 `.style('fill'/'stroke','var(--x)')`/style= 内联，切主题免重渲染。
+
+- 默认深色；localStorage `lattice_theme`＋head 预绘脚本防闪屏；按钮＝顶栏左上角（h1 后 30px）＋登录页左上角浮动（.theme-btn-float）；图标显示当前主题（浅→太阳/深→月亮）＋title/aria-label 同步。
+
+### 43.3 改动
+
+- **index.html 5 处**：① head 预绘脚本 ② style 大改约 +110 行（:root 补 10 画布暗变量＋light 全套变量＋组件覆盖 .op-login-*/.btn.secondary/input/.ls-*/.object-card/pre/.graph-tooltip/.toast/.badge/.tab hover＋Tailwind 覆盖表＋.theme-btn/.theme-btn-float）③ 顶栏 h1 后主题按钮（icon-sun/icon-moon 双 SVG）④ #loginOverlay 首子浮动按钮 ⑤ orchArrow marker path 改 `style="fill:var(--orch-edge)"`。
+- **app.js**：7 处画布色变量化（图谱 link/linkLabel/nodeLabel 前段完成；类树连线 #475569→`--graph-edge`、rect `missing?#1e293b:#0f172a`→`--tree-node-bg-missing/--tree-node-bg`、text `missing?#94a3b8:#e2e8f0`→`--tree-node-text-missing/--tree-node-text`、编排边 `sel?#38bdf8:#64748b`→`--orch-edge-sel/--orch-edge`、端口标签 #94a3b8→`--graph-edge-label`）＋新增全局 `currentTheme()/syncThemeButtons()/toggleTheme()`＋init() 调 `syncThemeButtons()`。
+- **修正**：:root 初版 `--tree-node-bg:#1e293b; --tree-node-bg-missing:#0f172a` 与代码语义写反→纠正为 `--tree-node-bg:#0f172a; --tree-node-bg-missing:#1e293b`（浅色 #fff/#f1f5f9 本就正确）。
+- **保留（双主题通用）**：图谱节点调色板 #4f8cff/#34d399/#f59e0b、类树琥珀 #fbbf24/sky #38bdf8 边框与展开圆点、ORCH_NODE_META 半透明 tint（/20）＋500 系边框、纯色状态标记（bg-red-500 等）。
+
+### 43.4 验证
+
+- read_lints（app.js＋index.html）：无诊断。
+- 静态服务 8199（127.0.0.1）＋agent-browser：默认深色 ✓（data-theme=null、bodyBg rgb(11,16,32)=#0b1020、月亮显/太阳隐）→点登录浮钮切浅色 ✓（data-theme=light、localStorage=light、bodyBg #f3f5f9、登录卡白底、太阳显、title="切换为深色主题"）→`location.reload(true)` 后仍浅色 ✓（head 预绘脚本生效）。
+- 截图：docs/备份/theme-login-dark.png、theme-login-light.png。
+- 后端 8000 在线；`POST /api/auth/login`（admin，bootstrap 凭据 backend/secrets/bootstrap_admin.txt）直连 200 cookie_session=true。
+
+### 43.5 待补
+
+- 主界面（登录态）顶栏按钮＋三画布（知识图谱/类树/编排）双主题渲染截图——本会话 agent-browser 因系统内存耗尽反复崩溃（见 43.6①），内存恢复后补验。
+
+### 43.6 坑位
+
+1. **agent-browser 启动失败泄漏僵尸集群**：每次失败泄漏约 10 个 chrome.exe，累计 162 个约 12GB→系统可用内存 0→"Chrome exited early (exit code: 0)" 静默失败。处置：先查内存（`Get-Counter '\Memory\Available MBytes'`）＋按命令行含 `.agent-browser\browsers` 精确清理 chrome.exe（勿动用户 Chrome）＋`npx agent-browser close`；**勿循环重试同一命令**。
+2. SVG presentation attribute（fill/stroke）不支持 var()→必须走 style。
+3. `app.js` 的 `state` 是 let 脚本级变量、不在 window 上→页面内 eval 断言用裸 `state`（曾据 window.state undefined 误判"登录失败"，实际已成功）。
+4. 前端 API_BASE：页面不在 localhost:8000 时恒指向 http://localhost:8000（CORS 放行 localhost/127.0.0.1 任意端口，credentials 可用）；后端不托管 /frontend/（404，main.py 无 StaticFiles 挂载）→跨域验证用本地静态服务＋cookie 登录态。
+5. Tailwind 覆盖表须连 hover: 变体、透明度（/40~/60）、任意值类（.bg-[#0f1627]）一起覆盖，否则浅色下局部残留深色。
+6. orchArrow marker path 是多行＋`></path>` 收尾（非自闭合）→replace 前先 search 取精确上下文。
+
+### 43.7 文档/git
+
+- wiki：raw 快照 `2026-11-12-主题切换浅色深色.md`＋进展与测试「主题切换」节＋对话历史 #42＋log 条目＋实体页（当前状态段尾/导航表一行/sources）。
+- git：本地 commit（frontend/index.html＋frontend/app.js＋本文件），不 push（push 随 M4 收口节奏）；截图留 docs/备份/ 工作树（与 m3f/m3g 截图同保留惯例）。
+
+### 43.8 状态
+
+- 主题功能 ✅ 代码完成＋登录页验证通过；⏳ 主界面画布截图验证待补（内存恢复后）。
+- 主线：**M4 全片＋终验＋push**（TP-04-06/EP-04-03 按 D2 随 M4-A）。

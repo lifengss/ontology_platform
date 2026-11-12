@@ -4,6 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>格物 Lattice（企业业务本体平台）· Beta V1.0</title>
+  <script>/* 主题（默认深色）：首帧前从 localStorage 读取，避免刷新闪屏；切换按钮在顶栏左上角与登录页左上角 */
+  (function(){try{if(localStorage.getItem('lattice_theme')==='light'){document.documentElement.setAttribute('data-theme','light');}}catch(e){}})();</script>
   <!-- 依赖库本地化（vendor/）：原 CDN（cdn.tailwindcss.com / d3js.org）在企业内网不可达，
        且 head 同步脚本会阻塞 DCL 导致整页加载挂起。本地化后离线可用、加载确定。
        d3 v7.9.0（jsdelivr 同版本）；tailwind Play CDN 3.4.17。 -->
@@ -16,7 +18,116 @@
     .op-login-card { width: 370px; background: #121a2e; border: 1px solid #2a365e; border-radius: 14px; padding: 28px; box-shadow: 0 24px 70px rgba(0,0,0,.5); }
     .op-login-input { width: 100%; background: #0f1627; border: 1px solid #2a365e; border-radius: 8px; padding: 9px 11px; color: #e6ecff; font-size: 13px; margin-top: 6px; }
     .op-login-label { font-size: 12px; color: #94a3b8; display: block; margin-top: 14px; }
-    :root { --bg:#0b1020; --panel:#121a2e; --card:#161f36; --border:#2a365e; --accent:#4f8cff; --ok:#34d399; --bad:#f87171; --text:#e6ecff; --muted:#94a3b8; }
+    :root { --bg:#0b1020; --panel:#121a2e; --card:#161f36; --border:#2a365e; --accent:#4f8cff; --ok:#34d399; --bad:#f87171; --text:#e6ecff; --muted:#94a3b8;
+      /* 画布/图谱（SVG 走 CSS 变量，切主题免重渲染） */
+      --graph-edge:#64748b; --graph-edge-label:#94a3b8; --graph-label-fill:#e2e8f0; --graph-label-stroke:#0f172a;
+      --tree-node-bg:#0f172a; --tree-node-bg-missing:#1e293b; --tree-node-text:#e2e8f0; --tree-node-text-missing:#94a3b8;
+      --orch-edge:#64748b; --orch-edge-sel:#38bdf8; }
+    /* ---------- 浅色主题（顶栏左上角太阳/月亮按钮切换，localStorage 持久化） ---------- */
+    html[data-theme="light"] { --bg:#f3f5f9; --panel:#ffffff; --card:#f8fafc; --border:#e2e8f0; --accent:#2563eb; --ok:#059669; --bad:#dc2626; --text:#1e293b; --muted:#64748b;
+      --graph-edge:#94a3b8; --graph-edge-label:#64748b; --graph-label-fill:#1e293b; --graph-label-stroke:#ffffff;
+      --tree-node-bg:#ffffff; --tree-node-bg-missing:#f1f5f9; --tree-node-text:#334155; --tree-node-text-missing:#64748b;
+      --orch-edge:#94a3b8; --orch-edge-sel:#0284c7; }
+    /* 组件级硬编码暗色 → 浅色覆盖 */
+    [data-theme="light"] .op-login-wrap { background: radial-gradient(circle at 30% 20%, #dbeafe 0%, #f3f5f9 60%); }
+    [data-theme="light"] .op-login-card { background:#fff; border-color:#dbe2ec; box-shadow:0 24px 70px rgba(15,23,42,.14); }
+    [data-theme="light"] .op-login-input { background:#f8fafc; border-color:#dbe2ec; color:#1e293b; }
+    [data-theme="light"] .op-login-label { color:#64748b; }
+    [data-theme="light"] #loginError { color:#dc2626 !important; }
+    [data-theme="light"] .btn.secondary { background:#eef2f7; color:#1e293b; }
+    [data-theme="light"] input, [data-theme="light"] textarea, [data-theme="light"] select { background:#fff; border-color:#dbe2ec; color:#1e293b; }
+    [data-theme="light"] .ls-trigger { background:#fff; }
+    [data-theme="light"] .ls-opt { border-bottom-color: rgba(203,213,225,.55); }
+    [data-theme="light"] .ls-opt:hover { background:rgba(37,99,235,.07); }
+    [data-theme="light"] .ls-opt.selected { background:rgba(37,99,235,.12); }
+    [data-theme="light"] .object-card { background:#f8fafc; }
+    [data-theme="light"] pre, [data-theme="light"] .tut-md pre, [data-theme="light"] .tut-md code { background:#f1f5f9; }
+    [data-theme="light"] .tut-md th { background:#f1f5f9; color:#334155; }
+    [data-theme="light"] .tut-md h3 { color:#1d4ed8; }
+    [data-theme="light"] .tut-md blockquote { color:#334155; }
+    [data-theme="light"] .graph-tooltip { background:rgba(255,255,255,.97); color:#1e293b; border-color:#dbe2ec; }
+    [data-theme="light"] .toast { color:#1e293b; }
+    [data-theme="light"] .toast.info { background:#dbeafe; border-color:#bfdbfe; }
+    [data-theme="light"] .toast.ok { background:#d1fae5; border-color:#a7f3d0; color:#065f46; }
+    [data-theme="light"] .toast.err { background:#fee2e2; border-color:#fecaca; color:#991b1b; }
+    [data-theme="light"] .badge { background:#eef2f7; }
+    [data-theme="light"] .badge.draft { color:#92400e; border-color:#fde68a; background:#fef3c7; }
+    [data-theme="light"] .badge.active { color:#065f46; border-color:#a7f3d0; background:#d1fae5; }
+    [data-theme="light"] .pk-badge { color:#b45309; }
+    [data-theme="light"] .tab, [data-theme="light"] .subtab { color:var(--muted); }
+    [data-theme="light"] .tab:hover, [data-theme="light"] .tab.active, [data-theme="light"] .tut-toc a:hover, [data-theme="light"] .tut-toc a.on { background:rgba(37,99,235,.08); }
+    [data-theme="light"] .tab.active { background:rgba(37,99,235,.10); }
+    [data-theme="light"] .tut-toc a.on { background:rgba(37,99,235,.14); }
+    [data-theme="light"] .tut-img { box-shadow:0 6px 20px rgba(15,23,42,.10); }
+    /* Tailwind 工具类暗色值 → 浅色映射（内联模板类名固定集；特异性 [data-theme]+class 高于 CDN 生成的单类） */
+    [data-theme="light"] .text-slate-200, [data-theme="light"] .hover\:text-slate-200:hover { color:#334155; }
+    [data-theme="light"] .text-slate-300 { color:#1e293b; }
+    [data-theme="light"] .text-slate-400 { color:#475569; }
+    [data-theme="light"] .hover\:text-slate-400:hover { color:#334155; }
+    [data-theme="light"] .text-slate-500 { color:#64748b; }
+    [data-theme="light"] .text-slate-600 { color:#94a3b8; }
+    [data-theme="light"] .border-slate-700 { border-color:#dbe2ec; }
+    [data-theme="light"] .border-slate-700\/40 { border-color:rgba(203,213,225,.45); }
+    [data-theme="light"] .border-slate-700\/50 { border-color:rgba(203,213,225,.6); }
+    [data-theme="light"] .border-slate-700\/60 { border-color:rgba(203,213,225,.75); }
+    [data-theme="light"] .border-slate-800 { border-color:#e2e8f0; }
+    [data-theme="light"] .border-slate-800\/60 { border-color:rgba(226,232,240,.85); }
+    [data-theme="light"] .border-slate-600 { border-color:#cbd5e1; }
+    [data-theme="light"] .border-slate-500 { border-color:#94a3b8; }
+    [data-theme="light"] .border-slate-300 { border-color:#94a3b8; }
+    [data-theme="light"] .hover\:border-slate-700:hover { border-color:#94a3b8; }
+    [data-theme="light"] .hover\:border-slate-600:hover { border-color:#94a3b8; }
+    [data-theme="light"] .hover\:border-slate-500:hover { border-color:#64748b; }
+    [data-theme="light"] .bg-slate-900 { background-color:#ffffff; }
+    [data-theme="light"] .bg-slate-900\/30 { background-color:rgba(255,255,255,.72); }
+    [data-theme="light"] .bg-slate-900\/40 { background-color:rgba(255,255,255,.82); }
+    [data-theme="light"] .bg-slate-900\/50 { background-color:rgba(255,255,255,.9); }
+    [data-theme="light"] .bg-slate-900\/60 { background-color:rgba(255,255,255,.95); }
+    [data-theme="light"] .bg-slate-800 { background-color:#f1f5f9; }
+    [data-theme="light"] .bg-slate-800\/30 { background-color:rgba(226,232,240,.45); }
+    [data-theme="light"] .bg-slate-800\/40 { background-color:rgba(226,232,240,.6); }
+    [data-theme="light"] .bg-slate-800\/60 { background-color:rgba(226,232,240,.85); }
+    [data-theme="light"] .bg-slate-800\/90 { background-color:rgba(241,245,249,.97); }
+    [data-theme="light"] .bg-slate-700 { background-color:#e2e8f0; }
+    [data-theme="light"] .bg-slate-700\/60 { background-color:rgba(226,232,240,.85); }
+    [data-theme="light"] .bg-slate-600\/20 { background-color:rgba(148,163,184,.18); }
+    [data-theme="light"] .bg-slate-600\/40 { background-color:rgba(148,163,184,.35); }
+    [data-theme="light"] .bg-slate-500 { background-color:#cbd5e1; }
+    [data-theme="light"] .bg-slate-500\/20 { background-color:rgba(148,163,184,.25); }
+    [data-theme="light"] .bg-slate-400 { background-color:#94a3b8; }
+    [data-theme="light"] .bg-slate-300 { background-color:#cbd5e1; }
+    [data-theme="light"] .hover\:bg-slate-800\/30:hover { background-color:rgba(148,163,184,.16); }
+    [data-theme="light"] .hover\:bg-slate-800\/40:hover { background-color:rgba(148,163,184,.24); }
+    [data-theme="light"] .hover\:bg-slate-800\/60:hover { background-color:rgba(148,163,184,.35); }
+    [data-theme="light"] .hover\:bg-slate-900\/40:hover { background-color:rgba(100,116,139,.2); }
+    [data-theme="light"] .hover\:bg-slate-700\/50:hover { background-color:rgba(148,163,184,.3); }
+    [data-theme="light"] .bg-\[\#0f1627\] { background-color:#ffffff; }
+    /* 语义色：暗色主题用 200~400 浅调，浅色主题映射到 600~700 深调保证对比度 */
+    [data-theme="light"] .text-rose-200 { color:#f43f5e; }
+    [data-theme="light"] .text-rose-300, [data-theme="light"] .text-rose-400, [data-theme="light"] .hover\:text-rose-300:hover { color:#e11d48; }
+    [data-theme="light"] .text-amber-200 { color:#f59e0b; }
+    [data-theme="light"] .text-amber-300 { color:#b45309; }
+    [data-theme="light"] .text-amber-400, [data-theme="light"] .text-amber-400\/90 { color:#d97706; }
+    [data-theme="light"] .text-emerald-300 { color:#047857; }
+    [data-theme="light"] .text-emerald-400 { color:#059669; }
+    [data-theme="light"] .hover\:text-emerald-300:hover { color:#047857; }
+    [data-theme="light"] .hover\:text-emerald-400:hover { color:#059669; }
+    [data-theme="light"] .text-red-400 { color:#dc2626; }
+    [data-theme="light"] .text-blue-300 { color:#1d4ed8; }
+    [data-theme="light"] .text-blue-400, [data-theme="light"] .text-blue-500 { color:#2563eb; }
+    [data-theme="light"] .text-sky-300, [data-theme="light"] .text-sky-400, [data-theme="light"] .text-sky-500 { color:#0284c7; }
+    [data-theme="light"] .hover\:text-sky-400:hover { color:#0284c7; }
+    [data-theme="light"] .text-cyan-400 { color:#0e7490; }
+    [data-theme="light"] .text-purple-300, [data-theme="light"] .text-purple-400, [data-theme="light"] .text-violet-400 { color:#7c3aed; }
+    [data-theme="light"] .text-indigo-300 { color:#4338ca; }
+    [data-theme="light"] .text-lime-300 { color:#4d7c0f; }
+    [data-theme="light"] .text-green-500 { color:#16a34a; }
+    /* 主题切换按钮（顶栏左上角＋登录页左上角） */
+    .theme-btn { display:inline-flex; align-items:center; justify-content:center; width:30px; height:30px; border-radius:8px; border:1px solid var(--border); background:transparent; color:var(--muted); cursor:pointer; transition:all .15s ease; flex-shrink:0; }
+    .theme-btn:hover { color:var(--text); border-color:var(--accent); background:rgba(79,140,255,.10); }
+    .theme-btn svg { width:17px; height:17px; display:none; }
+    .theme-btn-float { position:absolute; top:18px; left:18px; z-index:5; background:var(--panel); box-shadow:0 4px 14px rgba(0,0,0,.18); }
+    [data-theme="light"] .theme-btn-float { box-shadow:0 4px 14px rgba(15,23,42,.10); }
     body { background: var(--bg); color: var(--text); font-family: system-ui, "PingFang SC", sans-serif; }
     .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
@@ -98,6 +209,10 @@
       <img id="brandLogo" src="assets/logo-inspur.png" alt="浪潮信息" class="h-7 w-auto select-none" draggable="false" />
       <span class="w-px h-5 bg-slate-700/60"></span>
       <h1 class="text-base font-semibold whitespace-nowrap">格物 Lattice <span class="text-xs text-slate-400 font-normal">· 企业业务本体平台 · Beta V1.0</span></h1>
+      <button type="button" class="theme-btn" data-theme-toggle onclick="toggleTheme()" title="切换浅色/深色主题" aria-label="切换浅色/深色主题">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
     </div>
     <div class="flex items-center gap-2 text-xs">
       <span class="text-slate-500" title="所属部门：筛选项目空间（项目归属的业务部门）">部门</span>
@@ -120,6 +235,10 @@
 
   <!-- V2-05 未登录时只呈现登录页（不依赖 Tailwind CDN 的 .hidden） -->
   <div id="loginOverlay" class="op-login-wrap">
+    <button type="button" class="theme-btn theme-btn-float" data-theme-toggle onclick="toggleTheme()" title="切换浅色/深色主题" aria-label="切换浅色/深色主题">
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
     <form class="op-login-card" onsubmit="submitLogin(); return false;">
       <div class="text-lg font-semibold">格物 Lattice · 登录</div>
       <div class="text-xs text-slate-400 mt-2">V2-05 平台自身登录鉴权与 RBAC</div>
@@ -1123,7 +1242,7 @@
               <svg id="orchEdgesSvg" class="absolute inset-0" width="1800" height="1100" fill="none">
                 <defs>
                   <marker id="orchArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-                    <path d="M0,0 L8,4 L0,8 z" fill="#64748b"></path>
+                    <path d="M0,0 L8,4 L0,8 z" style="fill:var(--orch-edge)"></path>
                   </marker>
                 </defs>
               </svg>

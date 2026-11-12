@@ -4387,9 +4387,9 @@ function drawGraph(data) {
   }
 
   const link = g.append('g').selectAll('line').data(links).enter().append('line')
-    .attr('stroke', '#64748b').attr('stroke-width', 1.5).attr('stroke-opacity', 0.6);
+    .style('stroke', 'var(--graph-edge)').attr('stroke-width', 1.5).attr('stroke-opacity', 0.6);
   const linkLabel = g.append('g').selectAll('text').data(links).enter().append('text')
-    .text(d => d.label).attr('font-size', 10).attr('fill', '#94a3b8').attr('text-anchor', 'middle');
+    .text(d => d.label).attr('font-size', 10).style('fill', 'var(--graph-edge-label)').attr('text-anchor', 'middle');
   const node = g.append('g').selectAll('g').data(nodes).enter().append('g').call(d3.drag()
     .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
     .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
@@ -4401,9 +4401,9 @@ function drawGraph(data) {
     });
   // 节点名：位于节点下方（描边光晕保证杂色背景上可读），显隐由 updateLabelVisibility 按阈值控制
   nodeLabelSel = node.append('text').attr('y', d => nodeRadius(d) + 12).attr('text-anchor', 'middle')
-    .text(d => d.label || d.name || d.id).attr('font-size', 11).attr('fill', '#e2e8f0')
+    .text(d => d.label || d.name || d.id).attr('font-size', 11).style('fill', 'var(--graph-label-fill)')
     .style('pointer-events', 'none')
-    .style('paint-order', 'stroke').style('stroke', '#0f172a').style('stroke-width', 3).style('stroke-linejoin', 'round');
+    .style('paint-order', 'stroke').style('stroke', 'var(--graph-label-stroke)').style('stroke-width', 3).style('stroke-linejoin', 'round');
   updateLabelVisibility();
 
   const tip = $('graphTooltip');
@@ -4510,7 +4510,7 @@ function drawTree(data) {
     g.selectAll('*').remove();
     g.selectAll('path').data(links).enter().append('path')
       .attr('fill', 'none')
-      .attr('stroke', '#475569')
+      .style('stroke', 'var(--graph-edge)')
       .attr('stroke-width', 1.5)
       .attr('d', d3.linkHorizontal().x(d => d.y).y(d => d.x));
     const nodeG = g.selectAll('g.tree-node').data(desc, d => d.data.id).enter().append('g')
@@ -4544,14 +4544,14 @@ function drawTree(data) {
       const missing = !!d.data.missing;
       el.append('rect')
         .attr('x', -7).attr('y', -12).attr('width', 14).attr('height', 24).attr('rx', 3)
-        .attr('fill', missing ? '#1e293b' : '#0f172a')
+        .style('fill', missing ? 'var(--tree-node-bg-missing)' : 'var(--tree-node-bg)')
         .attr('stroke', missing ? '#fbbf24' : '#38bdf8')
         .attr('stroke-dasharray', missing ? '3,2' : null)
         .attr('stroke-width', 1.5);
       if (d._children) el.append('circle').attr('cx', 11).attr('cy', -12).attr('r', 3.5).attr('fill', '#38bdf8');
       el.append('text')
         .attr('x', 18).attr('dy', '0.32em')
-        .attr('fill', missing ? '#94a3b8' : '#e2e8f0')
+        .style('fill', missing ? 'var(--tree-node-text-missing)' : 'var(--tree-node-text)')
         .attr('font-size', 12)
         .text((d.data.label || d.data.id) + (d._children ? ' +' + d._children.length : ''));
     });
@@ -5540,6 +5540,30 @@ window.addEventListener('unhandledrejection', e => {
   clientLog('error', 'unhandled rejection', { message: e.reason?.message || String(e.reason), stack: e.reason?.stack });
 });
 
+// ---- 主题切换（浅色/深色：默认深色；localStorage key lattice_theme 持久化；head 预绘脚本防闪屏；图标显示当前主题） ----
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+}
+function syncThemeButtons() {
+  const light = currentTheme() === 'light';
+  document.querySelectorAll('[data-theme-toggle]').forEach(btn => {
+    const sun = btn.querySelector('.icon-sun');
+    const moon = btn.querySelector('.icon-moon');
+    if (sun) sun.style.display = light ? 'block' : 'none';
+    if (moon) moon.style.display = light ? 'none' : 'block';
+    const label = light ? '切换为深色主题' : '切换为浅色主题';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+  });
+}
+function toggleTheme() {
+  const next = currentTheme() === 'light' ? 'dark' : 'light';
+  if (next === 'light') document.documentElement.setAttribute('data-theme', 'light');
+  else document.documentElement.removeAttribute('data-theme');
+  try { localStorage.setItem('lattice_theme', next); } catch (e) {}
+  syncThemeButtons();
+}
+
 // ---- init ----
 let _booted = false;
 async function bootApp() {
@@ -5571,6 +5595,7 @@ async function bootApp() {
 // V2-05：先校验会话再加载业务页面；未登录只呈现登录页
 (async function init() {
   clientLog('info', 'app init');
+  syncThemeButtons();
   await loadSession();
 })();
 
@@ -6935,14 +6960,14 @@ function orchRenderEdges() {
     g.style.cursor = 'pointer';
     const path = document.createElementNS(NS, 'path');
     path.setAttribute('d', `M ${p1.x} ${p1.y} C ${p1.x + dx} ${p1.y}, ${p2.x - dx} ${p2.y}, ${p2.x} ${p2.y}`);
-    path.setAttribute('stroke', ORCH.selEdge === ed.id ? '#38bdf8' : '#64748b');
+    path.setAttribute('style', ORCH.selEdge === ed.id ? 'stroke:var(--orch-edge-sel)' : 'stroke:var(--orch-edge)');
     path.setAttribute('stroke-width', ORCH.selEdge === ed.id ? 2.5 : 1.5);
     path.setAttribute('marker-end', 'url(#orchArrow)');
     g.appendChild(path);
     if (ed.from_port) {
       const t = document.createElementNS(NS, 'text');
       t.setAttribute('x', (p1.x + p2.x) / 2); t.setAttribute('y', (p1.y + p2.y) / 2 - 6);
-      t.setAttribute('fill', '#94a3b8'); t.setAttribute('font-size', '11'); t.setAttribute('text-anchor', 'middle');
+      t.setAttribute('style', 'fill:var(--graph-edge-label)'); t.setAttribute('font-size', '11'); t.setAttribute('text-anchor', 'middle');
       t.textContent = ed.from_port;
       g.appendChild(t);
     }
