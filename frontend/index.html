@@ -59,14 +59,15 @@
     [data-theme="light"] .tab.active { background:rgba(37,99,235,.10); }
     [data-theme="light"] .tut-toc a.on { background:rgba(37,99,235,.14); }
     [data-theme="light"] .tut-img { box-shadow:0 6px 20px rgba(15,23,42,.10); }
-    /* 浅色主题顶栏（logo 横框）保留深色底：白色文字 logo 不能白底白字；顶栏内文字同步保持浅色系（id+attr 特异性高于单类覆盖） */
-    [data-theme="light"] #appHeader { background:#121a2e; border-color:#2a365e; }
-    [data-theme="light"] #appHeader h1 { color:#e6ecff; }
-    [data-theme="light"] #appHeader .text-slate-400 { color:#94a3b8; }
-    [data-theme="light"] #appHeader .text-slate-500 { color:#94a3b8; }
-    [data-theme="light"] #appHeader #currentUserLabel { color:#cbd5e1; }
-    [data-theme="light"] #appHeader .bg-slate-700\/60 { background-color:rgba(148,163,184,.5); }
-    [data-theme="light"] #appHeader .theme-btn { color:#cbd5e1; border-color:#3b4a75; }
+    /* 浅色主题顶栏（logo 横框）：浅色半透明磨砂（弱化对比、不突兀）；白色文字 logo 反色为深色；顶栏文字沿用全局浅色映射（id+attr 特异性高于单类） */
+    [data-theme="light"] #appHeader { background:rgba(255,255,255,.62); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); border-color:rgba(203,213,225,.9); }
+    /* 浅色主题 logo：切品牌蓝版（assets/logo-inspur-light.png，用户指定官方素材）；深色主题保持白色版 */
+    #brandLogoLight { display:none; }
+    [data-theme="light"] #brandLogo { display:none; }
+    [data-theme="light"] #brandLogoLight { display:inline-block; }
+    [data-theme="light"] #appHeader .bg-slate-700\/60 { background-color:rgba(100,116,139,.35); }
+    /* 浅色主题编排画布（容器背景为内联样式，需 !important 覆盖）：浅灰底＋浅点阵，节点/连线已走 --orch-* 变量自动适配 */
+    [data-theme="light"] #orchCanvas { background-color:#f1f5f9 !important; background-image:radial-gradient(circle, rgba(100,116,139,.30) 1px, transparent 1px) !important; }
     /* Tailwind 工具类暗色值 → 浅色映射（内联模板类名固定集；特异性 [data-theme]+class 高于 CDN 生成的单类） */
     [data-theme="light"] .text-slate-200, [data-theme="light"] .hover\:text-slate-200:hover { color:#334155; }
     [data-theme="light"] .text-slate-300 { color:#1e293b; }
@@ -215,6 +216,7 @@
   <header id="appHeader" class="panel mx-4 mt-4 px-5 py-3 flex items-center justify-between op-hidden">
     <div class="flex items-center gap-3">
       <img id="brandLogo" src="assets/logo-inspur.png" alt="浪潮信息" class="h-7 w-auto select-none" draggable="false" />
+      <img id="brandLogoLight" src="assets/logo-inspur-light.png" alt="浪潮信息" class="h-7 w-auto select-none" draggable="false" />
       <span class="w-px h-5 bg-slate-700/60"></span>
       <h1 class="text-base font-semibold whitespace-nowrap">格物 Lattice <span class="text-xs text-slate-400 font-normal">· 企业业务本体平台 · Beta V2.0</span></h1>
       <button type="button" class="theme-btn" data-theme-toggle onclick="toggleTheme()" title="切换浅色/深色主题" aria-label="切换浅色/深色主题">

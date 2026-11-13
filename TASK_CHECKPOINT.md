@@ -1372,6 +1372,13 @@ es.derived 返回摘要（id/authoritative/note），完整记录经 GET /derive
 - 刷新前端页面（8123）重新登录 admin/modeler：左侧导航出现「编排」tab（第 7 项，数据字典与能力之间）；「数据健康度」「跨本体对齐」tab 亦恢复可见（此前同样被隐藏）。
 - 浅色主题下顶栏（logo 横框）保持深色底，白色 logo 与文字清晰可见。
 
+### 52.5 浅色顶栏二轮调整＋编排画布浅色适配（2026-11-13，用户反馈「深蓝对比太强烈突兀」＋「编排画布浅色下仍是黑底」）
+- 顶栏：`#appHeader` 浅色改**浅色半透明磨砂**——`rgba(255,255,255,.62)`＋`backdrop-filter:blur(10px)`＋边 `rgba(203,213,225,.9)`；删除上一轮 5 条深底文字覆盖（`.text-slate-400/500`、`#currentUserLabel`、`.theme-btn`）——`.theme-btn`/文字类均走 `--border/--muted/--text` 变量或全局浅色映射，浅底上自动正确；分隔线 `bg-slate-700/60`→`rgba(100,116,139,.35)`。
+- logo：用户指定官方**品牌蓝**「浪潮信息」PNG（`D:\inspur\...\微信图片_20231121113704.png`，已读图确认透明底蓝字）→ 复制为 `frontend/assets/logo-inspur-light.png`（150KB）；markup 加双 `<img>`（`#brandLogo` 白色版＋`#brandLogoLight` 蓝色版），CSS 按主题 display 切换；移除上一轮 `filter:brightness(0)` 反黑 hack。JS 无 `brandLogo` 引用，切换纯 CSS。
+- 编排画布：`#orchCanvas` 背景为**内联样式**（`#0b1220`＋深色点阵）→ 新增 `[data-theme="light"] #orchCanvas { background-color:#f1f5f9 !important; background-image:radial-gradient(circle, rgba(100,116,139,.30) 1px, transparent 1px) !important; }`（内联样式须 `!important` 压）。节点（半透明 tint＋彩色 border，文字继承 `--text`）与连线/箭头（`var(--orch-edge)`）已主题自适应，无需改 JS。
+- 纯 CSS 改动（无 Python），未跑 L5（不影响 pytest）；agent-browser 自带 Chromium 在本环境拉不起（exit 0 无 DevToolsActivePort，M3-F 当时走用户手开的 CDP 9222，现未开）→ 未截图，用户刷新 8123 自验。
+- 同样**未 commit**（worktree 与 M4-B WIP 混杂，待 M4-B 收口统一提交）。
+
 ## §53 M4-B V2-15 开放查询接口（SPARQL/REST/GraphQL）交付（2026-11-13，本地 commit 未 push）
 
 ### 53.1 背景与范围
