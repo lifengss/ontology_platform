@@ -969,6 +969,58 @@
           <div id="alignDetail"></div>
         </div>
       </div>
+      <!-- 跨本体融合（V2-02 / M4-A③）：融合申请/会签/执行 + 虚拟融合查询 + 版本管理 -->
+      <div class="col-span-12">
+        <div class="card p-4">
+          <div class="flex items-center justify-between flex-wrap gap-2 mb-2">
+            <div>
+              <h3 class="font-medium text-sm text-slate-200 mb-1">跨本体融合（V2-02 M4-A③：融合申请 / 会签 / 执行 + 虚拟融合查询 + 版本管理）</h3>
+              <div class="text-xs text-slate-500 leading-relaxed">
+                融合申请的等价映射默认由已生效对齐声明自动推导（含冲突权威源决策）；会签方＝全部源本体 owner（一票否决，同 owner 即签即生效，owner 缺位管理员可代行）。
+                会签通过后「执行融合」物化派生融合本体（原本体不可变）；重执行/调整映射按源当前状态产生新版本。
+                融合查询为虚拟查询：快照 join＋键对齐＋分渠道取数，实例/快照不动；同键合并一条（双来源标记）、异键多条；冲突双值并存或权威源取值，不静默覆盖。
+              </div>
+            </div>
+            <div class="flex gap-2 shrink-0 flex-wrap">
+              <button class="btn" type="button" onclick="fuCreate()">发起融合申请</button>
+              <select id="fuStatus" class="w-28" onchange="fuLoad()">
+                <option value="">全部状态</option>
+                <option value="pending">待会签</option>
+                <option value="approved">已生效</option>
+                <option value="rejected">已拒绝</option>
+                <option value="withdrawn">已撤回</option>
+              </select>
+              <button class="btn secondary" type="button" onclick="fuLoad()">刷新</button>
+            </div>
+          </div>
+          <div id="fuRequests" class="text-xs text-slate-500">暂无数据</div>
+        </div>
+      </div>
+      <div class="col-span-12 lg:col-span-6">
+        <div class="card p-4">
+          <h3 class="font-medium text-sm text-slate-200 mb-2">虚拟融合查询（只读；同键一条双来源标记 / 异键多条）</h3>
+          <div class="grid grid-cols-12 gap-2 mb-2">
+            <select id="fuQueryTarget" class="col-span-12"></select>
+            <input id="fuQueryKey" class="col-span-12 lg:col-span-6" type="text" placeholder="stable_key 值（可选，精确匹配）">
+            <input id="fuQueryObj" class="col-span-12 lg:col-span-4" type="text" placeholder="融合对象 id/名（可选）">
+            <input id="fuQueryVer" class="col-span-12 lg:col-span-2" type="text" placeholder="版本（可选）">
+          </div>
+          <button class="btn" type="button" onclick="fuQuery()">融合查询</button>
+          <div id="fuResults" class="mt-2 text-xs text-slate-500">选择一个融合申请后查询</div>
+        </div>
+      </div>
+      <div class="col-span-12 lg:col-span-6">
+        <div class="card p-4">
+          <h3 class="font-medium text-sm text-slate-200 mb-2">融合本体版本（历史 / 语义 diff / 回滚 / 固定引用）</h3>
+          <div class="grid grid-cols-12 gap-2 mb-2">
+            <select id="fuVerFrom" class="col-span-12 lg:col-span-4"></select>
+            <span class="col-span-12 lg:col-span-1 self-center text-xs text-slate-400">→</span>
+            <select id="fuVerTo" class="col-span-12 lg:col-span-4"></select>
+            <button class="btn secondary col-span-12 lg:col-span-3" type="button" onclick="fuDiff()">语义 diff</button>
+          </div>
+          <div id="fuVersions" class="text-xs text-slate-500">尚无融合本体（对已生效融合申请执行融合后出现）</div>
+        </div>
+      </div>
     </section>
 
     <section id="mcp" class="tab-content hidden grid grid-cols-12 gap-4">

@@ -193,6 +193,25 @@ def alignment_declarations(decl_id: str = "", status: str = "") -> str:
     return _client.call("alignment_declarations", {"decl_id": decl_id, "status": status})
 
 
+@mcp.tool()
+def fusion_requests(fusion_id: str = "", status: str = "") -> str:
+    """跨本体融合申请查询（只读）：源本体/等价映射/会签进度/目标融合本体。
+    fusion_id 查详情；status 过滤 pending/approved/rejected/withdrawn。"""
+    return _client.call("fusion_requests", {"fusion_id": fusion_id, "status": status})
+
+
+@mcp.tool()
+def fusion_query(fusion_id: str = "", fusion_ontology_id: str = "", object_type: str = "",
+                 stable_key_value: str = "", version: str = "", limit: int = 100) -> str:
+    """跨本体虚拟融合查询（只读）：等价映射 join＋键对齐合并（同键一条双来源标记/异键多条）、
+    内容分渠道取数、冲突双值并存或权威源取值（不静默覆盖）；不写实例/快照。
+    version 固定引用融合本体历史版本。"""
+    return _client.call("fusion_query", {
+        "fusion_id": fusion_id, "fusion_ontology_id": fusion_ontology_id,
+        "object_type": object_type, "stable_key_value": stable_key_value,
+        "version": version, "limit": limit})
+
+
 if __name__ == "__main__":
     if "--check" in sys.argv:
         import asyncio

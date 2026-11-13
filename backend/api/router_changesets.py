@@ -26,7 +26,7 @@ from api.dependencies import project_id_param
 from core.responses import ApiError, success
 from logging_setup import get_logger
 from modeling_translator import validate_business_layer
-from schemas.changesets import AttributeDeprecate, ChangesetCreate, RejectBody
+from schemas.changesets import AttributeDeprecate, ChangesetCreate, RejectBody, RollbackBody
 from tenant import (
     current_user,
     ensure_project_access,
@@ -77,6 +77,15 @@ def _published_base(rec: dict[str, Any]) -> tuple[dict[str, Any], str]:
         last = versions[-1]
         return last["model"], last["version"]
     return _model_of(rec), sd.norm_version(rec.get("version"))
+
+
+def _next_version_after(rec: dict[str, Any], base_version: str, breaking: bool) -> str:
+    """基于当前基线升版；与既有历史版本冲突则继续升小版本直到不重复。"""
+    v = sd.bump_major(base_version) if breaking else sd.bump_minor(base_version)
+    existing = {x.get("version") for x in rec.get("versions") or []}
+    while v in existing:
+        v = sd.bump_minor(v)
+    return v
 
 
 def _require_ontology(project_id: str, ontology_id: str) -> dict[str, Any]:
@@ -456,6 +465,40 @@ def list_versions(ontology_id: str, request: Request,
     return success({"current": base_version, "items": list(reversed(items))})
 
 
+@router.get("/api/ontologies/{ontology_id}/versions/diff")
+def diff_versions(ontology_id: str, request: Request,
+                  from_ver: str = Query(..., alias="from"),
+                  to_ver: str = Query(..., alias="to"),
+                  project_id: str = Depends(project_id_param)):
+    """TP-02-05 语义 diff 对比：任意两个历史版本间按语义规则 diff（兼容/变更清单）。
+
+    注意：本路由须在 /versions/{version} 之前注册，否则 "diff" 会被当作版本号。
+    """
+    rec = _require_ontology(project_id, ontology_id)
+    ensure_schema_visible(request, project_id, rec)
+    versions = rec.get("versions") or []
+
+    def _model_of_version(v: str) -> dict:
+        hit = next((x for x in versions if x.get("version") == v), None)
+        if hit:
+            return hit.get("model") or {}
+        _base_model, base_version = _published_base(rec)
+        if not versions and sd.norm_version(base_version) == sd.norm_version(v):
+            return _base_model
+        raise ApiError("NOT_FOUND",
+                       f"version {v} 不存在（可选：{[x.get('version') for x in versions]}）",
+                       http_status=404)
+
+    model_from = _model_of_version(from_ver)
+    model_to = _model_of_version(to_ver)
+    return success({
+        "ontology_id": ontology_id,
+        "from": from_ver,
+        "to": to_ver,
+        "diff": sd.diff_ontology(model_from, model_to),
+    })
+
+
 @router.get("/api/ontologies/{ontology_id}/versions/{version}")
 def get_version(ontology_id: str, version: str, request: Request,
                 project_id: str = Depends(project_id_param)):
@@ -471,6 +514,51 @@ def get_version(ontology_id: str, version: str, request: Request,
         return success({"version": version, "published_at": rec.get("created_at"),
                         "published_by": rec.get("owner", "-"), "model": _model_of(rec)})
     raise ApiError("NOT_FOUND", f"版本 {version} 不存在", http_status=404)
+
+
+@router.post("/api/ontologies/{ontology_id}/versions/{version}/rollback")
+def rollback_version(ontology_id: str, version: str, body: RollbackBody,
+                     request: Request, project_id: str = Depends(project_id_param)):
+    """TP-02-05 版本回滚：把任一历史版本的模型恢复为「新版本」（历史 append-only，不删不改）。
+
+    - 相对当前基线为兼容差异 → 升小版本；不兼容差异 → 升大版本（TP 冲突时继续升小版本直至不重复）；
+    - 回滚到当前已发布版本属无操作，返回 409。
+    """
+    rec = _require_ontology(project_id, ontology_id)
+    user = ensure_schema_write(request, project_id, rec)
+    ver = next((v for v in rec.get("versions") or [] if v.get("version") == version), None)
+    if not ver:
+        raise ApiError("NOT_FOUND",
+                       f"version {version} 不存在（历史版本：{[x.get('version') for x in rec.get('versions') or []]}）",
+                       http_status=404)
+    base_model, base_version = _published_base(rec)
+    if sd.norm_version(base_version) == sd.norm_version(version):
+        raise ApiError("CONFLICT", f"当前已发布版本即 {version}，无需回滚", http_status=409)
+    model = copy.deepcopy(ver.get("model") or {})
+    diff = sd.diff_ontology(base_model, model)
+    breaking = any(not c.get("compatible", True) for c in diff["changes"])
+    new_version = _next_version_after(rec, base_version, breaking)
+    note = (body.note or "").strip() or f"回滚到 {version}"
+    changes = list(diff["changes"]) + [{
+        "kind": "rollback", "target": None, "compatible": True,
+        "detail": f"rollback to {version}",
+    }]
+    with _CS_LOCK:
+        updated = _apply_version(rec, project_id, model, new_version, note, changes, _actor(user))
+        _ont_store(project_id).update(ontology_id, updated)
+    audit_svc.record_from_request(
+        request, "ontology_version_rollback",
+        project_id=project_id,
+        target_type="ontology", target_id=ontology_id, target_name=rec.get("name"),
+        before=base_version, after=new_version,
+        detail={"rollback_to": version, "changes": len(diff["changes"]), "note": note},
+        tenant_id=_tenant_id(user))
+    return success({
+        "ontology_id": ontology_id,
+        "rolled_back_to": version,
+        "version": new_version,
+        "diff": {"compatible": diff["compatible"], "changes": diff["changes"]},
+    })
 
 
 @router.post("/api/ontologies/{ontology_id}/deprecate-attribute")

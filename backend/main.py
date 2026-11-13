@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from api.auth_middleware import auth_filter
 from api.router_alignment import router as alignment_router  # V2-02 跨本体对齐（M4-A②）
+from api.router_fusion import router as fusion_router  # V2-02 跨本体融合与融合查询（M4-A③）
 from api.router_actions import router as actions_router
 from api.router_audit import router as audit_router  # V2-09 完整审计（M2-D）
 from api.router_auth import router as auth_router  # V2-05 登录鉴权与 RBAC（M2-A）
@@ -138,6 +139,7 @@ app.include_router(cdc_router)  # V2-12 流式 CDC（M3-D）
 app.include_router(quality_router)  # V2-21 数据健康度（M3-C）
 app.include_router(orchestration_router)  # V2-14 Action 编排（M3-F）
 app.include_router(alignment_router)  # V2-02 跨本体对齐（M4-A②）
+app.include_router(fusion_router)  # V2-02 跨本体融合与融合查询（M4-A③）
 
 
 # VS6: 由 mcp_server 模块按项目挂载 /mcp/{project_id}，双传输（2026-10-28 MCP 接入层修复）：

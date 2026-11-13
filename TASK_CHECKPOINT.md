@@ -1256,3 +1256,36 @@ M3 里程碑退出（docs/V2-测试用例.md 判据）：TCE2E-03 备件更换�
 - git：本切片 commit 本地不 push（M4-I 终验统一 push）。
 - 文档：API 文档待补 §30（content_mode/content_resolution 字段语义）；项目 wiki 测试用例登记 M4-A① 行。
 - 下一步：**M4-A②**（跨本体候选检测＋对齐声明＋会签）→ M4-A③（融合查询）→ M4-A④（TP-04-06 批量回源＋成本提示；含 M3-C 挂账 TP-21-08 P2、M1-B SKIP 的 TP-04-06/EP-04-03 按 D2 随 M4-A 补齐）。
+
+## 49. M4-A③ 跨本体融合（V2-02：融合申请/会签/物化＋虚拟融合查询＋版本管理）✅（2026-11-13）
+
+### 49.1 交付
+- 用户指令：「继续」（同一全权授权延续：按里程碑顺序完成、不询问、进度存 wiki 按需披露、M4-I 终验统一 push）。
+- **`backend/fusion.py`**（核心模块）：融合申请（等价映射由已生效对齐声明自动推导 `derive_object_groups`/用户显式映射 `normalize_user_groups`；同源防重 409）→ 会签（复用 alignment 状态机：owner 缺位 403 OWNER_ABSENT、同 owner 即签即生效）→ `execute_fusion` 物化派生本体（等价组→fus_* 融合对象：canonical 属性并集＋fusion_sources 标记＋stable_key 优先取源侧 stable_key 对应 canonical；未映射对象→pt_* 透传；relations 端点重映射）→ 版本管理（append-only；无变化重执行不产生空版本）。
+  - **虚拟融合查询 `fusion_query`**（TP-02-11）：快照 join＋分渠道取数（`_fetch_source_values`：上传型=本地值、源连接型=`content_access.federate_values` 联邦回源）＋同 stable_key 合并一条（双来源标记）＋冲突双值并存（无裁决 `authoritative_missing`/有裁决取权威源值，绝不静默覆盖）＋透传单源直出＋stable_key/object_type 过滤；全程只读（不写实例/快照/源本体）；`user=None`＝MCP 治理通道（访问边界＝已发布态，源本体下线 404 阻断）。
+- **`backend/api/router_fusion.py`**（新）：`POST /api/fusion/requests`（201）/`GET /requests`（列表信封 {success,data:{items,total}}）/`GET /requests/{id}`/`POST /{id}/sign`/`POST /{id}/withdraw`/`POST /{id}/execute`/`PUT /{id}/mappings`/`POST /query`；均 `?project_id=`；审计 fusion_request_create/sign/withdraw/execute/mappings_update/query；`main.py` 挂载。
+- **MCP**：`TOOLS_CONTRACT` 新增两只读工具 `fusion_requests`/`fusion_query`（side_effect=False，写操作走 REST 通道）＋双 stdio 桥同步包装。
+- **版本管理端点（TP-02-05）**：`router_changesets.py` 新增 `GET /api/ontologies/{id}/versions/diff?from=&to=`（任意两版本语义 diff，须在 /versions/{version} 之前注册防 "diff" 被当版本号）＋`POST /versions/{v}/rollback`（历史模型恢复为**新版本**，append-only 不删不改；回滚当前版本 409）；`schemas/changesets.py` 补 `RollbackBody`。
+- **前端**（`frontend/app.js`＋`frontend/index.html`）：跨本体融合面板（申请列表/新建/会签 approve·reject·代行 proxy_reason/撤回/执行/虚拟查询 stable_key 过滤＋合并结果与冲突渲染/版本列表＋固定引用＋diff＋回滚）。
+- **测试 `backend/tests/test_v2_02_fusion.py`**（新，6 用例）：test_00 声明推导申请＋冲突裁决＋会签/同源防重/列表信封；test_01 物化（fus_＋pt_、stable_key=canon_code、无变化重执行版本不变）；test_02 虚拟查询合并/冲突/双来源＋TP-02-03 只读负向断言（源本体快照＋实例存储查询前后逐字节一致）；test_03 联邦渠道全链（mock HTTP 联邦源→/api/mcp/connections→/read→/api/ingest/candidates/{cand}/approve→实例列表）＋源端停→显式降级留痕（content_mode=unavailable＋error 透传）；test_04 版本语义 diff＋回滚（append-only 三版本全保留/固定版本引用/回滚当前 409）；test_05 MCP 治理边界（TOOLS_CONTRACT 只读断言＋user=None 治理身份查询＋源本体下线 404 阻断＋重发布恢复）。
+
+### 49.2 验证
+- `tests/test_v2_02_fusion.py` **6/6 全绿**；L5 全量回归 **118/118**（112 既有＋6 新增，0 failed，0:04:33）。
+- 删除 2 个临时复现脚本（`tests/repro_fusion_store.py`、`tests/repro_federated_stop.py`）。
+- 项目 wiki `source-V2-测试用例.md`「测试脚本链接登记」区 M4-A③ 行（6/6＋118/118＋6 实现缺陷清单）。
+
+### 49.3 验收中修复缺陷（6 实现＋3 测试侧）
+1. 首次物化版本 "1.0.0" 不符 M.m 版本规范（schemadiff 只接受 M/M.m）→ "1.0"（fusion.py 三处含审计 detail；router docstring/测试同步）。
+2. fus_id 随 group_id 漂移（显式映射更新后 group_id 表示变化→版本 diff 假「对象增/删」）→ 按源对象集合 SHA1 确定性生成（跨重建稳定，diff 按同对象配对）。
+3. `content_access.federate_values` 的 user_id/attr_ids 为 keyword-only，位置传参 TypeError→改关键字。
+4. 本地渠道误用 `keep_keys_for`（返回「保留键」，语义仅对源连接型有意义）→剔除 stable_key 致查询 KeyError canon_code→改为只排下划线元数据键（上传型整个 instance 即本地内容）。
+5. **联邦渠道 meta.error 被丢弃**（复现证实：源停后直连 federate_values 返回 meta.error="MCP 端点不可达"，API 条目 error=null）→ `_fetch_source_values` 改 `return values, meta, meta.get("error")` 透传降级留痕。
+6. **冲突已权威裁决时未登记 item `conflicts` 列表**（原只在权威缺值分支 append，裁决分支仅写 merged[cid].conflict=True）→凡存在冲突值一律登记 conflicts，裁决细节（value/source/values）在 merged[cid]（TP-02-02 口径：conflicts 列全部冲突属性、双值恒全量保留）。
+7. 测试侧根因：查询参数名 `project_id`（非 `project`——传错静默落 projects/default/，API 与直连 store 互查不到）；版本 "1.0.0"→"1.0"；审批端点为 `/api/ingest/candidates/{cand}/approve`（旧写 `/api/instances/{cand}/approve` 404）＋断言 imported=1 后从实例列表取 fed_id。
+8. 测试侧：`JsonStore.insert` 是**追加**而非按 id 覆盖（test_05 用 insert 改 ontB status→同 id 两条并存，published_ontology_ids 仍命中 active 原记录→发布态边界校验失效）→改 `ont.update`；实现侧 fusion_query L802-805 的 MCP 已发布态边界校验本身正确（user=None 时源本体须全部 active）。
+
+### 49.4 边界与下一步
+- git：M4-A③ 改动（fusion.py/router_fusion.py/main.py/mcp 双桥/tests）commit 本地不 push（M4-I 终验统一 push）。
+- 文档：融合 API（8 端点＋MCP 两工具）待补 API 文档（与 M4-A① §30、M4-A② §31 同批欠账）。
+- 前端：融合面板已随切片落地（`node --check` 通过），浏览器冒烟随 M4-A 收口统一做。
+- 下一步：**M4-A④**（TP-04-06 批量回源＋成本提示；含 M3-C 挂账 TP-21-08 P2、M1-B SKIP 的 TP-04-06/EP-04-03 按 D2 随 M4-A 补齐）→ M4-B…→ M4-I 终验统一 push。

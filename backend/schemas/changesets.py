@@ -37,3 +37,9 @@ class RejectBody(BaseModel):
 
 class VersionQuery(BaseModel):
     pass
+
+
+class RollbackBody(BaseModel):
+    """TP-02-05 版本回滚：把任一历史版本的模型恢复为新版本（历史 append-only，不删不改）。"""
+
+    note: str = ""

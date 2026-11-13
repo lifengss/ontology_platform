@@ -118,6 +118,23 @@ TOOLS_CONTRACT = {
         "postconditions": ["仅返回双方本体均已发布的声明；会签/冲突决策等写操作走 REST /api/alignment 通道"],
         "side_effect": False,
     },
+    "fusion_requests": {
+        "reads": ["融合申请（等价映射＋会签进度＋目标融合本体）"], "writes": [],
+        "preconditions": ["源本体已发布（MCP 通道访问边界=发布态）"],
+        "postconditions": ["仅返回源本体全部已发布的申请；发起/会签/执行等写操作走 REST /api/fusion 通道"],
+        "side_effect": False,
+    },
+    "fusion_query": {
+        "reads": ["源本体实例（按渠道取数：源连接=联邦读、上传=本地快照）"], "writes": [],
+        "preconditions": ["融合申请已生效且已执行（存在融合本体）；源本体已发布"],
+        "postconditions": [
+            "虚拟融合查询：等价映射 join＋键对齐合并＋分渠道取数，同键一条（双来源标记）、异键多条",
+            "冲突双值并存或按权威源取值（其他值保留可查），不静默覆盖",
+            "纯只读：不写实例、不写快照、不改源本体",
+            "version 可固定引用融合本体任一历史版本（缺省当前版本）",
+        ],
+        "side_effect": False,
+    },
 }
 
 
@@ -1048,6 +1065,57 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
                 items.append(d)
         items.sort(key=lambda d: d.get("submitted_at") or "", reverse=True)
         return json.dumps({"items": items[:lim], "total": len(items)}, ensure_ascii=False)
+
+    @m.tool()
+    def fusion_requests(fusion_id: str = "", status: str = "", limit: int = 50) -> str:
+        """V2-02 跨本体融合申请查询（M4-A③，只读）：融合申请（源本体、等价映射、
+        会签进度、目标融合本体 id）。MCP 通道访问边界=发布态：仅返回源本体全部已发布
+        的申请，fusion_id 不存在或不满足时一律 NOT_FOUND（不泄露存在性）。
+        发起/会签（approve/reject）/撤回/执行融合等写操作走 REST /api/fusion/requests 通道。
+
+        fusion_id 指定则查详情；否则列表，status 可过滤 pending/approved/rejected/withdrawn，
+        limit 默认 50/上限 200。
+        """
+        import fusion as _fu
+        published = set(owner._published_ontologies.get(project_id, []))
+        store = _fu._store(project_id)
+        if fusion_id:
+            r = store.get(fusion_id)
+            if not r or not set(r.get("source_ontologies") or []) <= published:
+                raise _err(ERR_NOT_FOUND, "融合申请不存在")
+            return json.dumps(r, ensure_ascii=False)
+        lim = max(1, min(int(limit or 50), 200))
+        items = [r for r in store.all()
+                 if (not status or r.get("status") == status)
+                 and set(r.get("source_ontologies") or []) <= published]
+        items.sort(key=lambda r: r.get("submitted_at") or "", reverse=True)
+        return json.dumps({"items": items[:lim], "total": len(items)}, ensure_ascii=False)
+
+    @m.tool()
+    def fusion_query(fusion_id: str = "", fusion_ontology_id: str = "", object_type: str = "",
+                     stable_key_value: str = "", version: str = "", limit: int = 100) -> str:
+        """V2-02 跨本体虚拟融合查询（M4-A③，只读，治理身份）：按融合本体的等价映射
+        跨源本体 join 实例（键对齐），同键值合并为一条记录（双来源标记）、异键多条；
+        内容按渠道获取（源连接=联邦读源端、上传=本地快照）；同键属性值冲突时——
+        配置了权威源则取权威源值（其他值保留在 values 中可查），未配置则双值并存
+        （conflict 标记），绝不静默覆盖。纯只读：不写实例、不写快照、不改源本体。
+
+        fusion_id 或 fusion_ontology_id 二选一；object_type 可按融合对象 id/名过滤；
+        stable_key_value 按键值精确过滤；version 固定引用融合本体任一历史版本
+        （缺省当前版本）；limit 默认 100/上限 200（total 为过滤后总数）。
+        """
+        import fusion as _fu
+        try:
+            out = _fu.fusion_query(project_id, None,
+                                   fusion_id=fusion_id or None,
+                                   fusion_ontology_id=fusion_ontology_id or None,
+                                   object_type=object_type or None,
+                                   stable_key_value=stable_key_value or None,
+                                   version=version or None,
+                                   limit=limit)
+            return json.dumps(out, ensure_ascii=False)
+        except _fu.FusionError as e:
+            raise _err(e.code, e.message)
 
 
 def _run_inference(ontology: dict[str, Any]) -> list[dict[str, Any]]:

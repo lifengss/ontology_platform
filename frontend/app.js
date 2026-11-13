@@ -1052,7 +1052,7 @@ function switchTab(name) {
       loadQualityTrend();
     });
   }
-  if (name === 'alignment') { alignLoadDecls(); alignDetect(); }
+  if (name === 'alignment') { alignLoadDecls(); alignDetect(); fuLoad(); }
   if (name === 'mcp') { loadMcpOntologies(1); loadMcpTools(); loadMcpToken(); }
   if (name === 'logs') { loadServerLogs(); }
   if (name === 'settings') { loadLLMSettings(); }
@@ -7757,4 +7757,256 @@ async function alignWithdraw(declId) {
     renderAlignDetail();
     await alignLoadDecls();
   } catch (e) { toast('撤回失败：' + e.message, 'err'); }
+}
+
+// =========================================================================
+// 跨本体融合（V2-02 / M4-A③）：融合申请/会签/执行 + 虚拟融合查询 + 版本管理
+// =========================================================================
+const FU = { requests: [], versions: [], verOnt: null };
+
+function fuEnsureOntologies() {
+  if (state.ontologies && state.ontologies.length) return Promise.resolve(state.ontologies);
+  return loadOntologies().then(() => state.ontologies);
+}
+
+function fuOntName(id) {
+  const o = (state.ontologies || []).find(x => x.id === id);
+  return o ? o.name : (id || '').slice(0, 8);
+}
+
+async function fuLoad() {
+  const status = ($('fuStatus') || {}).value || '';
+  try {
+    const r = await api('/api/fusion/requests' + (status ? '?status=' + encodeURIComponent(status) : ''));
+    FU.requests = (r.data && r.data.items) || [];
+    renderFuRequests();
+    renderFuQueryTargets();
+  } catch (e) { toast('加载融合申请失败：' + e.message, 'err'); }
+}
+
+function renderFuRequests() {
+  const el = $('fuRequests');
+  if (!el) return;
+  if (!FU.requests.length) { el.innerHTML = '<div class="text-slate-500">暂无融合申请</div>'; return; }
+  const stBadge = { pending: '⏳ 待会签', approved: '✅ 已生效', rejected: '❌ 已拒绝', withdrawn: '↩ 已撤回' };
+  el.innerHTML = FU.requests.map(r => {
+    const st = r.status || '';
+    const sreq = r.signers_required || [];
+    const sigs = r.signatures || [];
+    const sigOf = s => sigs.find(x => (x.owner || x.signed_for) === s.owner);
+    const done = sreq.filter(s => sigOf(s) && sigOf(s).decision === 'approve').length;
+    const groups = (r.object_groups || []).map(g => (g.canonical_name || '?') + '(' + (g.objects || []).length + '源/' + (g.attribute_mappings || []).length + '属性)');
+    let actions = '';
+    if (st === 'pending') {
+      actions = '<button class="btn" type="button" onclick="fuSign(\'' + r.id + '\',\'approve\')">会签通过</button> ' +
+        '<button class="btn secondary" type="button" onclick="fuSign(\'' + r.id + '\',\'reject\')">拒绝</button> ' +
+        '<button class="btn secondary" type="button" onclick="fuWithdraw(\'' + r.id + '\')">撤回</button>';
+    } else if (st === 'approved') {
+      actions = (r.target_ontology_id
+        ? '<button class="btn" type="button" onclick="fuExecute(\'' + r.id + '\')">重执行（源当前状态）</button> '
+        : '<button class="btn" type="button" onclick="fuExecute(\'' + r.id + '\')">执行融合（物化派生本体）</button>') +
+        '<button class="btn secondary" type="button" onclick="fuWithdraw(\'' + r.id + '\')">撤回</button>';
+    }
+    return '<div class="border border-slate-700/60 rounded-lg p-2 mb-2">' +
+      '<div class="flex items-center justify-between flex-wrap gap-1">' +
+      '<div><span class="text-slate-200 font-medium">' + esc(r.name || '') + '</span> <span class="text-slate-400">' + (stBadge[st] || st) + '</span></div>' +
+      '<div class="flex gap-1 flex-wrap">' + actions + '</div></div>' +
+      '<div class="text-slate-400 mt-1">源本体：' + esc((r.source_ontologies || []).map(fuOntName).join(' ＋ ')) +
+      (r.target_ontology_id ? ' → 融合本体 ' + esc(String(r.target_ontology_id).slice(0, 8)) + '（版本管理见右）' : '') + '</div>' +
+      '<div class="text-slate-500">等价映射：' + (groups.length ? esc(groups.join('；')) : '—') + '</div>' +
+      '<div class="text-slate-500">会签 ' + done + '/' + sreq.length + '：' +
+      esc(sreq.map(s => { const x = sigOf(s); return (s.owner || '(缺位)') + (x ? (x.decision === 'approve' ? ' ✓' : ' ✗') : ' ·'); }).join('  ')) + '</div>' +
+      (r.reject_reason ? '<div class="text-rose-400">拒绝原因：' + esc(r.reject_reason) + '</div>' : '') +
+      '</div>';
+  }).join('');
+}
+
+function renderFuQueryTargets() {
+  const sel = $('fuQueryTarget');
+  if (!sel) return;
+  const done = FU.requests.filter(r => r.status === 'approved' && r.target_ontology_id);
+  sel.innerHTML = '<option value="">— 选择已物化的融合申请 —</option>' +
+    done.map(r => '<option value="' + r.id + '">' + esc(r.name || r.id.slice(0, 8)) + '（融合本体 ' + String(r.target_ontology_id).slice(0, 8) + '）</option>').join('');
+  if (done.length && !FU.verOnt) {
+    FU.verOnt = done[0].target_ontology_id;
+    fuLoadVersions(FU.verOnt);
+  }
+}
+
+async function fuCreate() {
+  await fuEnsureOntologies();
+  const actives = (state.ontologies || []).filter(o => (o.status || 'active') === 'active');
+  if (actives.length < 2) { toast('已发布（active）本体不足 2 个，融合需要至少 2 个已发布源本体', 'err'); return; }
+  const sel = prompt('选择源本体（输入编号，空格分隔，至少 2 个；等价映射将自动取自已生效对齐声明）：\n\n' +
+    actives.map((o, i) => (i + 1) + '. ' + o.name + (o.owner ? '（owner: ' + o.owner + '）' : '')).join('\n'), '1 2');
+  if (sel === null) return;
+  const ids = sel.split(/[\s,，、;；]+/).filter(Boolean)
+    .map(s => parseInt(s, 10)).filter(n => n >= 1 && n <= actives.length)
+    .map(n => actives[n - 1].id);
+  if (new Set(ids).size < 2) { toast('请至少选择 2 个不同源本体', 'err'); return; }
+  const name = prompt('融合本体名称（可留空自动生成）：', '');
+  if (name === null) return;
+  try {
+    await api('/api/fusion/requests', { method: 'POST', body: JSON.stringify({ name: name || null, source_ontologies: ids }) });
+    toast('融合申请已创建，进入会签', 'ok');
+    await fuLoad();
+  } catch (e) { toast('发起融合失败：' + e.message, 'err'); }
+}
+
+async function fuSign(id, decision) {
+  const comment = prompt(decision === 'approve' ? '会签通过（意见可选）：' : '会签拒绝（须填写理由，一票否决）：', '');
+  if (comment === null) return;
+  if (decision === 'reject' && !(comment || '').trim()) { toast('拒绝须填写理由', 'err'); return; }
+  try {
+    let r;
+    try {
+      r = await api('/api/fusion/requests/' + id + '/sign', { method: 'POST', body: JSON.stringify({ decision, comment }) });
+    } catch (e2) {
+      if (!/代行|proxy/i.test(e2.message)) throw e2;
+      const proxyReason = prompt('您不在会签方中。租户管理员可代签缺位 owner（填写代行理由）：');
+      if (!proxyReason) throw e2;
+      r = await api('/api/fusion/requests/' + id + '/sign', { method: 'POST', body: JSON.stringify({ decision, comment, proxy_reason: proxyReason }) });
+    }
+    const st = (r.data || {}).status;
+    toast(st === 'approved' ? '会签完成，融合申请已生效（可执行融合物化派生本体）' : st === 'rejected' ? '已拒绝（一票否决）' : '会签已记录（待其余 owner）', 'ok');
+    await fuLoad();
+  } catch (e) { toast('会签失败：' + e.message, 'err'); }
+}
+
+async function fuWithdraw(id) {
+  if (!confirm('撤回该融合申请？（仅发起人/管理员，撤回后可重新发起）')) return;
+  try {
+    await api('/api/fusion/requests/' + id + '/withdraw', { method: 'POST' });
+    toast('融合申请已撤回（已物化的融合本体保留）', 'ok');
+    await fuLoad();
+  } catch (e) { toast('撤回失败：' + e.message, 'err'); }
+}
+
+async function fuExecute(id) {
+  if (!confirm('执行融合：按源本体当前状态生成/更新融合本体（TBox 合并，实例/快照不动；无变化则版本不变）。继续？')) return;
+  try {
+    const r = await api('/api/fusion/requests/' + id + '/execute', { method: 'POST', body: JSON.stringify({}) });
+    const d = r.data || {};
+    toast(d.changed ? '融合已' + (d.initial ? '物化' : '更新') + '：版本 ' + d.version : '源本体无变化，版本保持 ' + d.version, 'ok');
+    await fuLoad();
+  } catch (e) { toast('执行融合失败：' + e.message, 'err'); }
+}
+
+async function fuQuery() {
+  const target = ($('fuQueryTarget') || {}).value || '';
+  if (!target) { toast('请选择一个已物化的融合申请', 'err'); return; }
+  const body = { fusion_id: target };
+  const kv = ($('fuQueryKey') || {}).value.trim();
+  if (kv) body.stable_key_value = kv;
+  const obj = ($('fuQueryObj') || {}).value.trim();
+  if (obj) body.object_type = obj;
+  const ver = ($('fuQueryVer') || {}).value.trim();
+  if (ver) body.version = ver;
+  try {
+    const r = await api('/api/fusion/query', { method: 'POST', body: JSON.stringify(body) });
+    renderFuResults(r.data || {});
+  } catch (e) { toast('融合查询失败：' + e.message, 'err'); }
+}
+
+function renderFuResults(data) {
+  const el = $('fuResults');
+  const items = data.items || [];
+  if (!items.length) { el.innerHTML = '<div class="text-slate-500">无结果（total 0）</div>'; return; }
+  el.innerHTML = '<div class="text-slate-400 mb-1">total ' + data.total + '（显示 ' + items.length + '）· 版本 ' + esc(data.version || '当前') + '</div>' +
+    items.map(it => {
+      const merged = it.merged || {};
+      const rows = Object.keys(merged).map(cid => {
+        const m = merged[cid];
+        let v;
+        if (m.conflict) {
+          const vals = m.values || {};
+          v = '<span class="text-amber-400">⚠ 冲突</span> ' + Object.entries(vals).map(([oid, vv]) =>
+            esc(String(oid).slice(0, 8)) + ' = ' + esc(JSON.stringify(vv)) + (m.source === oid ? ' <span class="text-emerald-400">(权威源取值)</span>' : '')
+          ).join(' | ') + ' <span class="text-slate-500">(双值并存，不静默覆盖)</span>';
+        } else if (m.sources) {
+          v = esc(String(m.value)) + ' <span class="text-slate-500">(' + m.sources.length + ' 源同值)</span>';
+        } else {
+          v = esc(String(m.value)) + (m.source ? ' <span class="text-slate-500">(来源 ' + esc(String(m.source).slice(0, 8)) + ')</span>' : '');
+        }
+        return '<div class="py-0.5"><span class="text-slate-400">' + esc(cid) + '</span> = ' + v + '</div>';
+      }).join('');
+      const srcs = (it.sources || []).map(s =>
+        esc((s.ontology_name || s.ontology_id).slice(0, 12)) + '/' + esc(s.object_id || '') +
+        ' [' + esc(s.channel || 'upload') + (s.content_mode && s.content_mode !== 'local' ? '/' + esc(s.content_mode) : '') +
+        (s.content_resolution ? '/' + esc(s.content_resolution) : '') + (s.error ? ' ⚠取数降级' : '') + ']');
+      return '<div class="border border-slate-700/60 rounded-lg p-2 mb-2">' +
+        '<div class="text-slate-200 font-medium">' + esc(it.object_name || it.object || '') +
+        ' <span class="text-slate-500 font-normal">key=' + esc(it.stable_key_value == null ? '(无键)' : String(it.stable_key_value)) + '</span></div>' +
+        (rows ? '<div class="mt-1 border-t border-slate-800 pt-1">' + rows + '</div>' : '') +
+        '<div class="text-slate-500 mt-1">来源：' + srcs.join('；') + '</div></div>';
+    }).join('');
+}
+
+async function fuLoadVersions(ontId) {
+  FU.verOnt = ontId;
+  try {
+    const r = await api('/api/ontologies/' + ontId + '/versions');
+    FU.versions = (r.data && r.data.items) || [];
+    FU.curVersion = (r.data || {}).current || '';
+    renderFuVersions();
+  } catch (e) { toast('加载版本失败：' + e.message, 'err'); }
+}
+
+function renderFuVersions() {
+  const el = $('fuVersions');
+  if (!el) return;
+  if (!FU.versions.length) { el.innerHTML = '<div class="text-slate-500">无版本历史</div>'; return; }
+  const opts = FU.versions.map(v => '<option value="' + esc(v.version) + '">' + esc(v.version) + '</option>').join('');
+  const fromSel = $('fuVerFrom'), toSel = $('fuVerTo');
+  if (fromSel) fromSel.innerHTML = opts;
+  if (toSel) toSel.innerHTML = opts;
+  if (fromSel && FU.versions.length > 1) fromSel.selectedIndex = 0;
+  if (toSel) toSel.selectedIndex = 0;
+  el.innerHTML = FU.versions.map(v =>
+    '<div class="border border-slate-700/60 rounded-lg p-2 mb-2">' +
+    '<div class="flex items-center justify-between gap-2 flex-wrap">' +
+    '<div><span class="text-slate-200 font-medium">' + esc(v.version) + '</span>' +
+    (v.version === FU.curVersion ? ' <span class="text-emerald-400">(当前)</span>' : '') +
+    ' <span class="text-slate-500">' + esc(v.published_at || '') + ' by ' + esc(v.published_by || '-') + '</span></div>' +
+    '<div class="flex gap-1">' +
+    '<button class="btn secondary" type="button" onclick="fuPin(\'' + esc(v.version) + '\')">固定引用</button>' +
+    '<button class="btn secondary" type="button" onclick="fuRollback(\'' + esc(v.version) + '\')">回滚至此</button>' +
+    '</div></div>' +
+    (v.note ? '<div class="text-slate-400">' + esc(v.note) + '</div>' : '') +
+    ((v.changes || []).length ? '<div class="text-slate-500">' + esc(v.changes.slice(0, 6).map(c => (c.kind || '?') + (c.target ? ':' + c.target : '')).join('、')) +
+    (v.changes.length > 6 ? ' 等 ' + v.changes.length + ' 项' : '') + '</div>' : '') +
+    '</div>').join('');
+}
+
+function fuPin(version) {
+  const inp = $('fuQueryVer');
+  if (inp) inp.value = version;
+  toast('已填入固定版本 ' + version + '（融合查询将按该版本的等价映射执行）', 'ok');
+}
+
+async function fuDiff() {
+  if (!FU.verOnt) { toast('尚无融合本体', 'err'); return; }
+  const fromV = ($('fuVerFrom') || {}).value, toV = ($('fuVerTo') || {}).value;
+  if (!fromV || !toV) { toast('请选择起止版本', 'err'); return; }
+  try {
+    const r = await api('/api/ontologies/' + FU.verOnt + '/versions/diff?from=' + encodeURIComponent(fromV) + '&to=' + encodeURIComponent(toV));
+    const d = (r.data && r.data.diff) || {};
+    const changes = d.changes || [];
+    toast('diff ' + fromV + ' → ' + toV + '：' + changes.length + ' 项变更，' + (d.compatible ? '兼容' : '不兼容'), changes.length ? 'ok' : 'info');
+    if (changes.length) {
+      console.log('[fuDiff]', fromV, '->', toV, changes);
+    }
+  } catch (e) { toast('diff 失败：' + e.message, 'err'); }
+}
+
+async function fuRollback(version) {
+  if (!FU.verOnt) return;
+  const note = prompt('回滚融合本体到版本 ' + version + '（以该版本模型产生一个新版本，历史不删不改）。\n备注（可选）：', '');
+  if (note === null) return;
+  try {
+    const r = await api('/api/ontologies/' + FU.verOnt + '/versions/' + encodeURIComponent(version) + '/rollback',
+      { method: 'POST', body: JSON.stringify({ note: note || '' }) });
+    toast('已回滚：产生新版本 ' + (r.data || {}).version + '（内容= ' + version + '）', 'ok');
+    await fuLoadVersions(FU.verOnt);
+  } catch (e) { toast('回滚失败：' + e.message, 'err'); }
 }
