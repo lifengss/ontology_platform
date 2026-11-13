@@ -81,6 +81,9 @@ READ_ONLY_POST_RE = re.compile(
     r"|mcp/server/status"
     r"|llm/test"
     r"|system/info"
+    # V2-15（M4-B）：开放查询接口（SPARQL/GraphQL 为只读计算型 POST）
+    r"|query/sparql"
+    r"|query/graphql"
     r")$"
 )
 # V2-07（M2-E）：变更单 approve/reject 属审批动作（review 角色可执行）；
@@ -445,10 +448,15 @@ def permission_matrix(user: dict[str, Any]) -> dict[str, Any]:
     actions = list(ROLES.get(role, ROLES["viewer"])["actions"])
     # credentials（凭据映射）为账号级能力：各角色均可见并可管理「自己的」映射
     # （建/删仍受中间件 write 动作约束：viewer 只读，modeler+ 可操作）
-    tabs_read = ["home", "graph", "inference", "logs", "settings", "credentials", "tutorial"]
+    # quality（数据健康度，M3-C）为只读看板；alignment（跨本体对齐，M4-A②）以候选浏览为主
+    # （viewer 可提交候选，声明/会签按 write/review 动作在 API 层与前端按钮层门禁）
+    tabs_read = ["home", "graph", "inference", "logs", "settings", "credentials", "tutorial",
+                 "quality", "alignment"]
     tabs = list(tabs_read)
     if "write" in actions:
-        tabs += ["modeling", "ingest", "dictionary", "capability", "action", "mcp", "approvals"]
+        # orchestration（Action 编排，M3-F）与 action 同属写侧：建流/编辑/发布/运行
+        tabs += ["modeling", "ingest", "dictionary", "capability", "action", "mcp", "approvals",
+                 "orchestration"]
     elif "review" in actions:
         tabs += ["ingest", "approvals"]
     if "admin" in actions:

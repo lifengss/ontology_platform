@@ -6,6 +6,9 @@ uvicorn[standard]==0.54.0
 pydantic==2.14.1
 python-multipart==0.0.12
 
+# V2-15（M4-B）开放查询接口：GraphQL 引擎（纯 Python，schema 由本体动态生成）
+graphql-core==3.3.2
+
 # 本体 / 推理（Jena 以独立 HTTP 服务调用，不直接依赖 Java 库）
 # 注：pyshacl 0.40.1 要求 rdflib>=7.3.0；运行环境实际为 7.6.0，此处对齐（原 7.0.0 无法与 pyshacl 共存安装）
 rdflib==7.6.0

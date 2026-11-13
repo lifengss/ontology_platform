@@ -136,11 +136,15 @@ def _backfill_proposal_model(model: dict[str, Any], base_model: dict[str, Any],
                     obj["stable_key_explicit"] = False  # 自动推断；用户显式指定时由请求体置 True
 
 
-def _validate_model(model: dict[str, Any]) -> None:
+def _validate_model(model: dict[str, Any]) -> list[dict[str, Any]]:
+    """HF-08：仅 error 级违规阻断提案（与 create/update 路径的 blocking_violations 语义一致）；
+    warning 级（如属性 id 跨对象复用提示）随响应返回、不拦截。返回全部违规供调用方展示。"""
     violations = validate_business_layer(model)
-    if violations:
+    errors = [v for v in violations if v.get("severity") == "error"]
+    if errors:
         raise ApiError("VALIDATION_ERROR", "提案模型未通过业务层校验",
-                       http_status=422, details={"violations": violations})
+                       http_status=422, details={"violations": errors})
+    return violations
 
 
 def _check_deprecation_grace(base_model: dict[str, Any], diff: dict[str, Any]) -> None:

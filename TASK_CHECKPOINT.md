@@ -1289,3 +1289,127 @@ M3 里程碑退出（docs/V2-测试用例.md 判据）：TCE2E-03 备件更换�
 - 文档：融合 API（8 端点＋MCP 两工具）待补 API 文档（与 M4-A① §30、M4-A② §31 同批欠账）。
 - 前端：融合面板已随切片落地（`node --check` 通过），浏览器冒烟随 M4-A 收口统一做。
 - 下一步：**M4-A④**（TP-04-06 批量回源＋成本提示；含 M3-C 挂账 TP-21-08 P2、M1-B SKIP 的 TP-04-06/EP-04-03 按 D2 随 M4-A 补齐）→ M4-B…→ M4-I 终验统一 push。
+
+## §50 M4-A④ V2-04 源连接型渠道（联邦读成本确认＋派生图）交付（2026-11-13，commit a1900e3 本地未 push）
+
+### 50.1 交付
+- 用户指令：「按之前的方案处理，进度写入 wiki，按需披露加载。继续为完成的任务」（同一全权授权延续）。
+- **backend/capabilities/__init__.py**（核心）：
+  - execute/execute_batch 新增 ederated（默认按渠道判定）/cost_confirmed/user_id 参数；源连接型实例未确认成本 → **409 COST_CONFIRMATION_REQUIRED**（details 内嵌完整预览，可取消零副作用）。
+  - **严格模式联邦读** _federate_input：仅 mode=federated 视为成功；回退底（legacy_local/fallback/无键）不作为能力输入（防半口径，EP-04-03），失败上抛 422 CONTENT_UNAVAILABLE。
+  - 单实例：input_source=server_federated_read/inputs_persisted=false/
+es.federated{source_connection,connection_name,resolved_as,fetched_at,as_of,mode}；_annotate_trace_federated 给 trace.inputs 每 entry 补 source_channel=federated_read/source_system(连接显示名)/resolved_as/fetched_at ＋ trace.federated 汇总块。
+  - 批量：部分源失败 → item status=ederated_failed（value=None 无派生值不写回）＋summary ederated{required,success,failed,systems[{connection_id,name,ok,failed}]}＋partial_failure。
+  - 新端点服务层：preview_federated_cost（纯只读：分系统实例数/required_attrs/total_federated_reads/est_scale/confirm_required/cancelable/cost_hint）＋list_derived＋_save_derived（派生图 JsonStore derived_values：dv_ 前缀 id、derived=true、authoritative=false、derived_note、source_connection/connection_name/fetched_at/trace）。
+  - 派生值**不落权威实例存储、不写回源系统**（INV-1 延续；上传型走原 _write_back 不变）。
+- **backend/api/router_capabilities.py**：POST /{cap_id}/execute/preview（审计 capability_federated_preview）＋GET /{cap_id}/derived（列表信封）；execute/batch 透传新参数并经 	enant.current_user 取 user_id（viewer 渠道凭据）。
+- **backend/schemas/capability.py**：CapabilityExecute/ExecuteBatchBody 加 federated/cost_confirmed；新增 FederatedPreview。
+- **backend/data_quality/__init__.py**（TP-21-08 挂账补齐）：_extension_dimensions 四维挂进 evaluate（快照 extensions 块、各维度独立降级 rate=None+reason 不阻断）：dictionary_coverage（属性绑字典占比）/cross_system_key_conflict（同键 ≥2 真实连接且快照值相异）/instance_alignment（schema 级 approved 声明覆盖对象类型占比）/lineage_completeness（_source 来源系统＋批次＋fetched_at＋字段映射齐全度，候选存储名=ingest_candidates）。
+- **frontend**（app.js＋index.html）：能力面板「成本预览」按钮（capPreviewCost）＋执行 409 成本确认流（capFedPreviewHtml 渲染 details → confirm 可取消 → cost_confirmed 重试）＋单实例结果区联邦读/派生标记＋批量 summary 联邦读统计与 partial_failure 提示＋批量行派生标记与 source_system 行内注记。
+- **测试 backend/tests/test_v2_04_federated.py**（新，9 用例全绿）：setup（mock HTTP 源→连接→read→approve 入库 3 联邦实例＋1 上传实例）/preview 预览口径/未确认 409（零回源）/确认执行（回源一次＋trace 源系统＋fetched_at＋派生摘要）/不写权威与源系统（负向）/批量部分源失败（federated_failed 无派生＋partial_failure）/显式 inputs 覆盖（M1-E 不代读）/TP-21-08 扩展四维/派生图查询非权威。
+- **docs/API-INTERFACE-DOC.md §33**（新增）：成本确认契约（409→重试）/预览响应/执行响应增量字段/派生图查询/TP-21-08 四维口径/验收。
+
+### 50.2 验证
+- 	ests/test_v2_04_federated.py **9/9**；L5 全量回归 **127/127**（基线 118＋9，0 failed，0:04:39）。
+- 前端 lint 0；临时调试脚本（_tmp_dbg_fed*.py/_tmp_fix_test.py）已删。
+
+### 50.3 验收中修复缺陷（4 后端口径＋5 测试侧）
+1. 连接字段口径：实例顶层无 connection_id（存于 instance._source.connection_id）→ 新增 _fed_conn_info（content_access.connection_id_of ＋ _load_connection 显示名），execute/batch/preview 五处统一。
+2. trace entry 键是 ttr（非 name）＋source_system 取连接显示名（非 resolved_as）。
+3. 
+es.derived 返回摘要（id/authoritative/note），完整记录经 GET /derived（测试断言对齐）。
+4. data_quality 血缘维度候选存储名 candidates→ingest_candidates（与 router_ingest 一致）。
+5. 测试侧：mock_mcp_http 无 .state 层（read_calls 为 list 非计数，len() 取）；能力名正则 ^[a-z][a-z0-9_]*$；字典词条字段 canonical（非 name/values）；batch 响应联邦统计在顶层（非 summary.federated）；浮点容差 1e-9。
+
+### 50.4 边界与下一步
+- git：M4-A④ commit a1900e3 本地不 push（M4-I 终验统一 push）。
+- API 文档：§33 本片已补；§30（content_mode）/§31（alignment）/§32（fusion）欠账仍在（M4-A 收口统一补）。
+- 前端浏览器冒烟随 M4-A 收口统一做。
+- 下一步：**M4-B**（V2-15 开放查询接口：SPARQL/REST/GraphQL＋数据边界 INV-5＋字段来源标记）→ … → M4-I 终验。
+
+## §51 MCP 工具管理需求定稿（P0 工具目录展示＋P1 按项目工具暴露开关）排入 M4（2026-11-13）
+
+### 51.1 背景与用户指示
+- 本会话先后回答：① m3f-orch-smoke.png 来源（M3-F 浏览器冒烟全页截图，`docs/备份/m3f-orch-smoke.png`，编排页三面板）与拖拽建工作流页面（前端「编排」tab，V2-14 no-code 三面板：节点库拖拽/点击＋画布连线）；② 项目 MCP Server 工具集定义位置（`backend/mcp_server/__init__.py` `_register_tools` 13 个 `@m.tool()`＋`TOOLS_CONTRACT` 元数据，代码固定、全项目统一；平台 UI 仅能操作本体级发布/token，无工具级入口）。
+- 用户评估提问「平台的UI侧是否应该包含MCP的工具的管理？」→ 结论分四层：P0 工具目录只读展示（现在就该做）、P1 按项目工具暴露开关（值得做、单独立项）、P2 工具级权限 scope（暂不做）、P3 自定义工具注册（不做，走能力注册表/Action 管理既有路径）。
+- **用户指示：「P0、P1的两项可以放到M4中」→ 排入 M4 新切片 M4-K**（纯需求落档会话，无代码改动）。
+
+### 51.2 范围（定稿）
+- **P0 工具目录（只读展示）**：MCP tab 新增「工具目录」卡片（数据源 `GET /api/mcp/server/status`＋`GET /api/mcp/server/tools`＋`TOOLS_CONTRACT` 元数据：reads/writes/preconditions/postconditions/side_effect）；side_effect=true 工具（`action_invoke`/`capability_call` 等）红色警示。
+- **P1 按项目工具暴露开关**：项目级 `mcp_tool_config`（JsonStore，默认全开）→ `_register_tools` 按配置过滤注册 → `GET/PUT /api/mcp/server/tool-config`；PUT 后 `_evict(project_id)` 即时生效（与 unpublish 同懒重载机制，`mcp_server` L376 现成）；停用工具不出现在 `tools/list`、调用返回 tool not found（标准 MCP 语义）；变更落审计；**仅影响 HTTP 项目端点 `/mcp/{pid}`**（stdio 桥与 `TOOLS_CONTRACT` 契约不动）。
+- **不做**：工具级权限 scope（token/角色绑定工具子集，等真实需求）、自定义工具注册 UI。
+- **一致性设计**：与连接侧（ingest 外部 MCP Server）`tool_allowlist` 白名单（`router_mcp` L148-151）对称——进出两侧都可管工具面。
+- **风险缓解认知**：`action_invoke` 高风险路径已有 V2-13 平台 UI 人工签核兜底（外部 agent 拿到 awaiting_confirmation），真正裸露的仅 low/medium 自动回写——P1 价值为最小权限而非紧急安全修复。
+
+### 51.3 里程碑落档
+- `docs/V2-开发里程碑.md` 新增 **M4-K** 切片（M4-J 后、M4-I 前；2–3 人日：P0 0.5–1＋P1 1.5–2 含审计与测试；与其他 M4 切片无强依赖，M4-I 终验前任意时间可插入）。
+- M4 总览行：内容列加「MCP 工具管理」，53–88→**55–91** 人日；合计 137–217→**≈139–220**。
+- 项目 wiki `proj_wiki/wiki-knowledge/wiki/V2开发里程碑.md`：切片总览表 M4-K 行＋总览行同步。
+- 验收口径：停用工具 list 不可见＋调用拒绝；配置重启保持；项目间隔离；有副作用工具警示展示；审计留痕；L5 全量回归＋`scripts/e2e_mcp_acceptance.py` 复跑无回归。
+
+### 51.4 下一步
+- **M4-B**（V2-15 开放查询接口）→ … → M4-I 终验＋统一 push（M4-K 可在期间任意时间执行）。
+
+## §52 热修：RBAC tab 白名单缺 3 个新 tab（orchestration/quality/alignment）＋浅色主题顶栏变白（2026-11-13）
+
+### 52.1 背景与根因
+- 用户反馈：①「m3f-orch-smoke.png 的工作流截图（编排页）在平台里找不到」；②「切换浅色时顶部 logo 横框变白，白色文字 logo 不可见」。
+- **根因①（真缺陷）**：`backend/auth/__init__.py` `permission_matrix` 的 `tabs` 白名单缺 M3-F `orchestration`、M3-C `quality`、M4-A② `alignment` → 前端 `applyPermissionMatrix`（`app.js` L6493）把不在名单的 tab 加 `op-hidden` → **所有角色**都看不到「编排/数据健康度/跨本体对齐」（M3-F 浏览器冒烟系脚本直接 `switchTab` 绕过点击，未暴露）。
+- **根因②（样式）**：`#appHeader` 用 `.panel`（`background: var(--panel)`），浅色 `--panel:#ffffff` → 白色文字 logo（logo-inspur.png 白版）白底白字。
+
+### 52.2 修复
+- ① `tabs_read` 加 `quality`/`alignment`（所有角色可见）；write 名单加 `orchestration`（与 action 同属写侧：建流/编辑/发布/运行；viewer/reviewer 不可见）。
+- ② `frontend/index.html` 新增 7 条 `[data-theme="light"] #appHeader …` 规则（id+attr 特异性高于单类覆盖）：顶栏保持 `#121a2e` 深底、h1 `#e6ecff`、text-slate-400/500→`#94a3b8`、currentUserLabel `#cbd5e1`、分隔线/theme-btn 同步。
+- 新增 `backend/tests/test_rbac_tab_matrix.py`（2 条纯函数用例：quality/alignment 全角色可见；orchestration 仅写角色）。
+
+### 52.3 验证
+- L5 全量回归 **138/138 全绿**（127 既有＋9 M4-B 在制＋2 新增；首跑 `test_v2_15_query.py::test_10` 一次失败系测试顺序 flake——重跑与单跑均通过，与本次改动无关，**提请注意给 M4-B 会话**）。
+- 后端重启后实测 login 响应 permissions.tabs：admin 含 orchestration/quality/alignment（19 tabs）；viewer 含 quality/alignment、不含 orchestration（9 tabs）；**PASS**。临时验证账号 rbac-vfy-viewer 已禁用（PUT disabled=true）。
+- 注：重启时发现旧后端进程（PID 18600）已不存在（运行期间已退出），新进程以 `python backend\main.py` 拉起（新 PID 26488），服务正常。
+- **并发注意**：本会话期间发现工作区正被另一 M4-B 在制会话并行编辑（`router_query.py`/`test_v2_15_query.py`/`app.js`/`API-INTERFACE-DOC.md`/`router_changesets.py` 等未提交，auth 内 READ_ONLY_POST_RE 的 query/sparql+graphql 行亦属其 WIP）——**本次修复未 commit**，待 M4-B 切片收口随该切片统一提交（worktree 混杂无法拆分）。
+
+### 52.4 用户侧验证
+- 刷新前端页面（8123）重新登录 admin/modeler：左侧导航出现「编排」tab（第 7 项，数据字典与能力之间）；「数据健康度」「跨本体对齐」tab 亦恢复可见（此前同样被隐藏）。
+- 浅色主题下顶栏（logo 横框）保持深色底，白色 logo 与文字清晰可见。
+
+## §53 M4-B V2-15 开放查询接口（SPARQL/REST/GraphQL）交付（2026-11-13，本地 commit 未 push）
+
+### 53.1 背景与范围
+- 用户指令：「按之前的方案处理，进度写入 wiki，按需披露加载。继续为完成的任务」（M4 全权授权延续）。
+- 验收口径（raw 测试用例十七章，10 点）：TC-15-01 SPARQL 命名图查询（本图仅 schema＋关系快照＋上传型值）/TC-15-02 REST（对象类型＋条件＋分页）＋GraphQL（schema 由本体动态生成）/TC-15-03 三接口 401/403（V2-05）/TC-15-04 命名图隔离（禁跨图）/TC-15-05 数据边界（源连接型非键内容不返回＋MCP 联邦读提示）/TC-15-06 来源标记（schema/snapshot/upload）/TC-15-07 上传型读权限（V2-06 显式开放）/TCE-15-01 非法/超大查询/TCE-15-02 未发布 404 不暴露存在性/TCE-15-03 introspection 仅已发布。
+
+### 53.2 交付
+- **backend/api/router_query.py（新，约 600 行）**：
+  - `POST /api/query/sparql`：**SELECT-only**（ASK/CONSTRUCT → 422 `QUERY_TYPE_NOT_ALLOWED`）；跨图/外联子句（`GRAPH`/`FROM`/`USING NAMED`/`SERVICE`）**解析前 fail-closed 拦截**（422 `CROSS_GRAPH_FORBIDDEN`）；LIMIT 护栏（缺省注入 1000、上限 5000 钳制）；语法错误 422 `QUERY_SYNTAX_ERROR`（rdflib 标准语义）；命名图限定复用 `jena_adapter.sparql_query`（远程 `_wrap_graph_filter`/本地 TTL 单文件天然隔离）。
+  - `GET /api/query/instances`：`ontology_id`（必填）＋`object_type`＋`filter`（JSON 精确匹配）＋`page`/`pageSize`（≤200）；行级 `object.source="schema"`、`_field_sources`（upload/snapshot）、`_content_boundary{restricted_fields,hint}`（源连接型→MCP 联邦读提示；上传型不可读→内容开放提示）、`_content_restricted`；可见性复用 `tenant.content_visible`/`mask_instance_content`（V2-06）。
+  - `POST /api/query/graphql`：schema 由本体**动态生成**（graphql-core 3.3，按本体缓存）：`query.ontology{objectTypes{attributes/relations}}`＋每对象类型一个实例列表字段（`Order(id, filter, limit, offset)`）；属性字段按本体 data_type 映射、关系字段=目标 stable_key 值、`_fieldSources`/`_contentBoundary`；introspection 仅已发布（草稿本体 404、类型不可见）；`limit≤200` 护栏；**响应为 GraphQL 原生 `{data, errors}`**（非平台信封，GraphQL 标准）。
+  - 公共：`ensure_schema_visible` 前置（未发布/不存在 → 同文案 404「本体不存在或未发布」，不暴露存在性）；审计记录（sparql_query/graphql_query/instances_query）。
+- **backend/auth/__init__.py**：`READ_ONLY_POST_RE` 增加 `query/sparql`/`query/graphql`（只读计算型 POST 计 read 动作，V2-05 401/403 三接口一致）。
+- **backend/main.py**：挂载 `query_router`（`/api/query/*`）。
+- **backend/requirements.txt**：`graphql-core==3.3.2`（纯 Python）。
+- **frontend（index.html＋app.js）**：新「查询」tab（图谱与推理之间）：本体选择（仅已发布，复用 `renderOntologySelects`）＋SPARQL/REST/GraphQL 三子页（REST：对象类型＋filter＋page/pageSize；结果 JSON 渲染；状态栏显示命名图/对象数）；`node --check` 通过。
+- **docs/API-INTERFACE-DOC.md §34**：三接口契约（护栏表/行结构/动态 schema 形态/验收）。
+
+### 53.3 验证
+- `backend/tests/test_v2_15_query.py`（新，9 用例）**9/9**：TC-15-01 命名图（schema/标签/上传值同图＋provenance 图例＋data_boundary）；TC-15-02 REST 分页/过滤/空对象＋GraphQL 动态 schema/实例查询；TC-15-04 四类跨图子句 422＋本图仅本本体实例 subject；TC-15-05 联邦实例非键值图内 0 行＋REST/GraphQL 边界提示；TC-15-06 dev 态 admin 全放行下 upload 标记完整（V2-06 收紧路径留鉴权态）；TCE-15-02 草稿/不存在同文案 404（三接口）；TCE-15-03 introspection 含已发布类型、无草稿 `SecretObj`；TCE-15-01 语法错误/ASK/CONSTRUCT 422＋LIMIT 1000/5000 钳制＋GraphQL 200；TC-15-03＋TC-15-07（鉴权启用段）：清 `auth_users`（**`project_id="_shared"` 全局库**）→ 显式 `ensure_bootstrap`（`/login` 为 public 不触发 bootstrap）→ admin 建 4 用户（none/read/write×2）→ 无凭据 401×3、none 403×3、read 200×3（本体默认 `sharing=private`，admin PATCH sharing=department 后同租户可见）→ 上传型 U3：上传者可见（upload 标记）、其他查看者仅快照＋`_content_restricted`→`content-open` 开放后 upload 值可见。
+- L5 全量回归 **138/138**（127 既有＋9 M4-B＋2 §52 RBAC tab）。§52 提示的 test_10 首跑 flake 未复现（`_shared` 库清空修复后稳定）。
+- 实服冒烟：uvicorn 8931 起服，`/openapi.json` 含三查询端点；无凭据 401（auth 过滤生效）。
+
+### 53.4 坑位（新增）
+1. **rdflib 7.6 `parseQuery`** 返回 `ParseResults`（`[0]` 前缀、`[1]` 为 `CompValue`），查询类型取 `body.name`（"SelectQuery"/"AskQuery"…），无 `getName()`；语法错误抛 `pyparsing.exceptions.ParseException`。
+2. **`USING NAMED` 等跨图子句在 rdflib 解析阶段就报语法错**→跨图子句正则扫描必须**先于 parseQuery**（fail-closed，避免隔离问题退化为普通语法错误）。
+3. **GraphQL 端点响应为原生 `{data, errors}`**（graphql-core 标准，测试/前端勿按平台信封断言）；resolver 签名必须 `(source, info)`（单参 resolver 会 TypeError 被 graphql-core 吞成 field null＋errors 条目）。
+4. **dev 态（auth 关闭）`tenant.current_user` 返回 dev admin**（M2-A 测试态豁免=全放行）→V2-06 上传型收紧路径只能在**鉴权启用态**验证（测试内清用户库＋切 env＋finally 恢复）。
+5. **auth 用户库是全局库**：`auth._store` = `JsonStore(name, project_id="_shared")`，清空/操作须用同库路径（用默认全局路径清不到）。
+6. **`/api/auth/login` 属 public 前缀**（auth 过滤器短路于 `ensure_bootstrap` 之前）→测试需显式调 `auth_svc.ensure_bootstrap()`。
+7. 本体默认 `sharing="private"`（V2-06）：非 owner 查看者 404「本体不存在」→跨用户查询测试需 admin `PATCH /api/ontologies/{id}/sharing` 提升 `department`。
+8. file 模式 XSD float 回读可能为 str（SPARQL 值断言用 `float(str(o))`）。
+
+### 53.5 文档/git
+- 项目 wiki：source-V2-测试用例 M4-B 登记行＋V2开发里程碑 M4-B ✅ 行；docs/V2-开发里程碑 M4-B 交付结果行。
+- git：**本地 commit（未 push）**——M4-B 代码＋文档，并按 §52.3 约定**随批收口** §52 热修（auth tabs 白名单＋浅色顶栏＋test_rbac_tab_matrix.py）与 `router_changesets.py` HF-08 修复（worktree 混杂无法拆分）；成本核算业务线未提交项（docs/数据缺口*.md、cost_baseline_kit/、docs/备份/、data/instance_import_batch4.xlsx）仍按惯例**有意保留不提交**。
+- 用户级 wiki：raw 快照＋进展与测试 M4-B 节＋实体页（当前状态 M4-B✅ 下一步 M4-C）＋对话历史＋log。
+
+### 53.6 状态与下一步
+- M4-B ✅（验收 9/9＋L5 138/138＋API 文档 §34＋前端查询 tab）。
+- 下一步：**M4-C**（V2-16 Fuseki 远程推理：SPARQL 端点远程推理模式）→ M4-D…→ M4-H → **M4-K（MCP 工具目录展示＋按项目工具暴露开关，§51 定稿）** → M4-I 终验统一 push。

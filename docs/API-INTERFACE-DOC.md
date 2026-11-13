@@ -1365,3 +1365,66 @@
 - `backend/tests/test_v2_04_federated.py` **9/9**（mock 源系统经真实 HTTP MCP read 回源；临时 DATA_DIR）：TP-04-06 成本预览/409 未确认/确认执行（trace 原始值含源系统＋fetched_at）/派生图落库非权威/不写权威存储与源系统/批量部分源失败（EP-04-03：`federated_failed` 无值无派生、`partial_failure=true`）/显式 inputs 覆盖（M1-E 不代读）/TP-21-08 扩展四维/TP-02-12 派生非权威标记。
 - 回归：L5 `backend/tests` **127/127**（基线 118＋本片 9）。
 - 前端：能力面板「成本预览」按钮＋执行 409 成本确认流（可取消）＋派生标记（单实例结果区/批量行）。
+
+## 34. 开放查询接口（V2-15 / M4-B，2026-11-13）
+
+三接口均受 V2-05 权限约束（read 动作：未登录 401 / 权限不足 403）；目标本体须**已发布**（`status=active`），未发布/不存在 → 同文案 404「本体不存在或未发布」（不暴露存在性，TCE-15-02）。查询统一限定目标本体**命名图** `urn:ontology:<ontology_id>`，不支持跨图/外联。
+
+### 34.1 `POST /api/query/sparql`
+
+请求体 `{"ontology_id": "...", "query": "SELECT ..."}`。**仅 SELECT**（只读；ASK/CONSTRUCT 不开放 → 422 `QUERY_TYPE_NOT_ALLOWED`）。护栏：
+
+| 场景 | 响应 |
+|---|---|
+| SPARQL 语法错误 | 422 `QUERY_SYNTAX_ERROR`（标准语义，message 含解析器错误位置） |
+| `GRAPH` / `FROM` / `USING NAMED` / `SERVICE` 子句 | 422 `CROSS_GRAPH_FORBIDDEN`（解析前拦截，fail-closed，TC-15-04） |
+| 无 `LIMIT` | 自动注入默认 `LIMIT 1000` |
+| `LIMIT` 超上限 | 钳制到 `LIMIT 5000` |
+
+响应（成功信封）：
+
+```json
+{
+  "graph": "urn:ontology:<ontology_id>",
+  "count": 12, "limit": 1000,
+  "results": [{"s": "...", "p": "...", "o": "..."}],
+  "provenance": {"schema": "本体 schema 三元组", "snapshot": "键/关系快照", "upload": "上传型字段值"},
+  "data_boundary": "本图仅含：schema＋关系快照＋上传型值；源连接型非键内容未入图，走 MCP 联邦读"
+}
+```
+
+图内容（TC-15-01/05/06）：schema 三元组（本体翻译）＋实例键/关系快照＋**上传型字段值**；源连接型实例的非键属性不入图（INV-1/INV-5）。
+
+### 34.2 `GET /api/query/instances`
+
+查询参数：`ontology_id`（必填）、`object_type`、`filter`（JSON 对象字符串，实例字段精确匹配）、`page`/`pageSize`（≤200）。返回列表信封 `items/total/page/pageSize`，每行：
+
+```json
+{
+  "id": "rec_...", "ontology_id": "...", "object_type": "Order",
+  "object": {"id": "Order", "name": "订单", "stable_key": "orderCode", "source": "schema"},
+  "channel": "upload|federated", "stable_key_value": "...", "imported_at": "...",
+  "instance": {"...": "可见性过滤后的字段值"},
+  "_field_sources": {"orderCode": "upload", "customer": "snapshot"},
+  "_content_boundary": {"restricted_fields": ["amount", "note"], "hint": "..."},
+  "_content_restricted": true
+}
+```
+
+- 字段来源标记（TC-15-06）：`object.source="schema"`；`_field_sources` 值 ∈ `upload`（上传型内容可读时）/ `snapshot`（键＋关系快照）。
+- 数据边界（TC-15-05）：源连接型行 `instance` 仅键/关系快照，`_content_boundary.hint` 指向 MCP 联邦读；上传型行不可读时（V2-06：非上传者/非 admin/不在显式开放范围）同样仅快照，`hint` 指向内容开放流程。
+- 上传型读权限（TC-15-07，复用 V2-06）：上传者 / admin / `content-open` 开放范围可读，其余默认不可读（开放端点见 §26）。
+
+### 34.3 `POST /api/query/graphql`
+
+请求体 `{"ontology_id": "...", "query": "...", "variables": {...}}`。**响应为 GraphQL 原生格式** `{"data": ..., "errors": [...]}`（非平台 success 信封）。schema 由本体**动态生成**（按本体缓存）：
+
+- `query.ontology { id name objectTypes { id name stableKey attributes { id dataType required } relations { id targetObject cardinality } } }`
+- 每对象类型一个实例列表字段（字段名为对象 id 净化）：`Order(id: "...", filter: {...}, limit: Int, offset: Int) { ... }`
+- 实例字段：`id` / `channel` / `stableKey`、属性字段（按属性 id 命名，类型按本体 data_type 映射）、关系字段（String，值＝目标实例 stable_key 值）、`_fieldSources { name source }`、`_contentBoundary { restrictedFields hint }`
+- introspection 仅暴露**已发布**本体 schema（TCE-15-03）：查询草稿本体直接 404、类型信息不可得；行数护栏 `limit ≤ 200`
+
+### 34.4 验收
+
+- `backend/tests/test_v2_15_query.py` **9/9**（临时 DATA_DIR、file 模式图）：TC-15-01 命名图查询（schema＋关系快照＋上传型值同图）/ TC-15-02 REST（对象类型＋条件＋分页）＋GraphQL（动态 schema＋实例查询）/ TC-15-03 401/403（三接口一致）/ TC-15-04 跨图子句拒绝（`CROSS_GRAPH_FORBIDDEN`）＋本图仅本本体实例 / TC-15-05 源连接型非键内容不返回（SPARQL 图无值＋REST/GraphQL 边界提示）/ TC-15-06 三类来源标记 / TC-15-07 上传型默认不可读→显式开放后可读 / TCE-15-01 语法错误标准语义＋行数上限（1000/5000，GraphQL 200）/ TCE-15-02 未发布→404 不暴露存在性 / TCE-15-03 introspection 仅已发布。
+- 回归：L5 `backend/tests` **138/138**。

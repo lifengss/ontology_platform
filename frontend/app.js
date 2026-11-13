@@ -1040,6 +1040,7 @@ function switchTab(name) {
     loadCandidates();
   }
   if (name === 'graph') { loadOntologies().then(() => { renderOntologySelects(); loadGraph(); }); }
+  if (name === 'query') { loadOntologies().then(() => { renderOntologySelects(); qyOntologyChanged(); }); }
   if (name === 'inference') { loadOntologies().then(() => { renderOntologySelects(); loadInference(); }); }
   if (name === 'action') { loadActions(); }
   if (name === 'orchestration') { loadOrchestration(); }
@@ -1112,7 +1113,7 @@ function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').
 function renderOntologySelects() {
   const active = state.ontologies.filter(o => (o.status || 'active') === 'active');
   const opts = active.map(o => '<option value="' + o.id + '">' + esc(o.name) + '</option>').join('');
-  ['ingestOntology', 'graphOntology', 'inferOntology'].forEach(id => {
+  ['ingestOntology', 'graphOntology', 'inferOntology', 'qyOntology'].forEach(id => {
     const sel = $(id);
     if (!sel) return;
     const prev = sel.value;
@@ -1122,6 +1123,74 @@ function renderOntologySelects() {
       sel.value = prev;
     }
   });
+}
+
+// ---------------------------------------------------------------- V2-15 开放查询（M4-B）
+let qyTab = 'sparql';
+let qyObjects = [];
+const QY_TAB_IDS = { sparql: 'qyTabSparql', rest: 'qyTabRest', graphql: 'qyTabGql' };
+const QY_PANE_IDS = { sparql: 'qyPaneSparql', rest: 'qyPaneRest', graphql: 'qyPaneGql' };
+
+function switchQyTab(t) {
+  qyTab = t;
+  Object.entries(QY_PANE_IDS).forEach(([k, id]) => $(id).classList.toggle('hidden', k !== t));
+  Object.entries(QY_TAB_IDS).forEach(([k, id]) => $(id).classList.toggle('active', k === t));
+}
+
+async function qyOntologyChanged() {
+  const sel = $('qyOntology');
+  const oid = sel && sel.value;
+  const status = $('qyStatus');
+  if (!oid) { status.textContent = ''; qyObjects = []; return; }
+  try {
+    status.textContent = '加载对象类型…';
+    const j = await api('/api/ontologies/' + oid);
+    qyObjects = (j.data && j.data.objects) || [];
+    $('qyRestType').innerHTML = '<option value="">全部对象类型</option>' +
+      qyObjects.map(o => '<option value="' + esc(o.id) + '">' + esc(o.name) + ' (' + esc(o.id) + ')</option>').join('');
+    status.textContent = qyObjects.length + ' 个对象类型 · 命名图 urn:ontology:' + oid;
+  } catch (e) {
+    status.textContent = '加载失败: ' + (e && e.message || e);
+  }
+}
+
+function qyQs() {
+  // project_id 由 api() 自动注入，此处只带 ontology_id
+  return 'ontology_id=' + encodeURIComponent($('qyOntology').value || '');
+}
+
+async function qyRun(kind) {
+  const oid = $('qyOntology').value;
+  const status = $('qyStatus');
+  if (!oid) { toast('err', '请先选择本体'); return; }
+  let url, opt, outId;
+  if (kind === 'sparql') {
+    url = '/api/query/sparql?' + qyQs();
+    opt = { method: 'POST', body: JSON.stringify({ ontology_id: oid, query: $('qySparql').value }) };
+    outId = 'qySparqlResult';
+  } else if (kind === 'rest') {
+    url = '/api/query/instances?' + qyQs() +
+      '&page=' + (parseInt($('qyRestPage').value) || 1) +
+      '&pageSize=' + (Math.min(parseInt($('qyRestPageSize').value) || 20, 200));
+    const ot = $('qyRestType').value;
+    if (ot) url += '&object_type=' + encodeURIComponent(ot);
+    const f = $('qyRestFilter').value.trim();
+    if (f) url += '&filter=' + encodeURIComponent(f);
+    opt = undefined; outId = 'qyRestResult';
+  } else {
+    url = '/api/query/graphql?' + qyQs();
+    opt = { method: 'POST', body: JSON.stringify({ ontology_id: oid, query: $('qyGql').value }) };
+    outId = 'qyGqlResult';
+  }
+  try {
+    status.textContent = '执行中…';
+    const j = await api(url, opt);
+    $(outId).textContent = JSON.stringify(j, null, 2);
+    status.textContent = '完成 ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    $(outId).textContent = String(e && e.message || e);
+    status.textContent = '失败';
+  }
 }
 
 function selectOntology(o) {
