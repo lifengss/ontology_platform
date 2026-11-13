@@ -183,15 +183,30 @@ class TestV202Fusion:
     # ------------------------------------------------------------------ #
     def test_01_execute_fusion_materializes(self) -> None:
         c = self.c
+        # TP-02-12：物化默认关闭——默认执行仅虚拟执行（不产生物理本体）
         r = c.post(f"/api/fusion/requests/{_ctx['fusion_id']}/execute", params=P, json={})
+        assert r.status_code == 200, r.text
+        d = r.json()["data"]
+        assert d["materialized"] is False and d["virtual"] is True
+        assert d["would_create"] is True and d["would_change"] is True
+        assert d["model"]["objects"], "虚拟执行须返回融合模型供预览"
+        _nont_ont_before = c.get("/api/ontologies", params=P).json()["data"]["total"]
+
+        # 显式 materialize=true 才物化派生本体（版本 1.0）
+        r = c.post(f"/api/fusion/requests/{_ctx['fusion_id']}/execute", params=P,
+                   json={"materialize": True})
         assert r.status_code == 200, r.text
         d = r.json()["data"]
         _ctx["fusion_ont"] = d["ontology_id"]
         assert d["version"] == "1.0"
-        assert d["initial"] is True and d["changed"] is True
+        assert d["initial"] is True and d["changed"] is True and d["materialized"] is True
+        assert c.get("/api/ontologies", params=P).json()["data"]["total"] == _nont_ont_before + 1
 
         g = c.get(f"/api/ontologies/{_ctx['fusion_ont']}", params=P).json()["data"]
         assert g.get("fusion", {}).get("derived") is True
+        # TP-02-12：显式"派生数据，非权威"标记
+        assert g["fusion"].get("authoritative") is False
+        assert "非权威" in (g["fusion"].get("derived_note") or "")
         assert g["fusion"]["fusion_id"] == _ctx["fusion_id"]
         assert g["status"] == "active"
         fused = [o for o in g["objects"] if str(o.get("id", "")).startswith("fus_")]
@@ -205,7 +220,8 @@ class TestV202Fusion:
         _ctx["pt_obj_id"] = passthrough[0]["id"]
 
         # 源本体无变化重执行 → 版本不变（无空版本）
-        r = c.post(f"/api/fusion/requests/{_ctx['fusion_id']}/execute", params=P, json={})
+        r = c.post(f"/api/fusion/requests/{_ctx['fusion_id']}/execute", params=P,
+                   json={"materialize": True})
         assert r.status_code == 200
         assert r.json()["data"]["changed"] is False
         assert r.json()["data"]["version"] == "1.0"
@@ -263,9 +279,15 @@ class TestV202Fusion:
         assert len(by_key["S003"]["sources"]) == 1
         assert by_key["S003"]["sources"][0]["ontology_id"] == _ctx["ontB"]
         assert by_key["S003"]["merged"]["canon_name"]["value"] == "丙"
+        # TP-02-14：键不重合保持独立记录（显式 independent 标记＋来源本体标记），不强行合并
+        assert by_key["S001"]["independent"] is False            # 双源合并
+        assert by_key["S002"]["independent"] is True
+        assert by_key["S002"]["sources"][0]["ontology_id"] == _ctx["ontA"]
+        assert by_key["S003"]["independent"] is True
         # 透传对象：未映射对象不合并，单源直出
         n1 = by_key["N1"]
         assert n1["object"] == _ctx["pt_obj_id"]
+        assert n1["independent"] is True
         assert len(n1["sources"]) == 1
         # 分渠道取数：上传型=本地（不回源、不 stale）
         assert all(s.get("content_mode") == "local" for s in it1["sources"])

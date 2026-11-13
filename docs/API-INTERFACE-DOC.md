@@ -1277,3 +1277,91 @@
 ### 29.7 验收
 - `scripts/verify_m3e_writeback_risk.py`（backend/ 下运行，临时 DATA_DIR＋4 进程内可控外部 mock＋LLM 三条件桩＋admin/modeler 双角色）**149/149 通过**：TP-13-01 低风险自动（无人工、dry-run 门预览）／TP-13-02 中风险三条件（通过自动＋报告随日志留痕、未通过升级）／TP-13-03 高风险人工确认＋签核标识（身份+时间戳）／TP-13-04 等级仅管理员（非管理员 403＋审计、管理员成功＋history 降级标记、常规端点 `RISK_LEVEL_LOCKED`）／TP-13-05 幂等·退避·熔断**三级同等**生效／TP-13-06 统一审计组合检索（risk_level×trigger_source×signer，admin-only 守卫）；TCE-13-01 门失败不回写（原因留痕）／TCE-13-02 AI 失败·无法判断升级（不自动执行，失败≠通过）／TCE-13-03 拒绝·超时取消（原因＋操作人）／TCE-13-04 失败重放（幂等键复用、已生效拒绝重放 409）。
 - 回归：L5 `backend/tests` **93/93**。
+
+## 33. 联邦读成本与派生图（V2-04 源连接型渠道 / M4-A④，2026-11-13）
+
+> M4-A④ 联动交付 TP-04-06（批量联邦读＋成本提示＋派生图）与 EP-04-03（成本确认可取消；部分源失败不产生半口径）。§18 能力层既有端点不变，本节为**增量契约**。
+> 数据边界：联邦读值仅作为本次计算的临时输入（不落库）；派生值落派生图（`derived_values`，`derived=true / authoritative=false`），**不写权威实例存储、不写回源系统**。
+
+### 33.1 成本确认契约（409 → 重试）
+
+| 步骤 | 行为 |
+|---|---|
+| 1 | `POST /api/capabilities/{cap_id}/execute`（或 `/execute/batch`）存在源连接型实例且 `cost_confirmed` 缺省（false）→ **409 `COST_CONFIRMATION_REQUIRED`**，`error.details` 内嵌完整成本预览（同 33.2 响应体） |
+| 2 | 调用方展示提示（含 `cost_hint` 文案、分系统实例数、预计读取次数） |
+| 3 | 确认 → 原请求体追加 `cost_confirmed: true` 重试；取消 → 不发请求（可取消、零副作用） |
+
+- 预览端点（纯只读，可先行调用）：`POST /api/capabilities/{cap_id}/execute/preview`，body `{limit?: int=1000, offset?: int=0, instance_ids?: string[]}`。
+- 严格模式：仅 `mode=federated` 视为成功；回退底（legacy_local/fallback/无键）**不**作为能力输入，失败上抛 422 `CONTENT_UNAVAILABLE`（防半口径，EP-04-03）。
+- 上传型实例走本地渠道；对上传型实例显式 `federated=true` → 422 `CHANNEL_MISMATCH`。
+- 审计：`capability_federated_preview`（预览）、`capability_execute` / `capability_execute_batch`（detail 含 `federated` 布尔）。
+
+### 33.2 预览响应（`data`）
+
+```json
+{
+  "capability_id": "cap_...", "capability_name": "v204_margin_fee", "capability_version": "1.0",
+  "object_type": "Order",
+  "total_instances": 4, "local_instances": 1, "federated_instances": 3,
+  "systems": [{"connection_id": "conn_...", "name": "V204 mock ERP", "instances": 3}],
+  "required_attrs": ["amount"],
+  "total_federated_reads": 3, "est_scale": 3,
+  "confirm_required": true, "cancelable": true,
+  "cost_hint": "批量执行需 3 次联邦读（跨 1 个源连接）；读取受源端权限与限速约束，确认后方可执行（可直接取消）。"
+}
+```
+
+### 33.3 执行响应增量字段
+
+**单实例 `execute`（200 `data` 新增）**：
+
+| 字段 | 说明 |
+|---|---|
+| `input_source` | `server_federated_read`（平台代读）/ 原 `local`（上传型）；M1-E 显式 `inputs` 覆盖时为 `external_override` |
+| `inputs_persisted` | 联邦读恒 `false`（不落库） |
+| `federated` | `{source_connection, connection_name, resolved_as, fetched_at, as_of, mode}` |
+| `derived` | 非 dry_run 时 `{id, authoritative: false, note}`；dry_run 为 null |
+| `trace.inputs[*]` | 联邦读输入补 `source_channel: "federated_read"` / `source_system`（连接显示名）/ `fetched_at`；`trace.federated` 汇总块 |
+
+**批量 `execute/batch`（200 `data` 新增）**：
+
+| 字段 | 说明 |
+|---|---|
+| `federated` | `{required, success, failed, systems: [{connection_id, name, ok, failed}]}` |
+| `partial_failure` | `failed > 0` 时为 true（部分源失败） |
+| `items[*].status` | 新增 `federated_failed`（该实例回源失败：`value=null`、**无派生值**、不写回） |
+| `items[*]` | 联邦成功项补 `source_system` / `fetched_at` / `federated` / `derived`（摘要，同单实例） |
+
+### 33.4 派生图查询
+
+`GET /api/capabilities/{cap_id}/derived?instance_id=&object_type=&limit=100` → 列表信封 `items`（按 `executed_at` 倒序）。单条记录：
+
+```json
+{
+  "id": "dv_<cap_id>_<instance_id>_<ts15>",
+  "capability_id": "cap_...", "capability_version": "1.0",
+  "instance_id": "rec_...", "object_type": "Order", "output_attribute": "marginFee",
+  "value": 5.55, "derived": true, "authoritative": false,
+  "derived_note": "派生数据，非权威（存派生图；不写权威实例存储，不写回源系统）",
+  "execution_channel": "api", "trigger_source": "manual", "executed_at": "...",
+  "source_connection": "conn_...", "connection_name": "V204 mock ERP",
+  "resolved_as": "viewer", "fetched_at": "...", "trace": { "...": "四要素＋federated 块" }
+}
+```
+
+### 33.5 TP-21-08 数据健康扩展四维（§27 `evaluate` 响应 `data.extensions`）
+
+各维度**独立降级**（依赖缺失 → `rate=null`＋`reason`，不 500、不阻断四维主评估）：
+
+| 维度 | 口径（`caliber` 随响应返回） |
+|---|---|
+| `dictionary_coverage` | 本体对象属性绑定字典词条（object_type 匹配或全局词条）占比 |
+| `cross_system_key_conflict` | 同 (object_type, stable_key_value) 来自 ≥2 真实连接且本地快照值相异；源连接型无本地内容值（INV-1），仅按键/关系快照比较 |
+| `instance_alignment` | schema 级：被已生效（approved）对齐声明覆盖的对象类型占比（实例级对齐见冲突率维度，不重复计算） |
+| `lineage_completeness` | 来源系统＋导入批次＋取数时间＋字段映射齐全度（按 `_source`/candidate mapping 判定） |
+
+### 33.6 验收
+
+- `backend/tests/test_v2_04_federated.py` **9/9**（mock 源系统经真实 HTTP MCP read 回源；临时 DATA_DIR）：TP-04-06 成本预览/409 未确认/确认执行（trace 原始值含源系统＋fetched_at）/派生图落库非权威/不写权威存储与源系统/批量部分源失败（EP-04-03：`federated_failed` 无值无派生、`partial_failure=true`）/显式 inputs 覆盖（M1-E 不代读）/TP-21-08 扩展四维/TP-02-12 派生非权威标记。
+- 回归：L5 `backend/tests` **127/127**（基线 118＋本片 9）。
+- 前端：能力面板「成本预览」按钮＋执行 409 成本确认流（可取消）＋派生标记（单实例结果区/批量行）。

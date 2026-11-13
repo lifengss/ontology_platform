@@ -35,6 +35,10 @@ class CapabilityExecute(BaseModel):
     dry_run: bool = Field(default=False)
     # M1-E / TCE2E-01：联邦读结果（term_lookup 合并值）作为本次临时输入覆盖，不落库
     inputs: Optional[dict[str, Any]] = Field(default=None)
+    # M4-A④ / TP-04-06：源连接型实例是否走平台服务端联邦读（None=按内容渠道自动判定）
+    federated: Optional[bool] = Field(default=None)
+    # TP-04-06 / EP-04-03：成本确认（预览 confirm_required=True 时执行须带 true，可取消）
+    cost_confirmed: bool = Field(default=False)
 
 
 class CapabilityExecuteBatch(BaseModel):
@@ -44,3 +48,13 @@ class CapabilityExecuteBatch(BaseModel):
     channel: str = Field(default="api", pattern="^(ui|api|mcp)$")
     trigger_source: str = Field(default="batch", max_length=32)
     dry_run: bool = Field(default=False)
+    # M4-A④ / TP-04-06：联邦读 + 成本确认（与单实例执行同契约）
+    federated: Optional[bool] = Field(default=None)
+    cost_confirmed: bool = Field(default=False)
+
+
+class FederatedPreview(BaseModel):
+    """TP-04-06：批量联邦读成本预览请求（纯只读，与 execute-batch 同口径实例集）。"""
+    limit: int = Field(default=1000, ge=1, le=10000)
+    offset: int = Field(default=0, ge=0)
+    instance_ids: Optional[list[str]] = Field(default=None, max_length=5000)

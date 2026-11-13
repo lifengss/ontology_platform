@@ -617,8 +617,14 @@ def _next_free_version(rec: dict, base_version: str, breaking: bool) -> str:
 
 
 def execute_fusion(request, project_id: str, user: dict, fusion_id: str,
-                   note: str | None = None) -> dict:
-    """执行/重执行融合：首次物化创建融合本体（1.0），其后按源当前状态重建并产生新版本。"""
+                   note: str | None = None, materialize: bool = False) -> dict:
+    """执行/重执行融合。
+
+    TP-02-12：物化快照**默认关闭**（materialize=False 仅虚拟执行——校验模型并报告
+    would_create/would_change，不产生任何物理本体）；显式 materialize=True 才物化，
+    物化出的派生本体带显式"派生数据，非权威"标记（derived/authoritative/derived_note）。
+    源本体变更后以 materialize=True 重执行 → 按 diff 产生新版本（append-only 重建）。
+    """
     tenant.ensure_project_access(request, project_id)
     rec = _require_fusion(project_id, fusion_id)
     if rec.get("status") != "approved":
@@ -641,6 +647,28 @@ def execute_fusion(request, project_id: str, user: dict, fusion_id: str,
     ont_id = rec.get("target_ontology_id")
     ont_rec = ont_store.get(ont_id) if ont_id else None
 
+    if not materialize:
+        # 虚拟执行：只读校验＋变更预演（不落盘、不产版本）
+        if ont_rec is None:
+            would_create, would_change = True, True
+            base_version = None
+        else:
+            base_model, base_version = _published_base(ont_rec)
+            would_create, would_change = False, bool(sd.diff_ontology(base_model, model)["changes"])
+        audit_svc.record_from_request(request, "fusion_execute_virtual",
+                                      project_id=project_id,
+                                      target_type="fusion_request", target_id=fusion_id,
+                                      target_name=rec.get("name"),
+                                      detail={"materialize": False, "would_create": would_create,
+                                              "would_change": would_change,
+                                              "base_version": base_version})
+        return {"materialized": False, "virtual": True,
+                "would_create": would_create, "would_change": would_change,
+                "base_version": base_version,
+                "model": model,
+                "note": "虚拟执行：未物化（TP-02-12 物化默认关闭）；"
+                        "显式 materialize=true 才产生派生本体（派生数据，非权威）"}
+
     if not ont_rec:
         ont_rec = ont_store.insert({
             "project_id": project_id,
@@ -658,6 +686,9 @@ def execute_fusion(request, project_id: str, user: dict, fusion_id: str,
             "versions": [],
             "fusion": {
                 "derived": True,
+                "authoritative": False,
+                "derived_note": "派生数据，非权威：物化融合快照，唯一权威来源为源本体；仅作只读查询，不作为权威数据回写",
+                "materialized": True,
                 "fusion_id": fusion_id,
                 "source_ontologies": list(rec.get("source_ontologies") or []),
             },
@@ -676,13 +707,15 @@ def execute_fusion(request, project_id: str, user: dict, fusion_id: str,
                                       target_type="ontology", target_id=ont_rec["id"],
                                       target_name=ont_rec["name"],
                                       detail={"fusion_id": fusion_id, "version": "1.0", "initial": True})
-        return {"ontology_id": ont_rec["id"], "version": "1.0", "initial": True, "changed": True}
+        return {"ontology_id": ont_rec["id"], "version": "1.0", "initial": True, "changed": True,
+                "materialized": True}
 
     base_model, base_version = _published_base(ont_rec)
     diff = sd.diff_ontology(base_model, model)
     if not diff["changes"]:
         return {"ontology_id": ont_rec["id"], "version": base_version, "changed": False,
-                "initial": False, "diff": {"compatible": True, "changes": []}}
+                "initial": False, "materialized": True,
+                "diff": {"compatible": True, "changes": []}}
     breaking = any(not c.get("compatible", True) for c in diff["changes"])
     version = _next_free_version(ont_rec, base_version, breaking)
     updated = _apply_version(ont_rec, project_id, model, version,
@@ -696,6 +729,7 @@ def execute_fusion(request, project_id: str, user: dict, fusion_id: str,
                                   detail={"fusion_id": fusion_id, "version": version,
                                           "previous": base_version, "changes": len(diff["changes"])})
     return {"ontology_id": ont_rec["id"], "version": version, "changed": True, "initial": False,
+            "materialized": True,
             "diff": {"compatible": diff["compatible"], "version_bump": diff.get("version_bump"),
                      "changes": diff["changes"]}}
 
@@ -722,8 +756,9 @@ def update_fusion_mappings(request, project_id: str, user: dict, fusion_id: str,
                                   detail={"groups": len(groups)})
     out = {"fusion_id": fusion_id, "groups": groups, "version_result": None}
     if rec.get("status") == "approved" and rec.get("target_ontology_id"):
+        # 已物化场景：映射变更须落新版本（materialize 默认关闭仅影响未物化首执行）
         out["version_result"] = execute_fusion(request, project_id, user, fusion_id,
-                                               note="等价映射调整（自动版本）")
+                                               note="等价映射调整（自动版本）", materialize=True)
     return out
 
 
@@ -911,6 +946,8 @@ def fusion_query(project_id: str, user: dict | None, *,
                 "object": fobj.get("id"),
                 "object_name": fobj.get("name"),
                 "stable_key_value": None if kv.startswith("__nokey__:") else kv,
+                # TP-02-14：跨源未匹配键保持独立记录（来源本体标记在 sources 各 entry），不强行合并
+                "independent": len(entries) == 1,
                 "merged": merged,
                 "conflicts": conflicts,
                 "sources": entries,

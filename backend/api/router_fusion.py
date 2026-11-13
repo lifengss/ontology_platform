@@ -6,7 +6,7 @@
 - GET  /api/fusion/requests/{fusion_id}    融合申请详情（含等价映射与会签进度）
 - POST /api/fusion/requests/{fusion_id}/sign        会签（approve/reject；一票否决；owner 缺位 admin 代行）
 - POST /api/fusion/requests/{fusion_id}/withdraw    撤回（发起人/管理员，pending/approved）
-- POST /api/fusion/requests/{fusion_id}/execute     执行/重执行融合（物化派生本体；无变化则不变版本）
+- POST /api/fusion/requests/{fusion_id}/execute     执行融合（默认虚拟执行；body.materialize=true 显式物化派生本体；无变化则不变版本）
 - PUT  /api/fusion/requests/{fusion_id}/mappings    调整等价映射（已物化则自动产生新版本）
 - POST /api/fusion/query                   虚拟融合查询（只读；同键合并双来源标记/冲突双值并存或权威源取值）
 """
@@ -58,6 +58,8 @@ class FusionMappingsIn(BaseModel):
 
 class FusionExecuteIn(BaseModel):
     note: str | None = None
+    # TP-02-12：物化快照默认关闭；显式 true 才物化派生本体（派生数据，非权威）
+    materialize: bool = False
 
 
 class FusionQueryIn(BaseModel):
@@ -139,10 +141,13 @@ def api_withdraw_fusion(request: Request, fusion_id: str,
 @router.post("/requests/{fusion_id}/execute")
 def api_execute_fusion(request: Request, fusion_id: str, body: FusionExecuteIn,
                        project_id: str = Depends(project_id_param)):
-    """执行融合：首次物化创建派生融合本体（1.0）；重执行按源当前状态重建并产生新版本。"""
+    """执行融合：默认虚拟执行（校验模型＋变更预演，不物化，TP-02-12）；
+    materialize=true 显式物化：首次创建派生融合本体（1.0，标注"派生数据，非权威"），
+    重执行按源当前状态重建并产生新版本。"""
     user = current_user(request)
     try:
-        out = fusion.execute_fusion(request, project_id, user, fusion_id, body.note)
+        out = fusion.execute_fusion(request, project_id, user, fusion_id,
+                                    body.note, materialize=body.materialize)
     except fusion.FusionError as e:
         raise _err(e)
     return success(out)

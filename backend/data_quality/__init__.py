@@ -1,10 +1,18 @@
-"""V2-21（M3-C）数据健康度评估——核心四维（零依赖，不依赖 M3-B 血缘/M4-A 字典治理）。
+"""V2-21（M3-C）数据健康度评估——核心四维（零依赖，不依赖 M3-B 血缘/M4-A 字典治理）
+＋扩展四维（M4-A④ / TP-21-08，依赖 V2-01 字典 / V2-02 对齐 / V2-08 血缘）。
 
 四维：
   1. 完整性  —— 键属性填充率 / 必填属性填充率（按属性细分）/ 关系指向解析率
   2. 唯一性  —— stable_key 重复率 / 缺键率
   3. 合规性  —— SHACL 违规率（按属性细分）/ 枚举值域命中率
   4. 新鲜度  —— 按来源连接的数据新鲜度（fetched_at 距今天数）/ 陈旧数据占比（阈值可配）
+
+扩展四维（TP-21-08，P2；快照 extensions 块，各维度独立降级不阻断）：
+  1. 字典映射覆盖率   —— 本体对象属性中绑定字典词条的占比（V2-01）
+  2. 跨系统同键冲突率 —— 同 (object_type, stable_key) 来自 ≥2 真实连接且本地值相异（V2-02；
+                         源连接型无本地内容值 INV-1，只计多源同键、值差异须联邦读，口径内注明）
+  3. 实例对齐率       —— 被已生效（approved）对齐声明覆盖的对象类型占比（V2-02；schema 级口径）
+  4. 血缘完整率       —— 来源系统＋导入批次＋取数时间＋字段映射齐全度（V2-08；上传/手工 N/A 子项按完整计）
 
 两个评估时点：
   - 入库时：批次健康卡 compute_batch_health（preview 落候选记录、人工确认卡展示）—— TP-21-06
@@ -41,7 +49,7 @@ from logging_setup import get_logger
 
 logger = get_logger("data_quality")
 
-MODULE_VERSION = "m3c-v1"
+MODULE_VERSION = "m4a-v1"  # M4-A④：新增扩展四维（TP-21-08）→ 口径版本变化，趋势线标 caliber_changed
 SNAPSHOTS = "quality_snapshots"
 
 
@@ -466,6 +474,134 @@ def _run_shacl(ontology: dict[str, Any], objs: dict[str, dict[str, Any]]) -> Non
         conf["shacl_by_attribute"] = by_attr
 
 
+# ---------- 扩展四维（TP-21-08 / M4-A④：V2-01 字典 / V2-02 对齐 / V2-08 血缘） ---------- #
+
+def _extension_dimensions(project_id: str, onto: dict[str, Any],
+                          all_recs: list[dict[str, Any]],
+                          valid_cids: set[str]) -> dict[str, Any]:
+    """扩展四维：各维度独立降级（依赖数据缺失 → rate=None＋reason，不 500、不阻断评估）。"""
+    ext: dict[str, Any] = {}
+    ot_objs = [o.get("id") for o in onto.get("objects", []) if o.get("id")]
+    attr_pairs = [(o.get("id"), a.get("id")) for o in onto.get("objects", [])
+                  for a in o.get("attributes", []) if a.get("id")]
+
+    # 1) 字典映射覆盖率（V2-01）：本体对象属性绑定字典词条的占比
+    try:
+        from dictionary import _terms
+        terms = _terms(project_id).all()
+    except Exception:  # noqa: BLE001 字典模块异常不阻断健康度（EP-21-01 护栏）
+        terms = None
+    if terms is None:
+        ext["dictionary_coverage"] = {
+            "rate": None, "mapped": 0, "total": len(attr_pairs), "reason": "字典模块不可用"}
+    elif not attr_pairs:
+        ext["dictionary_coverage"] = {
+            "rate": None, "mapped": 0, "total": 0, "reason": "本体无属性，不适用"}
+    else:
+        mapped = sum(
+            1 for ot, aid in attr_pairs
+            if any(t.get("property_id") == aid and (not t.get("object_type") or t.get("object_type") == ot)
+                   for t in terms))
+        ext["dictionary_coverage"] = {
+            "rate": round(mapped / len(attr_pairs), 4), "mapped": mapped, "total": len(attr_pairs),
+            "caliber": "本体对象属性绑定字典词条（object_type 匹配或全局词条）的占比"}
+
+    # 2) 跨系统同键冲突率（V2-02）：同键来自 ≥2 真实连接且本地值相异
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for rec in all_recs:
+        kv = str(rec.get("stable_key_value") or "")
+        if not kv:
+            continue
+        groups.setdefault((rec.get("object_type") or "?", kv), []).append(rec)
+    multi = conflicts = 0
+    for recs in groups.values():
+        cids = {(r.get("instance") or {}).get("_source", {}).get("connection_id") for r in recs}
+        if len({c for c in cids if c in valid_cids}) < 2:
+            continue
+        multi += 1
+        contents = {json.dumps({k2: v2 for k2, v2 in (r.get("instance") or {}).items() if k2 != "_source"},
+                               ensure_ascii=False, sort_keys=True) for r in recs}
+        if len(contents) > 1:
+            conflicts += 1
+    ext["cross_system_key_conflict"] = {
+        "multi_source_keys": multi,
+        "value_conflict_keys": conflicts,
+        "rate": round(conflicts / multi, 4) if multi else None,
+        "caliber": "同 (object_type, stable_key_value) 来自 ≥2 真实连接且本地快照值相异；"
+                   "源连接型无本地内容值（INV-1），仅按键/关系快照比较，内容值差异须联邦读（不计入）",
+    }
+
+    # 3) 实例对齐率（V2-02）：被已生效对齐声明覆盖的对象类型占比（schema 级口径）
+    try:
+        decls = JsonStore("alignment_declarations", project_id).all()
+    except Exception:  # noqa: BLE001
+        decls = None
+    if not ot_objs:
+        ext["instance_alignment"] = {
+            "rate": None, "aligned": 0, "total": 0, "reason": "本体无对象，不适用"}
+    elif decls is None:
+        ext["instance_alignment"] = {
+            "rate": None, "aligned": 0, "total": len(ot_objs), "reason": "对齐声明存储不可用"}
+    else:
+        aligned: set[str] = set()
+        for d in decls:
+            if d.get("status") != "approved":
+                continue
+            if d.get("ontology_a") != onto.get("id") and d.get("ontology_b") != onto.get("id"):
+                continue
+            for p in d.get("object_pairs") or []:
+                for k in ("object_a", "object_b"):
+                    if p.get(k) in ot_objs:
+                        aligned.add(p[k])
+        ext["instance_alignment"] = {
+            "rate": round(len(aligned) / len(ot_objs), 4),
+            "aligned": sorted(aligned), "total": len(ot_objs),
+            "caliber": "schema 级口径：对齐声明是对象类型级（已生效=approved）；"
+                       "实例级对齐按同 stable_key 度量（见跨系统同键冲突率），不重复计算",
+        }
+
+    # 4) 血缘完整率（V2-08）：来源系统＋导入批次＋取数时间＋字段映射 齐全度
+    try:
+        cands = {c.get("id"): c for c in JsonStore("ingest_candidates", project_id).all() if c.get("id")}
+    except Exception:  # noqa: BLE001
+        cands = {}
+    if not all_recs:
+        ext["lineage_completeness"] = {
+            "rate": None, "complete": 0, "total": 0, "reason": "无实例，不适用"}
+    else:
+        complete = 0
+        missing: dict[str, int] = {}
+        for r in all_recs:
+            inst = r.get("instance") or {}
+            src = inst.get("_source") or {}
+            kind = src.get("kind") or ""
+            ok_src = bool(src) or bool(r.get("candidate_id"))
+            cand = cands.get(r.get("candidate_id")) if r.get("candidate_id") else None
+            ok_batch = cand is not None or kind == "cdc"  # CDC 无候选，事件 lsn/ts 即批次
+            ok_time = bool(src.get("fetched_at")) or kind in ("", "manual", "file_upload")
+            ok_fields = True
+            if cand is not None:
+                fmap = ((cand.get("mapping") or {}).get("field_map")) or {}
+                obj = next((o for o in onto.get("objects", [])
+                            if o.get("id") == r.get("object_type")), None)
+                attr_ids = {a.get("id") for a in (obj or {}).get("attributes", []) if a.get("id")}
+                if attr_ids:
+                    ok_fields = set(fmap.values()) >= attr_ids
+            for name, ok in (("source", ok_src), ("batch", ok_batch),
+                             ("fetched_at", ok_time), ("field_map", ok_fields)):
+                if not ok:
+                    missing[name] = missing.get(name, 0) + 1
+            if ok_src and ok_batch and ok_time and ok_fields:
+                complete += 1
+        ext["lineage_completeness"] = {
+            "rate": round(complete / len(all_recs), 4), "complete": complete, "total": len(all_recs),
+            "missing": missing,
+            "caliber": "来源系统＋导入批次（CDC 按事件 lsn 计）＋取数时间（上传/手工 N/A 按完整计）"
+                       "＋候选 field_map 覆盖对象全部属性",
+        }
+    return ext
+
+
 # ---------- 本体级评估（建模后：质量趋势线的数据源） ---------- #
 
 def evaluate_ontology(project_id: str, ontology_id: str, actor: str = "", save: bool = True) -> dict[str, Any]:
@@ -548,6 +684,7 @@ def evaluate_ontology(project_id: str, ontology_id: str, actor: str = "", save: 
         "summary": summary,
         "objects": objs,
         "channels": channels,
+        "extensions": _extension_dimensions(project_id, onto, all_recs, valid_cids),  # TP-21-08
     }
     if save:
         _snap_store(project_id).insert(snap)

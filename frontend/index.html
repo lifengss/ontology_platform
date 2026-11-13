@@ -775,7 +775,7 @@
       <div class="col-span-12 lg:col-span-5">
         <div class="card p-4">
           <h3 class="font-medium text-sm text-slate-200 mb-1">执行</h3>
-          <div class="text-xs text-slate-500 mb-2 leading-relaxed">单实例：对指定实例执行并写回输出属性 + <span class="font-mono">__capability__</span> 元数据（源字段不覆盖）。批量：对象类型全部实例逐条执行，单实例错误不中断，<b>null 结果显式计数（null ≠ 0）</b>。</div>
+          <div class="text-xs text-slate-500 mb-2 leading-relaxed">单实例：对指定实例执行并写回输出属性 + <span class="font-mono">__capability__</span> 元数据（源字段不覆盖）。批量：对象类型全部实例逐条执行，单实例错误不中断，<b>null 结果显式计数（null ≠ 0）</b>。源连接型实例走联邦读：执行前展示<b>成本提示（可取消）</b>，确认后执行；派生值仅落派生图（非权威），不写权威存储、不写回源系统。</div>
           <div class="grid grid-cols-2 gap-2 text-sm">
             <div class="col-span-2"><label class="text-xs text-slate-400">能力 name / id</label><input id="capExecName" class="w-full font-mono text-xs" placeholder="如 cap_onsite_rate_d3"></div>
             <div class="col-span-2"><label class="text-xs text-slate-400">实例 record_id（单实例执行）</label><input id="capExecInstanceId" class="w-full font-mono text-xs" placeholder="record_id"></div>
@@ -785,6 +785,7 @@
           <div class="flex items-center gap-2 mt-3">
             <button class="btn" type="button" onclick="capExecuteSingle()">单实例执行</button>
             <button class="btn secondary" type="button" onclick="capExecuteBatch()">批量执行</button>
+            <button class="btn secondary" type="button" onclick="capPreviewCost()" title="只读预览批量执行的联邦读成本（不产生任何写）">成本预览</button>
           </div>
         </div>
         <div class="card p-4 mt-4">

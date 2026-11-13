@@ -6195,22 +6195,41 @@ async function capResolveName() {
   return hit ? hit.id : raw;
 }
 
-async function capExecuteSingle() {
+// TP-04-06：联邦读成本提示（409 details / preview 共用渲染）
+function capFedPreviewHtml(d) {
+  d = d || {};
+  const sys = (d.systems || []).map(s => esc(s.name || s.connection_id) + '（' + s.instances + ' 实例）').join('、');
+  return '<div class="text-amber-300 mb-1 font-medium">联邦读成本提示</div>'
+    + '<div class="text-slate-300">源系统：' + (sys || '无') + '</div>'
+    + '<div class="text-slate-300">实例：本地 ' + (d.local_instances != null ? d.local_instances : 0)
+    + ' · 源连接 ' + (d.federated_instances != null ? d.federated_instances : 0)
+    + '（预计联邦读 ' + (d.total_federated_reads != null ? d.total_federated_reads : 0) + ' 次）</div>'
+    + '<div class="text-slate-400">' + esc(d.cost_hint || '') + '</div>'
+    + '<div class="text-slate-500">派生值仅落派生图（非权威），不写权威实例存储、不写回源系统；可取消。</div>';
+}
+
+// M4-A④ 成本确认流：未确认 → 409 COST_CONFIRMATION_REQUIRED → 展示提示 → 用户确认后带 cost_confirmed 重试
+async function capExecuteSingle(forceConfirmed) {
   const capId = await capResolveName();
   if (!capId) return;
   const instanceId = ($('capExecInstanceId').value || '').trim();
   if (!instanceId) { toast('填写实例 record_id', 'err'); return; }
+  const body = { instance_id: instanceId, channel: 'ui', trigger_source: 'manual' };
+  if (forceConfirmed) body.cost_confirmed = true;
   try {
-    const j = await api('/api/capabilities/' + capId + '/execute', {
-      method: 'POST', body: { instance_id: instanceId, channel: 'ui', trigger_source: 'manual' },
-    });
+    const j = await api('/api/capabilities/' + capId + '/execute', { method: 'POST', body });
     capRenderExecResult(j.data);
   } catch (e) {
+    if (e.code === 'COST_CONFIRMATION_REQUIRED' && !forceConfirmed) {
+      $('capExecResult').innerHTML = capFedPreviewHtml(e.details);
+      if (confirm('确认按上述成本执行？（取消则不执行）')) capExecuteSingle(true);
+      return;
+    }
     $('capExecResult').innerHTML = '<div class="text-rose-400">' + esc(e.message) + (e.code ? '（' + esc(e.code) + '）' : '') + '</div>';
   }
 }
 
-async function capExecuteBatch() {
+async function capExecuteBatch(forceConfirmed) {
   const capId = await capResolveName();
   if (!capId) return;
   const body = {
@@ -6219,9 +6238,30 @@ async function capExecuteBatch() {
     trigger_source: 'batch',
     dry_run: !!($('capBatchDryRun').checked),
   };
+  if (forceConfirmed) body.cost_confirmed = true;
   try {
     const j = await api('/api/capabilities/' + capId + '/execute-batch', { method: 'POST', body });
     capRenderBatch(j.data);
+  } catch (e) {
+    if (e.code === 'COST_CONFIRMATION_REQUIRED' && !forceConfirmed) {
+      $('capBatchSummary').textContent = '';
+      $('capBatchBody').innerHTML = '<tr><td colspan="6" class="p-3">' + capFedPreviewHtml(e.details) + '</td></tr>';
+      if (confirm('确认按上述成本执行？（取消则不执行）')) capExecuteBatch(true);
+      return;
+    }
+    $('capBatchSummary').textContent = '';
+    $('capBatchBody').innerHTML = '<tr><td colspan="6" class="p-3 text-rose-400">' + esc(e.message) + '</td></tr>';
+  }
+}
+
+async function capPreviewCost() {
+  const capId = await capResolveName();
+  if (!capId) return;
+  const body = { limit: parseInt($('capBatchLimit').value, 10) || 100 };
+  try {
+    const j = await api('/api/capabilities/' + capId + '/execute/preview', { method: 'POST', body });
+    $('capBatchSummary').textContent = '';
+    $('capBatchBody').innerHTML = '<tr><td colspan="6" class="p-3">' + capFedPreviewHtml(j.data) + '</td></tr>';
   } catch (e) {
     $('capBatchSummary').textContent = '';
     $('capBatchBody').innerHTML = '<tr><td colspan="6" class="p-3 text-rose-400">' + esc(e.message) + '</td></tr>';
@@ -6236,15 +6276,22 @@ function capRenderExecResult(r) {
     '　<span class="text-slate-400">实例：</span><span class="font-mono">' + esc(r.instance_id || '') + '</span></div>' +
     '<div class="mb-1 text-lg font-medium ' + (ok ? 'text-emerald-400' : 'text-rose-400') + '">' +
       (ok ? 'value = ' + capFmtValue(r.value) : 'error: ' + esc(r.error_code || '') + ' — ' + esc(r.error_message || '')) + '</div>' +
-    '<div class="text-slate-400 mb-1">' + capTraceHtml(r.trace) + '</div>' +
-    '<pre class="font-mono text-slate-500 whitespace-pre-wrap max-h-40 overflow-y-auto">' + esc(JSON.stringify(r.trace, null, 1)) + '</pre>';
+    '<div class="text-slate-400 mb-1">' + capTraceHtml(r.trace) + '</div>'
+    + (r.federated ? '<div class="text-amber-300 mb-1">联邦读：' + esc(r.federated.connection_name || r.federated.source_connection || '')
+      + '（渠道 ' + esc(r.federated.resolved_as || '?') + '，取数 ' + esc(r.federated.fetched_at || '?') + '）</div>' : '')
+    + (r.derived ? '<div class="text-sky-300 mb-1">派生值（非权威，存派生图）：' + esc(r.derived.id || '')
+      + ' — ' + esc(r.derived.note || '') + '</div>' : '')
+    + '<pre class="font-mono text-slate-500 whitespace-pre-wrap max-h-40 overflow-y-auto">' + esc(JSON.stringify(r.trace, null, 1)) + '</pre>';
 }
 
 function capRenderBatch(r) {
   $('capBatchSummary').innerHTML =
     'v' + esc(r.capability_version || '?') + '　共 ' + r.total + ' · 成功 ' + r.success +
-    ' · 错误 ' + r.error + ' · <span class="text-amber-300">null ' + (r.null != null ? r.null : 0) + '</span>' +
-    (r.dry_run ? ' · <span class="text-slate-400">dry_run 未写回</span>' : '') + ' · ' + r.duration_ms + 'ms';
+    ' · 错误 ' + r.error + ' · <span class="text-amber-300">null ' + (r.null != null ? r.null : 0) + '</span>'
+    + (r.federated ? ' · 联邦读 ' + r.federated.success + '/' + r.federated.required
+      + (r.federated.failed ? ' <span class="text-rose-400">源失败 ' + r.federated.failed + '</span>' : '') : '')
+    + (r.partial_failure ? ' <span class="text-amber-300">部分源失败（失败实例无值、不产生半口径）</span>' : '')
+    + (r.dry_run ? ' · <span class="text-slate-400">dry_run 未写回</span>' : '') + ' · ' + r.duration_ms + 'ms';
   const tb = $('capBatchBody');
   if (!r.items || !r.items.length) {
     tb.innerHTML = '<tr><td colspan="6" class="p-3 text-center text-slate-500">无实例</td></tr>';
@@ -6253,8 +6300,10 @@ function capRenderBatch(r) {
   tb.innerHTML = r.items.map(it =>
     '<tr class="border-b border-slate-700/40 align-top">' +
       '<td class="p-1.5 font-mono text-slate-400">' + esc(String(it.instance_id || '').slice(0, 12)) + '…</td>' +
-      '<td class="p-1.5 ' + (it.status === 'success' ? 'text-emerald-400' : 'text-rose-400') + '">' + esc(it.status) + '</td>' +
-      '<td class="p-1.5 font-mono">' + capFmtValue(it.value) + '</td>' +
+      '<td class="p-1.5 ' + (it.status === 'success' ? 'text-emerald-400' : 'text-rose-400') + '">' + esc(it.status)
+      + (it.derived ? ' <span class="text-sky-300">派生</span>' : '') + '</td>' +
+      '<td class="p-1.5 font-mono">' + capFmtValue(it.value)
+      + (it.source_system ? '<div class="text-slate-600 text-[10px]">' + esc(it.source_system) + '</div>' : '') + '</td>' +
       '<td class="p-1.5 text-slate-400">' + (it.error_code ? esc(it.error_code) + '<div class="text-slate-600">' + esc(it.error_message || '') + '</div>' : '-') + '</td>' +
       '<td class="p-1.5">' + esc(it.capability_version || '') + '</td>' +
       '<td class="p-1.5 text-slate-400">' + capTraceHtml(it.trace) + '</td></tr>'

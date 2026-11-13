@@ -6,9 +6,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi import status as http_status
 
+import audit as audit_svc
 from api.dependencies import project_id_param
 from capabilities import CapabilityApiError, CapabilityService
 from core.responses import ApiError, list_payload, success
@@ -18,7 +19,9 @@ from schemas.capability import (
     CapabilityExecute,
     CapabilityExecuteBatch,
     CapabilityUpdate,
+    FederatedPreview,
 )
+from tenant import current_user
 
 router = APIRouter(prefix="/api/capabilities", tags=["capabilities"])
 logger = get_logger("api.capabilities")
@@ -151,25 +154,36 @@ def api_affected_instances(
 
 
 # --------------------------------------------------------------------------- #
-# 执行（单实例 / 批量 + 四要素溯源 + 写回）
+# 执行（单实例 / 批量 + 四要素溯源 + 写回；M4-A④ 源连接型服务端联邦读 + 成本确认）
 # --------------------------------------------------------------------------- #
 @router.post("/{cap_id}/execute")
-def api_execute_capability(cap_id: str, payload: CapabilityExecute, project_id: str = Depends(project_id_param)):
+def api_execute_capability(
+    cap_id: str, payload: CapabilityExecute, request: Request,
+    project_id: str = Depends(project_id_param),
+):
+    user = current_user(request) or {}
     try:
         res = _svc(project_id).execute(
             cap_id, payload.instance_id, channel=payload.channel,
             trigger_source=payload.trigger_source, dry_run=payload.dry_run,
-            inputs=payload.inputs,
+            inputs=payload.inputs, federated=payload.federated,
+            cost_confirmed=payload.cost_confirmed, user_id=user.get("id"),
         )
     except CapabilityApiError as e:
         _raise_api(e)
+    audit_svc.record_from_request(request, "capability_execute", project_id=project_id,
+                                  target_type="capability", target_id=cap_id,
+                                  detail={"instance_id": payload.instance_id,
+                                          "federated": bool(res.get("federated"))})
     return success(res)
 
 
 @router.post("/{cap_id}/execute-batch")
 def api_execute_batch_capability(
-    cap_id: str, payload: CapabilityExecuteBatch, project_id: str = Depends(project_id_param),
+    cap_id: str, payload: CapabilityExecuteBatch, request: Request,
+    project_id: str = Depends(project_id_param),
 ):
+    user = current_user(request) or {}
     try:
         res = _svc(project_id).execute_batch(
             cap_id,
@@ -179,7 +193,52 @@ def api_execute_batch_capability(
             channel=payload.channel,
             trigger_source=payload.trigger_source,
             dry_run=payload.dry_run,
+            federated=payload.federated,
+            cost_confirmed=payload.cost_confirmed,
+            user_id=user.get("id"),
         )
     except CapabilityApiError as e:
         _raise_api(e)
+    audit_svc.record_from_request(request, "capability_execute_batch", project_id=project_id,
+                                  target_type="capability", target_id=cap_id,
+                                  detail={"total": res.get("total"),
+                                          "federated": res.get("federated"),
+                                          "partial_failure": res.get("partial_failure")})
     return success(res)
+
+
+@router.post("/{cap_id}/execute/preview")
+def api_preview_federated_cost(
+    cap_id: str, payload: FederatedPreview, request: Request,
+    project_id: str = Depends(project_id_param),
+):
+    """TP-04-06：批量联邦读成本预览（执行前提示、可取消；纯只读、不产生任何写）。"""
+    try:
+        res = _svc(project_id).preview_federated_cost(
+            cap_id, limit=payload.limit, offset=payload.offset,
+            instance_ids=payload.instance_ids,
+        )
+    except CapabilityApiError as e:
+        _raise_api(e)
+    audit_svc.record_from_request(request, "capability_federated_preview", project_id=project_id,
+                                  target_type="capability", target_id=cap_id,
+                                  detail={"systems": res.get("systems"),
+                                          "total_federated_reads": res.get("total_federated_reads")})
+    return success(res)
+
+
+@router.get("/{cap_id}/derived")
+def api_list_derived(
+    cap_id: str,
+    instance_id: Optional[str] = Query(default=None, max_length=64),
+    object_type: Optional[str] = Query(default=None, max_length=64),
+    limit: int = Query(default=100, ge=1, le=1000),
+    project_id: str = Depends(project_id_param),
+):
+    """TP-04-06：派生图查询（派生值非权威，仅可查；不写权威实例存储、不写回源系统）。"""
+    try:
+        items = _svc(project_id).list_derived(
+            cap_id, instance_id=instance_id, object_type=object_type, limit=limit)
+    except CapabilityApiError as e:
+        _raise_api(e)
+    return success(list_payload(items, len(items), 1, len(items)))

@@ -26,6 +26,9 @@ from core.instance_store import get_instance_store
 from core.storage import JsonStore
 from logging_setup import get_logger
 
+import content_access
+from content_access import is_federated
+
 from .expr_eval import EvalContext, TraceCollector, evaluate
 from .expr_parser import (
     E_AMBIGUOUS, ExprError, extract_attr_refs, extract_refs, parse, validate,
@@ -37,6 +40,9 @@ KINDS = ("derive", "assert", "act")
 IMPLEMENTATIONS = ("expression", "decision_table", "script", "external")
 STATUSES = ("draft", "active", "deprecated")
 CHANNELS = ("ui", "api", "mcp")
+
+# V2-04 源连接型渠道（M4-A④ / TP-04-06）：派生值落派生图，不落权威实例存储、不写回源系统
+DERIVED_NOTE = "派生数据，非权威（存派生图；不写权威实例存储，不写回源系统）"
 
 
 class CapabilityApiError(Exception):
@@ -95,6 +101,8 @@ class CapabilityService:
         self.project_id = project_id
         self._store = JsonStore("capabilities", project_id)
         self._instances = get_instance_store(project_id)
+        # M4-A④ TP-04-06：派生图（派生值非权威存储；不写实例存储、不写回源系统）
+        self._derived = JsonStore("derived_values", project_id)
 
     # ------------------------------------------------------------------
     # 查询
@@ -627,7 +635,10 @@ class CapabilityService:
     def execute(self, cap_id: str, instance_id: str, channel: str = "api",
                 trigger_source: str = "manual", mcp_only: bool = False,
                 dry_run: bool = False,
-                inputs: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+                inputs: Optional[dict[str, Any]] = None,
+                federated: Optional[bool] = None,
+                cost_confirmed: bool = False,
+                user_id: Optional[str] = None) -> dict[str, Any]:
         rec = self._store.get(cap_id)
         if not rec:
             raise CapabilityApiError("NOT_FOUND", "能力不存在", 404)
@@ -642,6 +653,23 @@ class CapabilityService:
             raise CapabilityApiError("TYPE_MISMATCH",
                                      f"实例对象类型 {inst_record.get('object_type')} 与能力目标 {rec.get('object_type')} 不符",
                                      422)
+        # M4-A④ TP-04-06：源连接型渠道——平台服务端联邦读（默认按实例渠道自动判定）
+        fed_channel = is_federated(self.project_id, inst_record)
+        use_federated = fed_channel if federated is None else bool(federated)
+        fed_meta: Optional[dict[str, Any]] = None
+        if use_federated and not dry_run and inputs is None:
+            # 显式 inputs 走 M1-E 外部覆盖模式（外部 Agent 自行联邦读），平台不再代读
+            if not fed_channel:
+                raise CapabilityApiError("CHANNEL_MISMATCH",
+                                         "实例为上传型（本地值），不适用源连接联邦渠道", 422)
+            if not cost_confirmed:
+                prev = self.preview_federated_cost(cap_id, instance_ids=[instance_id])
+                raise CapabilityApiError(
+                    "COST_CONFIRMATION_REQUIRED",
+                    "源连接型实例执行前需确认联邦读成本（先展示成本提示，再以 cost_confirmed=true 重试；可取消）",
+                    409, details=prev)
+            attrs = self._required_attrs(rec)
+            inputs, fed_meta = self._federate_input(inst_record, attrs, user_id)
         # M1-E / TCE2E-01：联邦读结果只作为本次计算的临时输入覆盖（不落地为实例内容），
         # 写回仍基于原始 inst_record，只写 output_attribute 与 __capability__ 元数据。
         effective = inst_record
@@ -653,10 +681,26 @@ class CapabilityService:
         if inputs is not None:
             res["input_overrides"] = {k: v for k, v in inputs.items()}
             res["data_gaps"] = sorted(k for k, v in inputs.items() if v is None)
-            res["input_source"] = "federated_read_override"
+            res["input_source"] = ("server_federated_read" if fed_meta is not None
+                                   else "federated_read_override")
             res["inputs_persisted"] = False
+        if fed_meta is not None:
+            self._annotate_trace_federated(res, fed_meta)
+            res["federated"] = {
+                "source_connection": fed_meta.get("source_connection"),
+                "connection_name": fed_meta.get("connection_name"),
+                "resolved_as": fed_meta.get("resolved_as"),
+                "fetched_at": fed_meta.get("fetched_at"),
+                "as_of": fed_meta.get("as_of"),
+                "mode": fed_meta.get("mode"),
+            }
         if not dry_run:
-            self._write_back(rec, inst_record, res, channel, trigger_source)
+            if use_federated and fed_meta is not None:
+                # TP-04-06：派生值落派生图（失败不落派生值；不写权威实例存储、不写回源系统）
+                res["derived"] = (self._save_derived(rec, inst_record, res, fed_meta, trigger_source)
+                                  if res.get("status") == "success" else None)
+            else:
+                self._write_back(rec, inst_record, res, channel, trigger_source)
         else:
             res["dry_run"] = True
         return res
@@ -664,7 +708,10 @@ class CapabilityService:
     def execute_batch(self, cap_id: str, limit: int = 1000, offset: int = 0,
                       instance_ids: Optional[list[str]] = None,
                       channel: str = "api", trigger_source: str = "batch",
-                      dry_run: bool = False) -> dict[str, Any]:
+                      dry_run: bool = False,
+                      federated: Optional[bool] = None,
+                      cost_confirmed: bool = False,
+                      user_id: Optional[str] = None) -> dict[str, Any]:
         rec = self._store.get(cap_id)
         if not rec:
             raise CapabilityApiError("NOT_FOUND", "能力不存在", 404)
@@ -695,23 +742,73 @@ class CapabilityService:
                 records = [r for r in records
                            if (r.get("ontology_id") or cap_oid) == cap_oid]
 
+        # M4-A④ TP-04-06 / EP-04-03：批量联邦读——执行前成本提示（可取消）；
+        # 部分源系统失败 → 失败实例显式标记，不产生半口径结果（失败实例无值、无派生值）。
+        fed_recs = [r for r in records if is_federated(self.project_id, r)]
+        use_federated = bool(fed_recs) if federated is None else bool(federated)
+        if use_federated and not dry_run and fed_recs and not cost_confirmed:
+            prev = self.preview_federated_cost(cap_id, limit=limit, offset=offset,
+                                               instance_ids=instance_ids)
+            raise CapabilityApiError(
+                "COST_CONFIRMATION_REQUIRED",
+                "存在源连接型实例，批量执行前需确认联邦读成本；展示成本提示后以 cost_confirmed=true 重试（可取消）",
+                409, details=prev)
+        attrs = self._required_attrs(rec) if (use_federated and fed_recs) else []
+
         items: list[dict[str, Any]] = []
         lookup_cache: dict[str, list] = {}
         n_success = n_error = n_null = 0
+        n_fed_success = n_fed_failed = 0
+        fed_system_stats: dict[str, dict[str, Any]] = {}
         for irec in records:
-            res = self._execute_one(rec, irec, channel, lookup_cache)
+            effective = irec
+            fed_meta: Optional[dict[str, Any]] = None
+            if use_federated and is_federated(self.project_id, irec):
+                try:
+                    inputs, fed_meta = self._federate_input(irec, attrs, user_id)
+                except CapabilityApiError as e:
+                    # EP-04-03：单实例回源失败 → 标记失败实例，不产生半口径结果
+                    n_fed_failed += 1
+                    cid, cname = self._fed_conn_info(irec)
+                    st = fed_system_stats.setdefault(
+                        cid, {"connection_id": cid, "name": cname, "ok": 0, "failed": 0})
+                    st["failed"] += 1
+                    items.append({
+                        "instance_id": irec.get("id"),
+                        "status": "federated_failed",
+                        "value": None,
+                        "error_code": e.code,
+                        "error_message": e.message,
+                        "capability_version": rec.get("version"),
+                        "federated": {"source_connection": cid},
+                    })
+                    continue
+                merged_instance = dict(irec.get("instance") or {})
+                merged_instance.update(inputs)
+                effective = {**irec, "instance": merged_instance}
+            res = self._execute_one(rec, effective, channel, lookup_cache)
             if res["status"] == "success":
                 n_success += 1
                 if res.get("value") is None:
                     n_null += 1
             else:
                 n_error += 1
+            derived_entry: Optional[dict[str, Any]] = None
             if not dry_run:
-                self._write_back(rec, irec, res, channel, trigger_source)
-                # 缓存键已带 ontology_id，按对象类型清除所有本体分区
-                for k in [k for k in lookup_cache if k[0] == rec.get("object_type")]:
-                    lookup_cache.pop(k, None)
-            items.append({
+                if fed_meta is not None:
+                    if res.get("status") == "success":
+                        n_fed_success += 1
+                        derived_entry = self._save_derived(rec, irec, res, fed_meta, trigger_source)
+                    cid, cname = self._fed_conn_info(irec)
+                    st = fed_system_stats.setdefault(
+                        cid, {"connection_id": cid, "name": cname, "ok": 0, "failed": 0})
+                    st["ok"] += 1
+                else:
+                    self._write_back(rec, irec, res, channel, trigger_source)
+                    # 缓存键已带 ontology_id，按对象类型清除所有本体分区
+                    for k in [k for k in lookup_cache if k[0] == rec.get("object_type")]:
+                        lookup_cache.pop(k, None)
+            item = {
                 "instance_id": irec.get("id"),
                 "status": res["status"],
                 "value": res.get("value"),
@@ -719,7 +816,17 @@ class CapabilityService:
                 "error_message": res.get("error_message"),
                 "capability_version": res.get("capability_version"),
                 "trace": res.get("trace"),
-            })
+            }
+            if fed_meta is not None:
+                self._annotate_trace_federated(res, fed_meta)
+                item["source_system"] = fed_meta.get("connection_name")
+                item["fetched_at"] = fed_meta.get("fetched_at")
+                item["federated"] = {
+                    "source_connection": fed_meta.get("source_connection"),
+                    "resolved_as": fed_meta.get("resolved_as"),
+                }
+                item["derived"] = derived_entry
+            items.append(item)
         duration_ms = int((time.monotonic() - started) * 1000)
         return {
             "capability_id": rec.get("id"),
@@ -734,7 +841,173 @@ class CapabilityService:
             "execution_channel": channel,
             "duration_ms": duration_ms,
             "items": items,
+            "federated": {
+                "required": len(fed_recs),
+                "success": n_fed_success,
+                "failed": n_fed_failed,
+                "systems": list(fed_system_stats.values()),
+            },
+            "partial_failure": n_fed_failed > 0,
         }
+
+    # ------------------------------------------------------------------
+    # V2-04 渠道适配 · 源连接型（M4-A④：TP-04-06 / EP-04-03）
+    # ------------------------------------------------------------------
+
+    def _required_attrs(self, rec: dict[str, Any]) -> list[str]:
+        """表达式静态引用的 this.<attr> 属性集（批量联邦读所需属性）。"""
+        try:
+            prog = parse(rec.get("expression", ""))
+            return sorted(extract_attr_refs(prog))
+        except ExprError:
+            return []
+
+    def _federate_input(self, irec: dict[str, Any], attrs: list[str],
+                        user_id: Optional[str] = None) -> tuple[dict[str, Any], dict[str, Any]]:
+        """严格模式联邦读（TP-04-06）：仅 mode=federated 视为成功。
+
+        回退底（legacy_local/fallback/无键）不作为能力输入——
+        静默使用降级值会产半口径结果（EP-04-03），故失败一律上抛由调用方标记。
+        """
+        values, meta = content_access.federate_values(
+            self.project_id, irec, user_id=user_id, attr_ids=attrs or None)
+        if meta.get("error") or meta.get("mode") != "federated":
+            raise CapabilityApiError(
+                "CONTENT_UNAVAILABLE",
+                f"联邦读失败（源连接不可用/无此键，mode={meta.get('mode')}）: "
+                f"{meta.get('error') or '源端无此键'}",                 422,
+                details={"mode": meta.get("mode"),
+                         "connection_id": content_access.connection_id_of(irec)})
+        return values, meta
+
+    def _annotate_trace_federated(self, res: dict[str, Any], meta: dict[str, Any]) -> None:
+        """溯源原始值：联邦读输入补记 源系统 + fetched_at（TP-04-06 原始值溯源）。"""
+        trace = res.get("trace") or {}
+        for entry in trace.get("inputs") or []:
+            entry["source_channel"] = "federated_read"
+            entry["source_system"] = meta.get("connection_name")
+            entry["resolved_as"] = meta.get("resolved_as")
+            entry["fetched_at"] = meta.get("fetched_at")
+        trace["federated"] = {
+            "resolved_as": meta.get("resolved_as"),
+            "fetched_at": meta.get("fetched_at"),
+            "as_of": meta.get("as_of"),
+        }
+
+    def _fed_conn_info(self, irec: dict[str, Any]) -> tuple[str, Optional[str]]:
+        """实例来源连接（连接信息存于 instance._source.connection_id）→ (connection_id, 显示名)。"""
+        cid = content_access.connection_id_of(irec) or "unknown"
+        name = None
+        if cid != "unknown":
+            conn = content_access._load_connection(self.project_id, cid)
+            if conn:
+                name = conn.get("display_name") or conn.get("name")
+        return cid, name
+
+    def preview_federated_cost(self, cap_id: str, limit: int = 1000, offset: int = 0,
+                               instance_ids: Optional[list[str]] = None) -> dict[str, Any]:
+        """TP-04-06：批量联邦读成本预览（执行前提示、可取消——纯只读，不产生任何写）。
+
+        键集→所需属性＋按源系统分组的读取次数估算；confirm_required=True 时
+        执行端点要求 cost_confirmed=true。
+        """
+        rec = self._store.get(cap_id)
+        if not rec:
+            raise CapabilityApiError("NOT_FOUND", "能力不存在", 404)
+        if instance_ids:
+            records = []
+            missing = []
+            for iid in instance_ids:
+                r = self._instances.get(iid)
+                if r is None or r.get("object_type") != rec.get("object_type"):
+                    missing.append(iid)
+                else:
+                    records.append(r)
+            if missing:
+                raise CapabilityApiError("INSTANCE_NOT_FOUND", f"实例不存在或类型不符: {missing[:5]}", 404)
+        else:
+            records = self._instances.find(
+                object_type=rec.get("object_type"),
+                filters={"project_id": self.project_id},
+                limit=limit, offset=offset,
+            )
+            cap_oid = rec.get("ontology_id")
+            if cap_oid:
+                records = [r for r in records
+                           if (r.get("ontology_id") or cap_oid) == cap_oid]
+        attrs = self._required_attrs(rec)
+        systems: dict[str, dict[str, Any]] = {}
+        n_local = 0
+        for r in records:
+            if is_federated(self.project_id, r):
+                cid, cname = self._fed_conn_info(r)
+                st = systems.setdefault(
+                    cid, {"connection_id": cid, "name": cname, "instances": 0})
+                st["instances"] += 1
+            else:
+                n_local += 1
+        total_reads = sum(s["instances"] for s in systems.values())
+        return {
+            "capability_id": cap_id,
+            "capability_name": rec.get("name"),
+            "capability_version": rec.get("version"),
+            "object_type": rec.get("object_type"),
+            "total_instances": len(records),
+            "local_instances": n_local,
+            "federated_instances": total_reads,
+            "systems": list(systems.values()),
+            "required_attrs": attrs,
+            "total_federated_reads": total_reads,
+            "est_scale": total_reads * max(len(attrs), 1),
+            "confirm_required": total_reads > 0,
+            "cancelable": True,
+            "cost_hint": (
+                f"批量执行需 {total_reads} 次联邦读（跨 {len(systems)} 个源连接）；"
+                "读取受源端权限与限速约束，确认后方可执行（可直接取消）。"
+                if total_reads else
+                "无源连接型实例，全部本地渠道计算，无联邦读成本。"),
+        }
+
+    def list_derived(self, cap_id: str, instance_id: Optional[str] = None,
+                     object_type: Optional[str] = None, limit: int = 100) -> list[dict[str, Any]]:
+        """派生图查询（TP-04-06）：派生值非权威，仅可查不可作为权威内容。"""
+        rec = self._store.get(cap_id)
+        if not rec:
+            raise CapabilityApiError("NOT_FOUND", "能力不存在", 404)
+        rows = [r for r in self._derived.all() if r.get("capability_id") == cap_id]
+        if instance_id:
+            rows = [r for r in rows if r.get("instance_id") == instance_id]
+        if object_type:
+            rows = [r for r in rows if r.get("object_type") == object_type]
+        rows.sort(key=lambda r: r.get("executed_at") or "", reverse=True)
+        return rows[:limit]
+
+    def _save_derived(self, rec: dict[str, Any], irec: dict[str, Any], res: dict[str, Any],
+                      meta: dict[str, Any], trigger_source: str) -> dict[str, Any]:
+        """TP-04-06：派生值落派生图（不落权威实例存储、不写回源系统）。"""
+        ts = (res.get("executed_at") or _now()).replace("T", "").replace(":", "")[:15]
+        dv = {
+            "id": f"dv_{rec.get('id')}_{irec.get('id')}_{ts}",
+            "capability_id": rec.get("id"),
+            "capability_version": rec.get("version"),
+            "instance_id": irec.get("id"),
+            "object_type": rec.get("object_type"),
+            "output_attribute": rec.get("output_attribute"),
+            "value": res.get("value"),
+            "derived": True,
+            "authoritative": False,
+            "derived_note": DERIVED_NOTE,
+            "execution_channel": res.get("execution_channel"),
+            "trigger_source": trigger_source,
+            "executed_at": res.get("executed_at"),
+            "source_connection": meta.get("source_connection"),
+            "connection_name": meta.get("connection_name"),
+            "resolved_as": meta.get("resolved_as"),
+            "fetched_at": meta.get("fetched_at"),
+            "trace": res.get("trace"),
+        }
+        self._derived.insert(dv)
+        return {"id": dv["id"], "authoritative": False, "note": DERIVED_NOTE}
 
     def _write_back(self, rec: dict[str, Any], inst_record: dict[str, Any],
                     res: dict[str, Any], channel: str, trigger_source: str) -> None:
