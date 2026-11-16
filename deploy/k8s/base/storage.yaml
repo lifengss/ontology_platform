@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jena-pvc
+  namespace: ontology-platform
+  labels:
+    app.kubernetes.io/part-of: ontology-platform
+    app.kubernetes.io/component: jena
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: neo4j-pvc
+  namespace: ontology-platform
+  labels:
+    app.kubernetes.io/part-of: ontology-platform
+    app.kubernetes.io/component: neo4j
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: ontology-platform
+  labels:
+    app.kubernetes.io/part-of: ontology-platform
+    app.kubernetes.io/component: postgres
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+# 后端本地文件型存储（jsonl 后端）共享卷：多副本收敛 pg 后此卷仅供单副本/演示使用。
+# 若多副本且 INSTANCE_STORE_BACKEND=jsonl，需 ReadWriteMany（NFS/cephfs），并配跨副本锁。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backend-data-pvc
+  namespace: ontology-platform
+  labels:
+    app.kubernetes.io/part-of: ontology-platform
+    app.kubernetes.io/component: backend
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi

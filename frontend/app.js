@@ -1056,7 +1056,7 @@ function switchTab(name) {
     });
   }
   if (name === 'alignment') { alignLoadDecls(); alignDetect(); fuLoad(); }
-  if (name === 'mcp') { loadMcpOntologies(1); loadMcpTools(); loadMcpToken(); }
+  if (name === 'mcp') { loadMcpOntologies(1); loadMcpTools(); loadMcpToken(); loadMcpToolConfig(); }
   if (name === 'logs') { loadServerLogs(); }
   if (name === 'settings') { loadLLMSettings(); }
   if (name === 'users') { loadAuthUsers(); loadAuthAudit(); }
@@ -1625,15 +1625,85 @@ function startCreate() {
   globalConstraintRows = [];
   setEditorMode('form');
   renderObjectForms();
+  resetTemplatePanel();
+}
+
+function resetTemplatePanel() {
+  const url = $('tplUrl');
+  if (url) url.value = '';
+  const err = $('tplError');
+  if (err) { err.classList.add('hidden'); err.textContent = ''; }
+  const pv = $('tplPreview');
+  if (pv) pv.classList.add('hidden');
+  const sis = $('tplName');
+  if (sis) sis.value = '';
+  state.externalTpl = null;
+}
+
+async function previewExternalTemplate() {
+  const url = ($('tplUrl').value || '').trim();
+  if (!url) { _tplError('请填写模板 URL'); return; }
+  const err = $('tplError');
+  err.classList.add('hidden');
+  try {
+    const j = await api('/api/templates/preview-external', { method: 'POST', body: JSON.stringify({ url }) });
+    state.externalTpl = j.data;
+    _renderTplPreview(j.data);
+  } catch (e) {
+    _tplError(e.message || '模板加载失败');
+  }
+}
+
+function _tplError(msg) {
+  const err = $('tplError');
+  err.textContent = msg;
+  err.classList.remove('hidden');
+  $('tplPreview').classList.add('hidden');
+}
+
+function _renderTplPreview(pv) {
+  const summary = $('tplSummary');
+  summary.textContent = (pv.name || '（未命名模板）') + ' · ' + pv.object_count + ' 个对象';
+  const cont = $('tplObjects');
+  cont.innerHTML = (pv.objects || []).map(o =>
+    '<div class="card p-3 border border-slate-700">' +
+      '<div class="flex justify-between items-center mb-1"><span class="font-medium text-sm">' + esc(o.name) + '</span><span class="text-xs text-slate-500">' + o.id + '</span></div>' +
+      (o.business_definition ? '<div class="text-xs text-slate-400 mb-2">' + esc(o.business_definition) + '</div>' : '') +
+      '<div class="text-xs text-slate-400">稳定键：' + (o.stable_key || '—') + '</div>' +
+      '<div class="mt-2 flex flex-wrap gap-1">' + (o.attributes || []).map(a =>
+        '<span class="badge slate" title="' + esc(a.name) + '">' + esc(a.name) + ':' + esc(a.data_type) + (a.required ? '*' : '') + '</span>').join('') + '</div>' +
+      ((o.relations || []).length ? '<div class="mt-2 text-xs text-slate-400">关系：' + (o.relations || []).map(r => esc(r.name) + '→' + esc(r.target_object)).join('、') + '</div>' : '') +
+    '</div>'
+  ).join('');
+  $('tplPreview').classList.remove('hidden');
+}
+
+async function instantiateExternalTemplate() {
+  const url = ($('tplUrl').value || '').trim();
+  if (!url) { _tplError('请填写模板 URL'); return; }
+  const name = ($('tplName').value || '').trim();
+  try {
+    $('btnTplInst').disabled = true;
+    const j = await api('/api/templates/instantiate-external', { method: 'POST', body: JSON.stringify({ url, name: name || null }) });
+    const ov = j.data;
+    toast('已从外部模板实例化本体草稿: ' + (ov.name || ov.id), 'ok');
+    selectOntology(ov);
+  } catch (e) {
+    _tplError(e.message || '实例化失败');
+  } finally {
+    $('btnTplInst').disabled = false;
+  }
 }
 
 function closeEditor() { $('editorCard').classList.add('hidden'); state.editingId = null; }
 
 function setEditorMode(mode) {
   state.editorMode = mode;
-  ['form', 'ai', 'doc'].forEach(m => {
-    $('mode' + m[0].toUpperCase() + m.slice(1)).classList.toggle('hidden', m !== mode);
-    $('subtab' + m[0].toUpperCase() + m.slice(1)).classList.toggle('active', m === mode);
+  ['form', 'ai', 'doc', 'template'].forEach(m => {
+    const pan = $('mode' + m[0].toUpperCase() + m.slice(1));
+    const tab = $('subtab' + m[0].toUpperCase() + m.slice(1));
+    if (pan) pan.classList.toggle('hidden', m !== mode);
+    if (tab) tab.classList.toggle('active', m === mode);
   });
 }
 
@@ -4321,13 +4391,81 @@ async function loadMcpTools() {
     const tools = j.data || [];
     const el = $('mcpToolsList');
     if (!tools.length) { el.innerHTML = '<div class="text-sm text-slate-500">暂无工具</div>'; return; }
-    el.innerHTML = tools.map(t => '<div class="p-2 rounded-lg border border-slate-700/50 cursor-pointer hover:bg-slate-800/40" onclick="showMcpExample(' + JSON.stringify(t).replace(/"/g, '&quot;') + ')">' +
-      '<div class="flex justify-between"><span class="text-sm font-medium">' + esc(t.name) + '</span><span class="text-xs ' + (t.side_effect ? 'text-red-400' : 'text-emerald-400') + '">' + (t.side_effect ? '有副作用' : '只读') + '</span></div>' +
-      '<div class="text-xs text-slate-400">' + esc(t.description || '') + '</div>' +
-      '<div class="text-xs text-slate-500 mt-1">读: ' + (t.reads || []).join(', ') + ' · 写: ' + (t.writes || []).join(', ') + '</div>' +
-    '</div>').join('');
+    // M4-K（P0）：工具目录卡片——完整契约（描述/读/写/前置/后置）+ 有副作用警示。
+    // 点卡片头部的「示例」进入调用示例；用 <details> 展开完整读写/前置后置边界。
+    el.innerHTML = tools.map(t => {
+      const danger = t.side_effect ? 'text-red-400 border-red-500/40 bg-red-500/5' : 'text-emerald-400 border-emerald-500/40';
+      const reads = (t.reads || []).length ? t.reads.map(esc).join('<br>- ') : '<span class="text-slate-500">—</span>';
+      const writes = (t.writes || []).length ? t.writes.map(esc).join('<br>- ') : '<span class="text-slate-500">—</span>';
+      const pre = (t.preconditions || []).length ? t.preconditions.map(esc).join('<br>- ') : '<span class="text-slate-500">—</span>';
+      const post = (t.postconditions || []).length ? t.postconditions.map(esc).join('<br>- ') : '<span class="text-slate-500">—</span>';
+      return '<div class="rounded-lg border border-slate-700/50 overflow-hidden">' +
+        '<div class="p-2 flex items-center justify-between gap-2 bg-slate-800/30">' +
+          '<span class="text-sm font-medium">' + esc(t.name) + '</span>' +
+          '<div class="flex items-center gap-2">' +
+            '<span class="text-xs ' + (t.side_effect ? 'text-red-400' : 'text-emerald-400') + '">' + (t.side_effect ? '⚠ 有副作用' : '🔒 只读') + '</span>' +
+            '<button class="btn secondary text-xs" type="button" onclick="showMcpExample(' + JSON.stringify(t).replace(/"/g, '&quot;') + ')">示例</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="p-2 text-xs text-slate-400">' + esc(t.description || '') + '</div>' +
+        '<details class="border-t border-slate-700/40">' +
+          '<summary class="p-2 text-xs text-slate-400 cursor-pointer hover:bg-slate-800/40">展开读写边界 / 前后置条件</summary>' +
+          '<div class="p-2 space-y-2 text-xs border-t border-slate-700/40">' +
+            '<div><b class="text-slate-300">读取：</b><div class="mt-0.5">' + reads + '</div></div>' +
+            '<div><b class="text-slate-300">写入：</b><div class="mt-0.5">' + writes + '</div></div>' +
+            '<div><b class="text-slate-300">前置条件：</b><div class="mt-0.5">' + pre + '</div></div>' +
+            '<div><b class="text-slate-300">后置条件：</b><div class="mt-0.5">' + post + '</div></div>' +
+          '</div>' +
+        '</details>' +
+      '</div>';
+    }).join('');
     if (tools[0]) showMcpExample(tools[0]);
   } catch (e) { toast('加载 MCP 工具失败: ' + e.message, 'err'); }
+}
+
+// ---------- 按项目工具暴露开关（M4-K P1） ----------
+let _mcpToolKeys = [];       // 当前项目全部工具名（契约顺序）
+let _mcpToolSideEffect = {}; // 工具名 -> 是否有副作用（用于警示标记）
+
+async function loadMcpToolConfig() {
+  try {
+    const j = await api('/api/mcp/server/tool-config');
+    const d = j.data || {};
+    _mcpToolKeys = d.all_tools || [];
+    const disabled = new Set(d.disabled || []);
+    // 工具目录（/api/mcp/server/tools）带 side_effect，用于开关上叠加警示
+    try {
+      const tj = await api('/api/mcp/server/tools');
+      (tj.data || []).forEach(t => { _mcpToolSideEffect[t.name] = t.side_effect; });
+    } catch (e) { /* 忽略：仅用于警示标记 */ }
+    const el = $('mcpToolConfigList');
+    if (!el) return;
+    if (!_mcpToolKeys.length) { el.innerHTML = '<div class="text-sm text-slate-500">暂无工具</div>'; return; }
+    el.innerHTML = _mcpToolKeys.map(name => {
+      const danger = _mcpToolSideEffect[name];
+      return '<label class="flex items-center gap-2 p-2 rounded-lg border border-slate-700/50 cursor-pointer hover:bg-slate-800/40">' +
+        '<input type="checkbox" class="mcp-tool-switch" data-tool="' + esc(name) + '"' + (disabled.has(name) ? '' : ' checked') + '>' +
+        '<span class="font-medium">' + esc(name) + '</span>' +
+        (danger ? '<span class="text-red-400" title="有副作用工具（写入/回写）">⚠</span>' : '') +
+      '</label>';
+    }).join('');
+  } catch (e) { toast('加载 MCP 工具开关失败: ' + e.message, 'err'); }
+}
+
+async function saveMcpToolConfig() {
+  try {
+    const enabled = Array.from(document.querySelectorAll('.mcp-tool-switch:checked'))
+      .map(sw => sw.dataset.tool).filter(Boolean);
+    const j = await api('/api/mcp/server/tool-config', { method: 'PUT', body: JSON.stringify({ enabled }) });
+    const d = j.data || {};
+    toast('已保存：启用 ' + (d.enabled || []).length + ' / 停用 ' + (d.disabled || []).length + ' 个工具', 'ok');
+    // 刷新目录（tools/list 实际列表随端点重建体现）+ 开关状态回显
+    loadMcpTools(); loadMcpToolConfig();
+  } catch (e) { toast('保存 MCP 工具开关失败: ' + e.message, 'err'); }
+}
+
+function setAllMcpTools(all) {
+  document.querySelectorAll('.mcp-tool-switch').forEach(sw => { sw.checked = all; });
 }
 
 function showMcpExample(tool) {

@@ -317,6 +317,40 @@ def server_tools():
     return success(_server.tools())
 
 
+@router.get("/server/tool-config")
+def get_tool_config(project_id: str = Depends(project_id_param)):
+    """M4-K（P1）：读取项目 MCP 工具暴露开关（enabled/disabled/all_tools）。缺省全开。"""
+    return success(_server.tool_config(project_id))
+
+
+class _ToolConfigBody(BaseModel):
+    """M4-K（P1）：工具暴露开关提交体——enabled/disabled 二选一（enabled 优先）。"""
+    enabled: list[str] | None = None
+    disabled: list[str] | None = None
+
+
+@router.put("/server/tool-config")
+def set_tool_config(
+    request: Request,
+    body: _ToolConfigBody,
+    project_id: str = Depends(project_id_param),
+):
+    """M4-K（P1）：保存项目 MCP 工具暴露开关（enabled 白名单式 / disabled 黑名单式）。
+
+    变更落审计并 _evict 即时生效：被停用工具从 tools/list 移除、tools/call 返回 not found。
+    仅影响本项目 /mcp/{pid} 端点；stdio 桥透传同受过滤。
+    """
+    actor = (current_user(request) or {}).get("username", "-")
+    result = _server.set_tool_config(project_id, enabled=body.enabled, disabled=body.disabled, actor=actor)
+    try:
+        from auth import audit as audit_event
+        audit_event("mcp_tool_config_updated", actor=actor, target=project_id,
+                    detail={"disabled": result.get("disabled"), "enabled": result.get("enabled")})
+    except Exception:  # noqa: BLE001——审计失败不阻断主流程
+        logger.warning("audit mcp_tool_config_updated 失败 project_id=%s", project_id)
+    return success(result)
+
+
 @router.post("/server/token", status_code=201)
 def generate_server_token(
     project_id: str | None = None,

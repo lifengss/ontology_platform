@@ -582,9 +582,17 @@
 | PUT | `/api/templates/{id}` | 更新模板 |
 | DELETE | `/api/templates/{id}` | 删除模板 |
 | POST | `/api/templates/{id}/instantiate` | 基于模板创建本体（复用 §2 create 校验） |
+| POST | `/api/templates/preview-external` | 加载外部 LinkML 模板并返回结构预览（V2-19） |
+| POST | `/api/templates/instantiate-external` | 外部 LinkML 模板一键实例化为本地可编辑本体（V2-19） |
 
 - 请求体/响应体与 §2 本体结构一致，模板字段：`name`、`description`、`industry`、`tags`、`model`（即 `OntologyCreate`）。
 - 内置模板（可覆盖更新）：`tpl_customer_basic`（基础客户-联系人-订单）、`tpl_product_catalog`（品类-SPU）。
+- **V2-19 外部 LinkML 模板网络加载**：
+  - `POST /api/templates/preview-external` 请求体：`{ "url": "https://example.com/supply-chain.yaml" }`（仅 http/https，禁止 file:// 等本地协议）。响应：`{ name, description, object_count, objects:[{ id, name, business_definition, stable_key, attributes:[{ id, name, data_type, required, constraints }], relations:[{ id, name, target_object, cardinality }] }], license }`；`license` 为模板中的许可声明（`license`/`license_text`/`license_url`）并入描述。
+  - `POST /api/templates/instantiate-external` 请求体：`{ "url": "...", "name": "可选覆盖本体名" }`。复用 §2 create 校验在平台 `draft` 态创建本地可编辑本体，返回 201 与本体信封（同 §2）。
+  - 错误映射（HTTP 状态）：恶意协议 `file://`→**400** `UNSAFE_SCHEME`；内容超过 5MiB→**413** `TOO_LARGE`；请求超时（10s）→**408** `TIMEOUT`；网络不可达→**502** `NETWORK`（前端提示「网络不可达」，本地模板库与表单建模仍可用）；LinkML YAML 非法/结构非法（缺 `classes`、翻译后结构校验不通过）→**422** `MALFORMED`（指出结构问题，不生成半成品本体）。
+  - 模板采用 LinkML 子集：顶层 `classes`（类→对象）、类内 `slots`/`attributes`（属性，`range` 映射平台 `data_type`，`required`/`identifier`、`pattern`/`min_length`/`max_length`/`minimum`/`maximum`/`enum` 即约束）、`license` 等许可声明；attr `range` 指向其他类 → 平台 `many_to_one` 关系。
+  - registry 挂载点（`registry_key`）为预留扩展，当前仅支持 `url`。
 
 ---
 
@@ -721,9 +729,15 @@
 | GET | `/api/capabilities/{cap_id}/versions` | 版本历史（新版在前，含表达式快照与发布时间） |
 | GET | `/api/capabilities/{cap_id}/dependents` | 引用该能力的其他能力（含锁定版本） |
 | POST | `/api/capabilities/{cap_id}/execute` | 单实例执行；body `{instance_id, channel?, trigger_source?, dry_run?, inputs?}` |
-| POST | `/api/capabilities/{cap_id}/execute-batch` | 批量执行；body `{instance_ids?|limit/offset, channel?, trigger_source?, dry_run?}` |
+| POST | `/api/capabilities/{cap_id}/execute-batch` | 批量执行；body `{instance_ids?|limit/offset, channel?, trigger_source?, dry_run?, federated?, cost_confirmed?, idempotency_key?}` |
 
 `dry_run=true` 只返回计算值，**不写回实例**；非 dry_run 写回 `output_attribute` 与 `__capability__` 元数据（`capability_id/name/version`、`executed_at`、`execution_channel`、`trigger_source`、`source_instance_id`、`execution_status`、`value`、`error_*`、`trace`、`input_overrides`、`data_gaps`、`inputs_persisted`），**源字段不覆盖**。
+
+`execute-batch`（HF-11，2026-11-16 大批量加固）：
+- **分块调度**：未传 `instance_ids` 时按 `filters`（项目 + 本体）取**全部**匹配实例（不再受 `limit=1000` 截断，避免大批量只跑前 1000 行永远执行不全）；服务端按 250 行/块内部调度，逐块执行并批量写回。`limit`/`offset` 仍用于显式分页（`offset` 为起点；`limit` 为期望返回上限）。
+- **批量写回**：非 dry_run 时写回聚合为「一次读 + 一次写」（`InstanceStore.update_many`），消除逐实例全量重写的 O(n²) IO；写回内容同单实例（`output_attribute` + `__capability__` 元数据，源字段不覆盖）。
+- **幂等键**：可选 `idempotency_key`（≤128 字符）。同一 `project_id:cap_id:key` 在 3600s 窗口内重复请求视为客户端超时重发，直接返回 `{ "idempotent": true, "idempotency_key": "...", "message": "..." }` 且**不重复调度**（防并发互锁写回）。窗口过期后自动清理，键可复用。
+- **写回重试**：底层 jsonl 写回用临时文件 + `os.replace`，Windows 瞬时文件锁（WinError 5）自动退避重试（3 次）后成功；末次仍失败才上抛。
 
 **`inputs`（M1-E / TCE2E-01，联邦读临时输入）**：外部 Agent 把 `term_lookup` 合并结果（如 PN/库存量/需求量）作为 `inputs` 传入，与本地实例字段合并后仅参与本次计算；**不落地为实例内容**（写回基于原始实例，只写结果属性与元数据）。响应附带：
 - `input_overrides`：本次覆盖的属性名与原值（溯源用）；
@@ -1518,3 +1532,227 @@ local 为缺省路径且 pyshacl 缺失时仍返回 `None`（调用方回退结�
 - `backend/tests/test_v2_17_shacl.py` **11/11**：引擎开关（GET/PUT＋非法 422＋runtime/env/default 三级优先）/ TC-17-01 双跑违规明细一致（jena 子进程路径实测，四元组逐条相同）/ TC-17-02 格式统一（422 明细 `validate_instance` 同源）/ TC-17-03 执行器不可用回退（degraded＋原因）/ 超时回退（TCE-17-02，入库门不悬空）/ jena 路径成功打标（engine=jena、degraded=false）/ TC-17-04 校验范围负向断言（非 schema 字段不入图、不产生校验）/ TC-17-05 基线 JSON 结构 / TCE-17-01 全违规批次零入库（approve → imported=0＋violations 明细完整＋实例库无记录）。
 - TC-17-05 时延/吞吐基线 `data/datasets/v2/shacl_benchmark_baseline.json`（1600 实例/9590 三元组/注入 20 条违规，3 次中位数，目标值不冻结；local 中位 976.5ms、jena 子进程中位 3372.5ms——JVM 启动＋NT 序列化开销如实记录，**不断言 Jena 快于本地**；违规明细 20/20 一致 `violations_consistent=True`）；基准脚本 `scripts/bench_v2_17_shacl.py`。
 - 回归：L5 `backend/tests` **160/160**（149 既有＋11 新增）。
+
+## 37. MCP stdio 接入（V2-18 / M4-E，2026-11-16）
+
+平台原生 MCP **stdio transport**（`backend/mcp_stdio_server.py`）：本地 AI 客户端（Cursor / Claude Desktop / WorkBuddy 等标准 stdio MCP 客户端）以**子进程**方式拉起本脚本，经 stdin/stdout 与客户端做完整 JSON-RPC 交互（`initialize` / `notifications/initialized` / `tools/list` / `tools/call`）。与 §5/§11 的 HTTP（streamable-http + sse 兼容）传输**并存**，能力集、鉴权、发布态语义完全一致。
+
+**依赖事实（2026-11-16）**：mcp SDK 2.3.0 提供 `MCPServer.run_stdio_async()`（server 侧）与 `mcp.client.stdio.stdio_client`（客户端测试驱动），无需新增依赖；stdio 子进程独立于 FastAPI，共享同一 `DATA_DIR` 与 `McpServer` 单例（`get_mcp_server()`），故工具注册/发布态/token 语义与 HTTP 天然一致。
+
+### 37.1 入口脚本与用法
+
+- 入口：`backend/mcp_stdio_server.py`（`python -X utf8 backend/mcp_stdio_server.py --project <pid> --token <mcp_token>`）。
+- 客户端 mcp.json 示例（`type: stdio`；**不要写 env 字段**——Node spawn env 为整体替换，写 env 会丢 SystemRoot，Windows 下 Python import asyncio 抛 WinError 10106，宿主只显示"连接失败"无日志）。
+- token 经命令行 `--token` 传入（MCP stdio 下无 HTTP header；平台 token 从 `data/projects/<pid>/mcp_tokens.json` 持档，登录 MCP 接入页可查看/复制，见 §5.2）。
+
+### 37.2 Token 鉴权（与 HTTP 401 语义一致）
+
+启动时先从平台 `mcp_tokens.json` 读取预期 token（`McpServer._token_record`，与 HTTP 同源）。以下情况**进程拒绝启动**（`sys.stderr.write` 说明 + `return 1`）：
+
+| 情况 | 行为 |
+|---|---|
+| 项目未配置 token（无文件/无 `default` 记录，`expected==''`） | 拒绝启动（等效 http 未鉴权 401） |
+| `--token` 未提供 | 拒绝启动 |
+| `--token` 与预期不一致 | 拒绝启动（`secrets.compare_digest` 恒定时间比较） |
+
+客户端 `initialize` 阶段即因连接被拒而抛异常（TC-18-03）。
+
+### 37.3 工具能力集（与 HTTP 一致）
+
+复用 `mcp_server._register_tools(owner, project_id, m)` 注册与 HTTP 端点同一套工具——不复制、不偏斜。工具集含对外契约 `TOOLS_CONTRACT`（§11.2 所列 10 个：`ontology_query/inference_trace/instance_get/action_invoke/term_lookup/capability_call/alignment_candidates/alignment_declarations/fusion_requests/fusion_query`）＋扩展工具 `lineage_get/quality_health/connection_health`，合计 13 个。`tools/list` 的 name 集合与 HTTP 注册全集一致（TC-18-02）。未发布/不存在的本体经工具层 `_require_published` 拒为 isError（`CODE: message`），与 HTTP `_not_published` 语义一致（TC-18-03）。
+
+### 37.4 日志与 stdio 约束
+
+stdio 传输是「进程＝会话」：**stdout 只能承载 JSON-RPC 帧**，所有日志必须写 stderr。脚本内 `_force_logging_to_stderr()` 遍历 root＋所有命名 logger（`logging.Logger.manager.loggerDict`）＋`lastResort`，把指向 stdout 的 `StreamHandler` 一律重定向到 stderr，否则污染管道致客户端解析失败（这是 M4-E 实测发现并修复的关键坑）。
+
+### 37.5 会话清理与容错
+
+- 客户端异常断开（半开管道）→ `run_stdio_async()` 读到 EOF 正常返回，进程随之退出——进程生命周期即会话清理，无残留进程/句柄（TCE-18-01）。
+- 非法 JSON-RPC / 异常请求走 `except Exception` 捕获，不导致进程崩溃（TCE-18-02）。
+- 兼容期内与桥接脚本 `mcp_stdio_bridge_v2.py`（HTTP 透传桥，见 §5 相关）并存可用，原生入口为默认（TC-18-04）。
+
+### 37.6 验收
+
+- `backend/tests/test_v2_18_stdio.py` **6/6**：TC-18-01 全链路（`stdio_client` 直连 initialize/list_tools/call_tool 返回本体）/ TC-18-02 工具能力集一致（契约子集＋平台注册全集）/ TC-18-03 无效/空 token 拒绝启动（`pytest.raises`）＋未发布本体 isError / TC-18-04 桥接并存 / TCE-18-01 断开清理（再次拉起可用）/ TCE-18-02 非法请求不崩溃。
+- 回归：L5 `backend/tests` **166/166**（160 既有＋6 新增）。
+- 用例登记：docs/V2-测试用例.md 十九 TC-18-01~04/TCE-18-01~02（含执行结果行）；验收点 TP-18-01~04 / EP-18-01~02（docs/V2-测试大纲.md）。
+
+## 38. JSONL 旁路操作日志（V2-10 / M4-G，2026-11-16）
+
+> V2-10 需求：把三类「打到系统外的真实操作」统一追加到 append-only JSONL **旁路日志**（与 V2-09 审计不同：审计回答"谁在何时改了什么"，旁路日志回答"当天实际打到外部系统的所有写/读操作"，供运维按天回放对账）。**旁路非主存储**：写失败不影响主流程（主流程仍走 Jena/Neo4j/PG）；append-only + 哈希链，无修改/删除接口。
+
+### 38.1 存储与 schema
+
+- 文件：`data/sidecar/sidecar.jsonl`（单文件 JSON Lines，按行追加，永不修改/删除）。
+- 统一 schema（每行一个 JSON，UTF-8）：
+
+```json
+{
+  "id": "3f9a...",                    // 记录 id（uuid 前 12 hex）
+  "time": "2026-11-16T14:03:05+08:00",// 事件时间（ISO 带时区）
+  "actor": "alice",                    // 操作者（无则 "-"）
+  "type": "ontology_change",           // 事件类型（见下）
+  "project_id": "p1",
+  "target_type": "ontology",           // 对象类型（ontology/object/action/source_connection）
+  "target_id": "ont-1",
+  "payload": { ... },                  // 事件体（按 type 而异）
+  "result": { ... },                   // 结果体（按 type 而异）
+  "prev_hash": "sha256..."             // 上一行整行哈希（首行为 "0"*64，哈希链）
+}
+```
+
+- **事件类型（`type`）**：
+  | type | 触发点 | payload 要点 | result 要点 |
+  |---|---|---|---|
+  | `ontology_change` | 本体/对象 创建·更新·删除（`router_ontologies`） | `{action: create/update/patch_object/delete, name?, ontology_id?, instances_deleted?}` | `{}` |
+  | `action_execution` | Action 回写执行（`action_engine._do_writeback`） | `{action_id, kind, invoke_url, idempotency_key, risk_level, trigger_source, display_only}` | `{executed, outcome, log_id, identity, external_status}` |
+  | `external_read` | 联邦读成功回源（`content_access.federate_values`） | `{instance_id, key_field, key_value, read_tool, attr_ids, viewer_mode, resolved_as}` | `{values: {...}}` |
+
+### 38.2 端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/sidecar` | 组合检索：`type`/`actor`/`project_id`/`target_type`/`target_id`/`target`（模糊）/`day`（YYYY-MM-DD）；分页 `page`/`page_size`（默认 50，≤500）。返回追加序（正序，便于按序回放）`{items, total, page, page_size}` |
+| GET | `/api/sidecar/stats` | 统计：`type`/`actor`/`project_id`/`day`；返回 `{total, by_type, by_actor}` |
+| GET | `/api/sidecar/replay` | 按天回放：`day` 必填，`type` 默认 `action_execution`；重建当日指定类型事件序列（追加序，供与外部系统实际状态对账）`{day, type, total, items}` |
+| GET | `/api/sidecar/verify` | 哈希链完整性校验（TC-10-03）：`{ok, checked, broken_at?, message}` |
+| PUT/PATCH/DELETE | `/api/sidecar/*` | **405 `SIDECAR_IMMUTABLE`**（append-only，无修改/删除接口） |
+
+### 38.3 验收
+
+- `backend/tests/test_v2_10_sidecar.py` **12/12**：TC-10-01 三类事件统一 append-only（schema 完整、逐行追加、哈希链起点正确）/ TC-10-01 组合检索（类型/操作者/项目/按天）/ TC-10-01 真实 API 创建本体 → 触发 `ontology_change`（接入点生效）/ TC-10-02 按天回放（当日 Action 追加序）/ TC-10-02 统计（按类型/操作者）/ TC-10-03 哈希链（未篡改 ok、篡改任一行 broken_at 定位）/ TC-10-03 无修改/删除接口 405 / TC-10-03 读取·统计·回放·校验 API / TCE-10-01 写失败不影响主流程（record 吞异常）/ TCE-10-01 Action 执行路径 sidecar 失败不崩 / TCE-10-01 本体变更路径 sidecar 写失败被吞。
+- 回归：L5 `backend/tests` **188/188**（176 既有＋12 新增）。
+- 用例登记：docs/V2-测试用例.md 二十 TC-10-01~03/TCE-10-01（含执行结果行）；验收点 TP-10-01~04 / EP-10-01（docs/V2-测试大纲.md）。
+
+## 39. K8s 部署与实例存储收敛（V2-20 / M4-H，2026-11-16）
+
+> V2-20 需求：平台整体可部署到 K8s（Helm/kustomize），后端支持多副本，本地文件型实例存储收敛进共享持久存储（Postgres），提供健康检查、扩缩容、滚动更新回滚、持久卷数据保留与故障演练。**本节点主要为部署物与少许可配置项，不新增对外 REST 端点**（除既有 `/health` 作为探针）。
+
+### 39.1 可配置项（新增）
+
+| 配置项 | 环境变量 | 默认 | 说明 |
+|---|---|---|---|
+| 实例存储后端 | `INSTANCE_STORE_BACKEND` | `jsonl` | `jsonl`（MVP 本地文件，单副本）/ `pg`（**收敛进 Postgres，多副本共享一致，TC-20-03**）。K8s 多副本部署应设为 `pg`。 |
+
+> 其余既有配置（`JENA_BASE_URL`/`NEO4J_URI`/`POSTGRES_DSN`/`DATA_DIR`/`LOG_DIR`/`SECRETS_DIR`）在 K8s 场景由 ConfigMap/Secret 注入，见 39.3。
+
+### 39.2 实例存储收敛（PG 后端）
+
+- **实现**：`backend/core/pg_instance_store.py` 的 `PgInstanceStore`（实现同一 `InstanceStore` 抽象，接口语义与 `JsonlInstanceStore` 一致——`insert/get/find/update/update_many/delete/count/all`）。
+- **存储**：表 `instance_records(project_id, object_type, id, rec_json JSONB, created_at, updated_at)`，主键 `(project_id, id)`，`rec_json` 存整条 record（与 jsonl 逐行 JSON 兼容）；索引 `(project_id, object_type)`。
+- **多副本一致**：`update_map`/`update_many` 用 `BEGIN` → `SELECT ... FOR UPDATE` → 改 → `UPDATE` → `COMMIT`，在 PG 侧加行锁 + 事务，杜绝两个副本基于旧值互相覆盖（**无副本间文件分叉**，TC-20-03 负向断言）。
+- **选择器**：`core/instance_store.py#get_instance_store(project_id, backend)`——`backend` 显式传入（`'pg'`）或环境变量 `INSTANCE_STORE_BACKEND=pg` 时返回 `PgInstanceStore`；默认 `jsonl`（向后兼容，L5 全量不改）。表由 `PgInstanceStore` 构造时幂等创建。
+
+### 39.3 K8s 部署物（`deploy/k8s/`）
+
+- **入口**：`deploy/k8s/kustomization.yaml`（默认/演示，backend 单副本）。**生产/多副本**：`deploy/k8s/overlays/prod`（backend 扩到 3 副本 + `INSTANCE_STORE_BACKEND=pg`）。
+- **组件**：
+  - `base/backend-deployment.yaml`（+`backend-service.yaml`）：后端 Deployment（rollingUpdate maxSurge=1,maxUnavailable=0）、readiness/liveness 探针 `GET /health`（8000）、`backend-data-pvc` 挂 `/app/data`、`backend-secret` 挂 `/app/secrets`。
+  - `base/frontend-deployment.yaml`：前端 Deployment + Service（nginx 反代 `http://backend:8000`）。
+  - `base/jena-statefulset.yaml`、`base/neo4j-statefulset.yaml`、`base/postgres-statefulset.yaml`：各自 StatefulSet + headless Service + `volumeClaimTemplates`（持久卷数据保留）。
+  - `base/configmap.yaml`（依赖服务地址/应用配置/`INSTANCE_STORE_BACKEND`）、`base/secret.yaml`（`NEO4J_AUTH`/`POSTGRES_PASSWORD` 等，Opaque）。
+  - `base/storage.yaml`（4 个 PVC：jena/neo4j/postgres/backend-data）。
+- **健康检查**：每个工作负载都配 `readinessProbe`+`livenessProbe`；后端用 `GET /health`（检查 Jena/Neo4j/PG 下游），前端用 `/`。
+
+### 39.4 验收
+
+- `backend/tests/test_v2_20_k8s.py` **6/6**：TC-20-03 多副本一致（并发副本写+更新读回一致，无分叉）/ TC-20-03 `get_instance_store(backend='pg')` 与 `INSTANCE_STORE_BACKEND=pg` 返回 `PgInstanceStore` / TC-20-03 `PgInstanceStore` 与 `JsonlInstanceStore` 接口语义一致（行为兼容）/ TC-20-01 部署物结构（Deployment/StatefulSet/Service/PVC/ConfigMap/Secret/Namespace、探针齐全）/ TC-20-02/04/05 与 TCE-20-01~03 由 prod overlay 提供部署基座（扩 3 副本 + pg 收敛）。
+- 回归：L5 `backend/tests` **192/192**（188 既有＋4 新增 V2-20）。
+- 用例登记：docs/V2-测试用例.md 二十 TC-20-01~05/TCE-20-01~03（含执行结果行）；验收点 TP-20-01~05 / EP-20-01~03（docs/V2-测试大纲.md）。
+
+## 40. 计算过程链 trace + NL 驱动业务动作（V2-22 / M4-J，2026-11-16）
+
+> V2-22 需求：计算能力/动作执行随结果返回统一**过程链 trace**（回应"怎么算出来的"，证据可检索/可导出），并新增**NL 驱动业务动作**端点（业务人员用自然语言提问，既可只读查询，也可触发业务动作）。**设计关键**：`data.trace` 已被能力执行四要素溯源（inputs/null_inputs/lookups/refs）占用，故统一过程链改用独立键 **`process_trace`**，两层并存、互不覆盖；过程链**恒落库**（append-only，逐次一条，`trace_id` 唯一），落库独立于 `include_trace` 参数（服务端审计义务，参数只控制响应是否携带）。
+
+### 40.1 统一过程链结构（`process_trace`）
+
+- **结构**：`{ "trace_id": str, "steps": [ {seq, type, description, details, started_at, finished_at} ] }`。
+- **step.type 枚举**：`data_fetch`（从哪个实例的哪个属性取了什么值）/`capability`（哪个能力、版本、输入、lookup 命中、输出值）/`action`（哪个动作、入参、外部响应摘要、结果）/`compute`（和哪个实例的哪个属性、什么操作）/`result`（最终返回）。
+- **收敛来源**：`backend/core/trace.py` 的 `TraceBuilder`（白名单校验 step.type）+ `make_capability_steps`/`make_action_steps`/`make_instance_get_steps`/`make_nl_steps` 由各执行结果（四要素溯源 `res["trace"]`/action 结果/instance_get 结果/NL 计划）装配统一 steps。
+- **体积与敏感**：`record_trace` 落库时对 steps[].details 做**集合类限量**（前 20 条 + `total`）与**大值截断**（字符串 >2000、detail 体积 >20000 字节）；`Response` 端仍返回全量。
+- **证据链关联**：`trace_id` ↔ `run_id` ↔ 动作 `log_id` ↔ `audit_event_id`（互查）。
+
+### 40.2 恒落库（append-only）
+
+- `record_trace(project_id, trace, run_id, log_id, audit_event_id, source)` → `JsonStore("trace_logs", project_id)`，**每次执行追加一条记录，不覆盖历史**。
+- **幂等**：相同 `trace_id` 已落库则不重复追加（防止并发/重试叠写）。
+- **恒开**：即使响应未带 `process_trace`（`include_trace=false`），服务端仍落库（审计义务），证据不因调用方不传参数而丢失（TC-22-02 负断言）。
+- 非目标：不回填历史执行 trace（本需求实施后新执行起生效）。
+
+### 40.3 MCP 工具 `include_trace`（V2-22）
+
+三个工具新增 `include_trace: bool = False` 参数（`mcp_server/_annotate` 更新 schema + `TOOLS_CONTRACT` 同步）：
+- `instance_get` → `include_trace=true` 时响应附 `process_trace`（data_fetch + result，`make_instance_get_steps`），落库 `source="mcp:instance_get"`。
+- `capability_call` → `include_trace=true` 时响应附 `process_trace`（data_fetch + capability + compute + result，`make_capability_steps`），落库 `source="mcp:capability_call"`；**以 `process_trace` 为独立键，不覆盖四要素 `res["trace"]`**。
+- `action_invoke` → `include_trace=true` 时响应附 `process_trace`（action + result，`make_action_steps`），落库带 `log_id`，`source="mcp:action_invoke"`。
+
+### 40.4 REST 端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/capabilities/{id}/execute` | 能力执行，响应 `success({**res, "process_trace": trace})`（保留四要素 `res["trace"]`），落库 `source="rest:capability_execute"` |
+| POST | `/api/nl/drive` | **NL 驱动**（见 40.5） |
+| GET | `/api/trace` | **过程链查看**（仅管理员）：`project_id`/`trace_id`/`run_id`/`log_id` 过滤，分页 `page`/`page_size`（默认 50，≤200），按 `recorded_at` 倒序，返回 `{items:[{trace_id, steps, run_id, log_id, audit_event_id, source, recorded_at}], total, page, page_size}` |
+| GET | `/api/trace/export` | 过程链 JSONL 导出（与检索同条件，仅管理员，`application/jsonl`） |
+| PUT/PATCH/DELETE | `/api/trace/*` | **405 `TRACE_IMMUTABLE`**（append-only，无修改/删除接口） |
+
+- **权限**：`_require_admin`——`auth_enabled()` 时非 `admin` 角色返回 403 `FORBIDDEN` 并记录 `audit_access_denied`；开发态未启用鉴权则放行（与平台其他端点一致）。trace 查看/导出复用审计权限分级（与 `GET /api/audit` 同源）。
+
+### 40.5 NL 驱动业务动作（`POST /api/nl/drive`）
+
+- **body**：`{question, intent?（'query'/'action' 覆盖意图）, ontology_id?（query 必填）, capability?（action 显式能力）, instance_id?, inputs?, dry_run?}`。
+- **意图判别** `_classify_intent(question, override)`：`override` 优先（user 覆盖，确定性/测试）；否则关键词回退（`_ACTION_KEYWORDS` vs `_QUERY_KEYWORDS`，命中多者胜，默认 `query`），来源 `fallback`。`intent_source ∈ {user, fallback}`。
+- **query 路径**：`nl_to_sparql`（LLM/回退）→ `sparql_query` 只读执行；返回 `{question, sparql, source, rows, count, kind:"query"}`；`ontology_id` 必填，缺省 422。
+- **action 路径**：`_match_capability`（`capability` 显式优先，否则在项目 active 能力中按关键词匹配）→ `CapabilityService.execute(cap["id"], ..., channel="nl", trigger_source="nl", dry_run, inputs)`；中/高危回写走 V2-13 确认流（结果含 `confirmation_token`，人工确认后才回写）。未匹配到能力 → 404。
+- **响应**：`success({kind, outcome, trace, intent_source, process_trace})`（`trace` 与 `process_trace` 同值，`intent_source` 也内嵌于 trace 首步 details）。随结果落库 `source="nl:drive"`。
+
+### 40.6 验收
+
+- `backend/tests/test_v2_22_trace.py` **8/8**：TC-22-01 REST execute 返回统一 `process_trace`（steps 结构齐、seq 递增、首 data_fetch 末 result、四要素 `res["trace"]` 保留）+ 恒落库 source=rest:capability_execute / TC-22-02 多次执行追加多条独立记录（不覆盖）/ TC-22-02`record_trace` 同 trace_id 幂等不重复 / TCE-22-01 run_id/log_id 关联透传 / TC-22-04 NL 驱动 action 触发能力执行（value=9.0，结果含过程链）/ TC-22-04 意图判别 fallback 关键词回退 / TC-22-05 非管理员 trace 查看 403（FORBIDDEN）与 PATCH/DELETE 405（append-only）。
+- 回归：L5 `backend/tests` **202/202**（194 既有＋8 新增 V2-22）。
+- 用例登记：docs/V2-测试用例.md 二十 V2-22（TC-22-01~05/TCE-22-01~02，含执行结果行）；验收点 TP-22-01~xx / EP-22-01~xx（docs/V2-测试大纲.md）。
+
+## 41. MCP Server 工具目录展示＋按项目工具暴露开关（V2-23 / M4-K，2026-11-16）
+
+> V2-23 需求：①（P0）对外展示 MCP 工具目录（完整契约：reads/writes/preconditions/postconditions/side_effect），有副作用工具红色警示；②（P1）按项目控制哪些 MCP 工具对外可用（工具暴露开关），停用工具在 `tools/list` 不出现、调用返回 not found，项目间隔离、变更落审计。**仅影响 HTTP 项目端点 `/mcp/{pid}`**（stdio 桥透传同受过滤；`TOOLS_CONTRACT` 静态契约不动）。
+
+### 41.1 工具目录（`GET /api/mcp/server/tools`）元数据补全
+
+`TOOLS_CONTRACT` 补全为 **13 个工具**（新增 `lineage_get`/`quality_health`/`connection_health` 的完整元数据）。`McpServer.tools()` 每项返回：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `name` | string | 工具名 |
+| `description` | string | 一句话描述 |
+| `side_effect` | bool | 有副作用（回写/能力执行）=`true`，如 `action_invoke`/`capability_call` |
+| `reads` | string[] | 读取的数据/存储边界 |
+| `writes` | string[] | 写入的数据/存储边界（仅 `side_effect=true` 的工具非空） |
+| `preconditions` | string[] | 前置条件 |
+| `postconditions` | string[] | 后置条件 |
+| `example` | string | 调用示例 |
+
+> 契约元数据为静态（不受工具暴露开关影响；开关只影响实际 `tools/list`/`tools/call`）。
+
+### 41.2 工具暴露开关（`GET/PUT /api/mcp/server/tool-config`）
+
+- **存储**：`JsonStore("mcp_tool_config", project_id)`，单条 `id="default"`，字段 `{id, disabled: [tool_name...], updated_at, updated_by}`。**缺省全开**（无配置＝`disabled=[]`，向后兼容）。
+- **读取**：`GET /api/mcp/server/tool-config?project_id=<pid>` → `success({project_id, enabled, disabled, all_tools, default:"all_enabled"})`。
+  - `enabled`＝契约中未停用的工具；`disabled`＝被停用工具；`all_tools`＝全部 13 工具。
+- **写入**：`PUT /api/mcp/server/tool-config?project_id=<pid>` body：
+  ```json
+  { "enabled": ["ontology_query", ...] }   // 白名单式：仅启用该集合，其余停用
+  // 或
+  { "disabled": ["action_invoke", ...] }   // 黑名单式：仅停用该集合，其余保持
+  // 均不传：重置为全部启用
+  ```
+  非法工具名被过滤（只认 `TOOLS_CONTRACT` 已知名）；`enabled` 优先于 `disabled`。
+- **即时生效**：`PUT` 后 `McpServer.set_tool_config` 内部 `_evict(project_id)` 销毁并懒重建端点（与 `unpublish` 同重载机制），被停用工具经 `_McpEndpoint._apply_tool_config` 调用 `mcp.remove_tool(name)` 从 `tools/list` 移除、`tools/call` 对停用工具返回 `isError`（tool not found，标准 MCP 语义）。
+- **审计**：`PUT` 落审计 `auth.audit("mcp_tool_config_updated", actor, project_id, {enabled, disabled})`。
+- **权限**：`project_id` 查询参数（与 MCP 其余端点同）；审计 `actor` 取 `current_user(request).username`。
+- **`status(project_id)` 增强**：项目级 `status` 的 `tools` 字段反映**实际启用**工具；新增 `tool_config: {enabled, disabled}` 内嵌。
+
+### 41.3 验收
+
+- `backend/tests/test_v2_23_mcp_tool_config.py` **8 用例**（TC-23-01~07 / TCE-23-01）：契约完整＋有副作用识别 / 缺省全开 / 停用 list 隐藏 / PUT 白名单即时生效 / 配置落盘重启保持 / 项目隔离 / 审计留痕 / 非法工具名过滤。
+- 回归：L5 `backend/tests` **215/215**（207 既有＋8 新增 V2-23）；`test_v2_18_stdio`＋`test_vs5_vs8`（11 passed）无破坏。
+- 用例登记：docs/V2-测试用例.md 十一·补补 V2-23（TC-23-01~07/TCE-23-01，含执行结果行）。

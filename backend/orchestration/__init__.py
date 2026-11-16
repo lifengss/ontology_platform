@@ -1016,6 +1016,9 @@ class Orchestrator:
                 unresolved.append(f"{pname}（非法取值来源 {vt!r}，仅允许 literal/field_ref/trigger_ctx）")
         if unresolved:
             raise NodeFailure(f"节点 {nid} 参数解析失败（字段引用缺失，不静默落默认值）：{unresolved}")
+        # V2-22（M4-J）：节点输入快照——把实际解析后的参数写入 node_state.input，
+        # 使 run 详情（get_run 返回整条 run 记录）即完整过程链，前端运行区可直接渲染。
+        st["input"] = resolved
         retry_max = max(1, int(node.get("retry_max") or 1))
         last_err = ""
         for attempt in range(retry_max):

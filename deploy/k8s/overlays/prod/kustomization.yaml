@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# 生产/多副本 overlay：backend 扩到 3 副本，实例存储收敛进 Postgres（INSTANCE_STORE_BACKEND=pg），
+# 满足 TC-20-03（多副本 JsonlInstanceStore 类存储收敛 PG，无副本间文件分叉）。
+namePrefix: prod-
+
+resources:
+  - ../../base
+
+patches:
+  # 后端扩到多副本：K8s 负载均衡到 backend Service（clusterIP）做水平扩缩容。
+  - target:
+      kind: Deployment
+      name: backend
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      # 多副本收敛：覆盖 ConfigMap 注入的默认值，把实例存储后端切到 pg。
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: INSTANCE_STORE_BACKEND
+          value: "pg"

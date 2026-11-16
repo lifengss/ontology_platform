@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: ontology-platform
+  labels:
+    app.kubernetes.io/part-of: ontology-platform
+    app.kubernetes.io/component: backend
+data:
+  # --- 依赖服务地址（集群内 Service 名）---
+  JENA_BASE_URL: "http://jena:3030"
+  JENA_DATASET: "ontology"
+  NEO4J_URI: "bolt://neo4j:7687"
+  NEO4J_USER: "neo4j"
+  POSTGRES_DSN: "postgresql://ont:ontsecret@postgres:5432/ont"
+  # --- 应用配置 ---
+  APP_NAME: "EnterpriseOntologyPlatform"
+  APP_VERSION: "2.0.0"
+  LOG_LEVEL: "INFO"
+  # --- 实例存储后端：默认 jsonl（单副本/演示）；多副本必须收敛 pg（见 overlays/prod）---
+  INSTANCE_STORE_BACKEND: "jsonl"
+  # --- 后台周期任务（K8s 多副本下各副本自启 daemon 线程；如需单实例调度可后续再收敛）---
+  ONTOLOGY_CDC_ENABLED: "true"
+  ONTOLOGY_SCHEMA_DRIFT_PROBE_ENABLED: "true"
+  ONTOLOGY_ORCH_SCHEDULER_INTERVAL_SECONDS: "15"

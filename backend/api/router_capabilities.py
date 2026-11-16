@@ -13,6 +13,7 @@ import audit as audit_svc
 from api.dependencies import project_id_param
 from capabilities import CapabilityApiError, CapabilityService
 from core.responses import ApiError, list_payload, success
+from core.trace import make_capability_steps, record_trace  # V2-22 过程链 trace（M4-J）
 from logging_setup import get_logger
 from schemas.capability import (
     CapabilityCreate,
@@ -175,7 +176,12 @@ def api_execute_capability(
                                   target_type="capability", target_id=cap_id,
                                   detail={"instance_id": payload.instance_id,
                                           "federated": bool(res.get("federated"))})
-    return success(res)
+    # V2-22（M4-J）：过程链恒落库（append-only），响应随执行结果一起返回统一 process_trace。
+    # 注意：能力执行结果原有四要素溯源 res["trace"]（inputs/null_inputs/lookups/refs）须保留，
+    # 统一过程链用独立键 process_trace（两层并存，V2-22）。
+    trace = make_capability_steps(None, res, res).to_trace()
+    record_trace(project_id, trace, source="rest:capability_execute")
+    return success({**res, "process_trace": trace})
 
 
 @router.post("/{cap_id}/execute-batch")
@@ -196,6 +202,7 @@ def api_execute_batch_capability(
             federated=payload.federated,
             cost_confirmed=payload.cost_confirmed,
             user_id=user.get("id"),
+            idempotency_key=payload.idempotency_key,
         )
     except CapabilityApiError as e:
         _raise_api(e)

@@ -32,6 +32,7 @@ from api.router_cdc import router as cdc_router  # V2-12 流式 CDC（M3-D）
 from api.router_quality import router as quality_router  # V2-21 数据健康度（M3-C）
 from api.router_llm import router as llm_router
 from api.router_mcp import router as mcp_router
+from api.router_nl import router as nl_router  # V2-22 NL 驱动业务动作（M4-J）
 from api.router_orchestration import router as orchestration_router  # V2-14 Action 编排（M3-F）
 from api.router_namespaces import router as namespaces_router
 from api.router_ontologies import router as ontologies_router
@@ -39,8 +40,10 @@ from api.router_projects import router as projects_router
 from api.router_query import router as query_router  # V2-15 开放查询接口（M4-B）
 from api.router_reasoning import router as reasoning_router  # V2-16 推理引擎配置（M4-C）
 from api.router_shacl import router as shacl_router  # V2-17 SHACL 执行路径配置（M4-D）
+from api.router_sidecar import router as sidecar_router  # V2-10 旁路操作日志（M4-G）
 from api.router_system import router as system_router
 from api.router_templates import router as templates_router
+from api.router_trace import router as trace_router  # V2-22 过程链 trace（M4-J）
 from api.router_identity import router as identity_router  # V2-14i 身份联邦（M2-B）
 from config import get_settings
 from core.responses import ApiError, fail, success
@@ -126,6 +129,7 @@ app.include_router(ontologies_router)
 app.include_router(ingest_router)
 app.include_router(graph_router)
 app.include_router(mcp_router)
+app.include_router(nl_router)  # V2-22 NL 驱动业务动作（M4-J）
 app.include_router(dictionary_router)  # V2-01 数据字典与联邦查询（M1-A）
 app.include_router(capabilities_router)  # V2-04 能力层（M1-B）
 app.include_router(namespaces_router)
@@ -133,6 +137,7 @@ app.include_router(actions_router)
 app.include_router(templates_router)
 app.include_router(llm_router)
 app.include_router(system_router)
+app.include_router(trace_router)  # V2-22 过程链 trace（M4-J）
 app.include_router(auth_router)  # V2-05 登录鉴权与 RBAC（M2-A）
 app.include_router(identity_router)  # V2-14i 身份联邦（M2-B）
 app.include_router(audit_router)  # V2-09 完整审计（M2-D）
@@ -146,6 +151,7 @@ app.include_router(fusion_router)  # V2-02 跨本体融合与融合查询（M4-A
 app.include_router(query_router)  # V2-15 开放查询接口（M4-B）
 app.include_router(reasoning_router)  # V2-16 推理引擎配置（M4-C）
 app.include_router(shacl_router)  # V2-17 SHACL 执行路径配置（M4-D）
+app.include_router(sidecar_router)  # V2-10 旁路操作日志（M4-G）
 
 
 # VS6: 由 mcp_server 模块按项目挂载 /mcp/{project_id}，双传输（2026-10-28 MCP 接入层修复）：

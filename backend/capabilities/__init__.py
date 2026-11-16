@@ -97,12 +97,20 @@ def _safe_parse(expression: str):
 class CapabilityService:
     """项目级能力服务（注册/版本化/校验/发布/执行/溯源）。"""
 
+    # HF-11：execute_batch 内置分块调度，单块实例数（控制单次回写规模与超时）。
+    _BATCH_CHUNK = 250
+    # HF-11：批量幂等键去重窗口（秒）。同一键在窗口内视为重发，返回已处理标记，
+    # 避免客户端超时重发导致后端多个批量并发互锁写回。
+    _IDEMPOTENCY_TTL_SEC = 3600
+
     def __init__(self, project_id: str):
         self.project_id = project_id
         self._store = JsonStore("capabilities", project_id)
         self._instances = get_instance_store(project_id)
         # M4-A④ TP-04-06：派生图（派生值非权威存储；不写实例存储、不写回源系统）
         self._derived = JsonStore("derived_values", project_id)
+        # HF-11：批量幂等键 → 最近处理时间（进程内去重，TTL 清理）。
+        self._batch_idempotency: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # 查询
@@ -711,10 +719,32 @@ class CapabilityService:
                       dry_run: bool = False,
                       federated: Optional[bool] = None,
                       cost_confirmed: bool = False,
-                      user_id: Optional[str] = None) -> dict[str, Any]:
+                      user_id: Optional[str] = None,
+                      idempotency_key: Optional[str] = None) -> dict[str, Any]:
         rec = self._store.get(cap_id)
         if not rec:
             raise CapabilityApiError("NOT_FOUND", "能力不存在", 404)
+        # HF-11：批量幂等键去重——同一键在窗口内视为重发（客户端超时后重试），
+        # 直接返回「已登记/已处理」标记，避免多个批量并发互锁写回。
+        idem_key = f"{self.project_id}:{cap_id}:{idempotency_key}" if idempotency_key else None
+        if idem_key:
+            now = time.monotonic()
+            # 清理过期键（避免无限增长）
+            expired = [k for k, ts in self._batch_idempotency.items()
+                       if now - ts > self._IDEMPOTENCY_TTL_SEC]
+            for k in expired:
+                self._batch_idempotency.pop(k, None)
+            if idem_key in self._batch_idempotency:
+                return {
+                    "capability_id": rec.get("id"),
+                    "capability_name": rec.get("name"),
+                    "capability_version": rec.get("version"),
+                    "object_type": rec.get("object_type"),
+                    "idempotent": True,
+                    "idempotency_key": idempotency_key,
+                    "message": "相同批量请求已处理（幂等键命中），本次跳过重复调度",
+                }
+            self._batch_idempotency[idem_key] = now
         started = time.monotonic()
         if instance_ids:
             records = []
@@ -730,10 +760,13 @@ class CapabilityService:
             if missing:
                 raise CapabilityApiError("INSTANCE_NOT_FOUND", f"实例不存在或类型不符: {missing[:5]}", 404)
         else:
+            # HF-11：不按 limit 截断——取全部匹配实例，内部按 _BATCH_CHUNK 分块调度，
+            # 避免「默认 limit=1000 只跑前 1000 行」导致大批量永远执行不全。
+            # offset 仍生效（分页起点）。
             records = self._instances.find(
                 object_type=rec.get("object_type"),
                 filters={"project_id": self.project_id},
-                limit=limit, offset=offset,
+                limit=None, offset=offset,
             )
             # HF-05：同项目多本体共存时只执行当前能力所属本体的实例；
             # 能力未指定 ontology_id 或历史实例缺该字段时保持原行为（兼容 M1-B golden）。
@@ -760,73 +793,84 @@ class CapabilityService:
         n_success = n_error = n_null = 0
         n_fed_success = n_fed_failed = 0
         fed_system_stats: dict[str, dict[str, Any]] = {}
-        for irec in records:
-            effective = irec
-            fed_meta: Optional[dict[str, Any]] = None
-            if use_federated and is_federated(self.project_id, irec):
-                try:
-                    inputs, fed_meta = self._federate_input(irec, attrs, user_id)
-                except CapabilityApiError as e:
-                    # EP-04-03：单实例回源失败 → 标记失败实例，不产生半口径结果
-                    n_fed_failed += 1
-                    cid, cname = self._fed_conn_info(irec)
-                    st = fed_system_stats.setdefault(
-                        cid, {"connection_id": cid, "name": cname, "ok": 0, "failed": 0})
-                    st["failed"] += 1
-                    items.append({
-                        "instance_id": irec.get("id"),
-                        "status": "federated_failed",
-                        "value": None,
-                        "error_code": e.code,
-                        "error_message": e.message,
-                        "capability_version": rec.get("version"),
-                        "federated": {"source_connection": cid},
-                    })
-                    continue
-                merged_instance = dict(irec.get("instance") or {})
-                merged_instance.update(inputs)
-                effective = {**irec, "instance": merged_instance}
-            res = self._execute_one(rec, effective, channel, lookup_cache)
-            if res["status"] == "success":
-                n_success += 1
-                if res.get("value") is None:
-                    n_null += 1
-            else:
-                n_error += 1
-            derived_entry: Optional[dict[str, Any]] = None
-            if not dry_run:
-                if fed_meta is not None:
-                    if res.get("status") == "success":
-                        n_fed_success += 1
-                        derived_entry = self._save_derived(rec, irec, res, fed_meta, trigger_source)
-                    cid, cname = self._fed_conn_info(irec)
-                    st = fed_system_stats.setdefault(
-                        cid, {"connection_id": cid, "name": cname, "ok": 0, "failed": 0})
-                    st["ok"] += 1
+        object_type = rec.get("object_type")
+        # HF-11：分块调度——每块执行完批量写回一次（update_many），
+        # 既避免单次请求超时，也把「逐实例全 jsonl 重写」降为「每块一次读一次写」。
+        pending: dict[str, dict[str, dict[str, Any]]] = {}
+        for chunk_start in range(0, len(records), self._BATCH_CHUNK):
+            chunk = records[chunk_start:chunk_start + self._BATCH_CHUNK]
+            for irec in chunk:
+                effective = irec
+                fed_meta: Optional[dict[str, Any]] = None
+                if use_federated and is_federated(self.project_id, irec):
+                    try:
+                        inputs, fed_meta = self._federate_input(irec, attrs, user_id)
+                    except CapabilityApiError as e:
+                        # EP-04-03：单实例回源失败 → 标记失败实例，不产生半口径结果
+                        n_fed_failed += 1
+                        cid, cname = self._fed_conn_info(irec)
+                        st = fed_system_stats.setdefault(
+                            cid, {"connection_id": cid, "name": cname, "ok": 0, "failed": 0})
+                        st["failed"] += 1
+                        items.append({
+                            "instance_id": irec.get("id"),
+                            "status": "federated_failed",
+                            "value": None,
+                            "error_code": e.code,
+                            "error_message": e.message,
+                            "capability_version": rec.get("version"),
+                            "federated": {"source_connection": cid},
+                        })
+                        continue
+                    merged_instance = dict(irec.get("instance") or {})
+                    merged_instance.update(inputs)
+                    effective = {**irec, "instance": merged_instance}
+                res = self._execute_one(rec, effective, channel, lookup_cache)
+                if res["status"] == "success":
+                    n_success += 1
+                    if res.get("value") is None:
+                        n_null += 1
                 else:
-                    self._write_back(rec, irec, res, channel, trigger_source)
-                    # 缓存键已带 ontology_id，按对象类型清除所有本体分区
-                    for k in [k for k in lookup_cache if k[0] == rec.get("object_type")]:
-                        lookup_cache.pop(k, None)
-            item = {
-                "instance_id": irec.get("id"),
-                "status": res["status"],
-                "value": res.get("value"),
-                "error_code": res.get("error_code"),
-                "error_message": res.get("error_message"),
-                "capability_version": res.get("capability_version"),
-                "trace": res.get("trace"),
-            }
-            if fed_meta is not None:
-                self._annotate_trace_federated(res, fed_meta)
-                item["source_system"] = fed_meta.get("connection_name")
-                item["fetched_at"] = fed_meta.get("fetched_at")
-                item["federated"] = {
-                    "source_connection": fed_meta.get("source_connection"),
-                    "resolved_as": fed_meta.get("resolved_as"),
+                    n_error += 1
+                derived_entry: Optional[dict[str, Any]] = None
+                if not dry_run:
+                    if fed_meta is not None:
+                        if res.get("status") == "success":
+                            n_fed_success += 1
+                            derived_entry = self._save_derived(rec, irec, res, fed_meta, trigger_source)
+                        cid, cname = self._fed_conn_info(irec)
+                        st = fed_system_stats.setdefault(
+                            cid, {"connection_id": cid, "name": cname, "ok": 0, "failed": 0})
+                        st["ok"] += 1
+                    else:
+                        # HF-11：累积写回补丁，块末统一 update_many（消除 O(n²)）。
+                        patch = self._build_write_back_patch(rec, irec, res, channel, trigger_source)
+                        pending.setdefault(object_type, {})[irec.get("id")] = patch
+                item = {
+                    "instance_id": irec.get("id"),
+                    "status": res["status"],
+                    "value": res.get("value"),
+                    "error_code": res.get("error_code"),
+                    "error_message": res.get("error_message"),
+                    "capability_version": res.get("capability_version"),
+                    "trace": res.get("trace"),
                 }
-                item["derived"] = derived_entry
-            items.append(item)
+                if fed_meta is not None:
+                    self._annotate_trace_federated(res, fed_meta)
+                    item["source_system"] = fed_meta.get("connection_name")
+                    item["fetched_at"] = fed_meta.get("fetched_at")
+                    item["federated"] = {
+                        "source_connection": fed_meta.get("source_connection"),
+                        "resolved_as": fed_meta.get("resolved_as"),
+                    }
+                    item["derived"] = derived_entry
+                items.append(item)
+            # 块末批量写回：一次读 + 一次写（HF-11）。
+            if pending.get(object_type):
+                self._instances.update_many(object_type, pending.pop(object_type))
+                # 缓存键已带 ontology_id，按对象类型清除所有本体分区
+                for k in [k for k in lookup_cache if k[0] == object_type]:
+                    lookup_cache.pop(k, None)
         duration_ms = int((time.monotonic() - started) * 1000)
         return {
             "capability_id": rec.get("id"),
@@ -1009,10 +1053,14 @@ class CapabilityService:
         self._derived.insert(dv)
         return {"id": dv["id"], "authoritative": False, "note": DERIVED_NOTE}
 
-    def _write_back(self, rec: dict[str, Any], inst_record: dict[str, Any],
-                    res: dict[str, Any], channel: str, trigger_source: str) -> None:
-        """写回：计算值（output_attribute，成功时）+ 能力元数据（6 类字段）+ 溯源。
-        源字段不覆盖：仅写 output_attribute 与 __capability__ 元数据键。"""
+    def _build_write_back_patch(self, rec: dict[str, Any], inst_record: dict[str, Any],
+                                res: dict[str, Any], channel: str,
+                                trigger_source: str) -> dict[str, Any]:
+        """HF-11：构造写回补丁（不落库），供单实例直接 update / 批量聚合 update_many。
+
+        写回内容：计算值（output_attribute，成功时）+ 能力元数据（6 类字段）+ 溯源。
+        源字段不覆盖：仅写 output_attribute 与 __capability__ 元数据键。
+        """
         instance = dict(inst_record.get("instance", {}) or {})
         if res["status"] == "success" and rec.get("output_attribute"):
             instance[rec["output_attribute"]] = res.get("value")
@@ -1038,7 +1086,14 @@ class CapabilityService:
             "stale": False,
             "result_freshness": "fresh",
         }
-        self._instances.update(inst_record.get("id"), {"instance": instance})
+        return {"instance": instance}
+
+    def _write_back(self, rec: dict[str, Any], inst_record: dict[str, Any],
+                    res: dict[str, Any], channel: str, trigger_source: str) -> None:
+        """写回：计算值（output_attribute，成功时）+ 能力元数据（6 类字段）+ 溯源。
+        源字段不覆盖：仅写 output_attribute 与 __capability__ 元数据键。"""
+        patch = self._build_write_back_patch(rec, inst_record, res, channel, trigger_source)
+        self._instances.update(inst_record.get("id"), patch)
 
     def affected_instances(self, cap_id: str, baseline_instance_id: str) -> dict[str, Any]:
         """HF-04：反查哪些结果实例的 trace 命中过这条基线，并判定是否 stale。

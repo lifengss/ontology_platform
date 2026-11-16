@@ -13,6 +13,7 @@ from rdflib import Graph
 from ai_helper import call_llm, extract_json, generate_ontology_from_document, generate_ontology_from_text
 from api.dependencies import namespace_param, project_id_param
 import audit as audit_svc
+import sidecar_log as sidecar_svc  # V2-10 旁路操作日志（M4-G）
 from core.instance_store import get_instance_store
 from core.project_store import ProjectStore
 from core.responses import (
@@ -163,6 +164,9 @@ def create_ontology(
     audit_svc.record_from_request(request, "ontology_create", project_id=project_id,
                                   target_type="ontology", target_id=record["id"],
                                   target_name=record.get("name", ""), after=_model_view(record))
+    sidecar_svc.record_from_request(request, sidecar_svc.TYPE_ONTOLOGY_CHANGE, project_id=project_id,
+                                    target_type="ontology", target_id=record["id"],
+                                    payload={"action": "create", "name": record.get("name", "")})
     logger.info("create_ontology id=%s project_id=%s name=%s", record["id"], project_id, record["name"])
     return success(record, http_status=201)
 
@@ -305,6 +309,9 @@ def update_ontology(
                                   target_type="ontology", target_id=ontology_id,
                                   target_name=existing.get("name", ""),
                                   before=before_view, after=_model_view(updated))
+    sidecar_svc.record_from_request(request, sidecar_svc.TYPE_ONTOLOGY_CHANGE, project_id=project_id,
+                                    target_type="ontology", target_id=ontology_id,
+                                    payload={"action": "update", "name": existing.get("name", "")})
     logger.info("update_ontology id=%s project_id=%s", ontology_id, project_id)
     # V2-03 EP-03-01：前端表单保存（PUT）走这条路，主键变更也要给出存量实例影响提示
     if "objects" in patch:
@@ -428,6 +435,10 @@ def patch_ontology_object(
                                   target_name=patch.get("name", ""),
                                   before=old_obj, after=dict(patch),
                                   detail={"ontology_id": ontology_id})
+    sidecar_svc.record_from_request(request, sidecar_svc.TYPE_ONTOLOGY_CHANGE, project_id=project_id,
+                                    target_type="object", target_id=object_id,
+                                    payload={"action": "patch_object", "ontology_id": ontology_id,
+                                             "name": patch.get("name", "")})
     logger.info("patch_object id=%s object_id=%s project_id=%s stable_key=%s explicit=%s",
                 ontology_id, object_id, project_id, patch.get("stable_key"),
                 patch.get("stable_key_explicit"))
@@ -567,6 +578,10 @@ def delete_ontology(
                                   detail={"unpublished": unpublished, "force": force,
                                           "instances_deleted": instances_deleted,
                                           "candidates_deleted": candidates_deleted})
+    sidecar_svc.record_from_request(request, sidecar_svc.TYPE_ONTOLOGY_CHANGE, project_id=project_id,
+                                    target_type="ontology", target_id=ontology_id,
+                                    payload={"action": "delete", "name": rec.get("name", ""),
+                                             "instances_deleted": instances_deleted})
     logger.info(
         "delete_ontology id=%s project_id=%s force=%s unpublished=%s instances_deleted=%d candidates_deleted=%d",
         ontology_id, project_id, force, unpublished, instances_deleted, candidates_deleted,

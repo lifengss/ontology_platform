@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import threading
+import time
 import uuid
 from abc import ABC, abstractmethod
 from typing import Any
@@ -54,6 +55,15 @@ class InstanceStore(ABC):
     @abstractmethod
     def update(self, record_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
         """按记录 id 局部更新实例。"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_many(self, object_type: str, patches: dict[str, dict[str, Any]]) -> int:
+        """HF-11：同对象类型批量局部更新（一次读+一次写，消除逐实例全量重写 O(n²)）。
+
+        仅更新列在 patches 中的记录 id；更新后 rec 增加 updated_at。
+        返回实际更新的记录数。
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -211,6 +221,14 @@ class JsonlInstanceStore(InstanceStore):
             for rec in records:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
+    # HF-11：Windows 下 os.replace 会因瞬时文件锁抛 PermissionError(WinError 5)
+    # 或 FileNotFoundError，重写为退避重试；一次性批量写回（供 update_many 消除 O(n²)）。
+    # HF-13：approve 落库也走 update→_write_file，偶发 WinError 3 次重试未兜住，
+    # 将重试次数增至 5 次、退避略增（读侧 _read_file 已对损坏 JSONL 行容错跳过，
+    # 写回时因坏行已被过滤而顺带清理；不影响写入正确性）。
+    _REPLACE_RETRIES = 5
+    _REPLACE_BACKOFF_SEC = 0.08
+
     def _write_file(self, object_type: str, records: list[dict[str, Any]]) -> None:
         path = self._path_for(object_type)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -218,7 +236,20 @@ class JsonlInstanceStore(InstanceStore):
         with self._lock, open(tmp, "w", encoding="utf-8", newline="\n") as f:
             for rec in records:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        os.replace(tmp, path)
+        last_err: Exception | None = None
+        for attempt in range(1, self._REPLACE_RETRIES + 1):
+            try:
+                os.replace(tmp, path)
+                return
+            except (PermissionError, FileNotFoundError) as e:
+                # 瞬时锁：重试前等待；末次失败上抛，由上层决定是否降级/重试。
+                last_err = e
+                if attempt == self._REPLACE_RETRIES:
+                    break
+                time.sleep(self._REPLACE_BACKOFF_SEC * attempt)
+        logger.warning("os.replace 重试 %d 次仍失败: object_type=%s err=%s",
+                       self._REPLACE_RETRIES, object_type, last_err)
+        raise last_err  # type: ignore[misc]
 
     def insert(self, record: dict[str, Any]) -> dict[str, Any]:
         record.setdefault("id", uuid.uuid4().hex)
@@ -276,6 +307,31 @@ class JsonlInstanceStore(InstanceStore):
                     return rec
         return None
 
+    def update_many(self, object_type: str, patches: dict[str, dict[str, Any]]) -> int:
+        """HF-11：同对象类型批量局部更新（一次读 + 一次写）。
+
+        避免 execute_batch 里对每个实例单独 update()——那会把同一 jsonl 文件
+        反复全量读改写 N 次（O(n²) IO）。这里是按对象类型聚合补丁后仅读写一次。
+        """
+        if not patches:
+            return 0
+        object_type = str(object_type)
+        records = self._read_file(object_type)
+        if not records:
+            return 0
+        updated = 0
+        for rec in records:
+            rid = rec.get("id")
+            patch = patches.get(rid)
+            if patch is None:
+                continue
+            rec.update({k: v for k, v in patch.items() if k != "id"})
+            rec["updated_at"] = _now()
+            updated += 1
+        if updated:
+            self._write_file(object_type, records)
+        return updated
+
     def delete(self, record_id: str) -> bool:
         for path in self._dir.glob("*.jsonl"):
             object_type = path.stem
@@ -325,6 +381,9 @@ class JenaInstanceStore(InstanceStore):
     def update(self, record_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
         raise NotImplementedError("Jena 实例更新尚未实现")
 
+    def update_many(self, object_type: str, patches: dict[str, dict[str, Any]]) -> int:
+        raise NotImplementedError("Jena 实例批量更新尚未实现")
+
     def delete(self, record_id: str) -> bool:
         raise NotImplementedError("Jena 实例删除尚未实现")
 
@@ -336,7 +395,26 @@ class JenaInstanceStore(InstanceStore):
 
 
 def get_instance_store(project_id: str | None = None, backend: str | None = None) -> InstanceStore:
-    """获取默认实例存储。backend 为 'jena' 时返回预留实现，否则返回本地 JSONL。"""
-    if backend == "jena":
+    """获取默认实例存储。
+
+    backend 显式传入时优先（'jena'→预留实现，'pg'→Postgres，'jsonl'→本地文件）；
+    未传则按 settings.instance_store_backend（环境变量 INSTANCE_STORE_BACKEND）选择，
+    默认 'jsonl'（MVP 本地文件）。K8s 多副本部署设 INSTANCE_STORE_BACKEND=pg 收敛共享一致。
+    """
+    if backend and backend != "auto":
+        if backend == "jena":
+            return JenaInstanceStore(project_id=project_id)
+        if backend == "pg":
+            from core.pg_instance_store import PgInstanceStore
+
+            return PgInstanceStore(project_id=project_id)
+        return JsonlInstanceStore(project_id=project_id)
+    settings = get_settings()
+    chosen = settings.instance_store_backend
+    if chosen == "pg":
+        from core.pg_instance_store import PgInstanceStore
+
+        return PgInstanceStore(project_id=project_id)
+    if chosen == "jena":
         return JenaInstanceStore(project_id=project_id)
     return JsonlInstanceStore(project_id=project_id)

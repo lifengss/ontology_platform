@@ -438,6 +438,20 @@ def federate_values(
             fetched = _now_iso()
             meta.update(mode="federated", stale=False, fetched_at=fetched, as_of=fetched,
                         elapsed_ms=int((time.monotonic() - started) * 1000))
+            # V2-10 旁路操作日志（M4-G）：外部读取（联邦成功回源）事件，旁路不影响主流程。
+            try:
+                import sidecar_log as sidecar_svc
+                sidecar_svc.record(
+                    type_=sidecar_svc.TYPE_EXTERNAL_READ, actor=(user_id or "-"),
+                    project_id=project_id, target_type="source_connection",
+                    target_id=conn_id,
+                    payload={"instance_id": rec.get("id"),
+                             "key_field": src_key_field, "key_value": key_value,
+                             "read_tool": read_tool, "attr_ids": attr_ids,
+                             "viewer_mode": bool(user_id), "resolved_as": meta.get("resolved_as")},
+                    result={"values": {k: v for k, v in values.items() if isinstance(v, (str, int, float, bool, type(None)))}})
+            except Exception:  # noqa: BLE001  旁路失败不影响主流程（TCE-10-01）
+                pass
             return values, meta
 
     # 回源失败/无行/键不匹配 → 回退底

@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: neo4j
+  namespace: ontology-platform
+  labels:
+    app.kubernetes.io/part-of: ontology-platform
+    app.kubernetes.io/component: neo4j
+spec:
+  serviceName: neo4j
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: neo4j
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: neo4j
+    spec:
+      containers:
+        - name: neo4j
+          image: neo4j:5.20-community
+          ports:
+            - containerPort: 7474
+              name: http
+            - containerPort: 7687
+              name: bolt
+          env:
+            - name: NEO4J_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret
+                  key: NEO4J_AUTH
+          envFrom:
+            - secretRef:
+                name: backend-secret
+          volumeMounts:
+            - name: neo4j-data
+              mountPath: /data
+          readinessProbe:
+            tcpSocket:
+              port: 7687
+            initialDelaySeconds: 40
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 7687
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+  volumeClaimTemplates:
+    - metadata:
+        name: neo4j-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neo4j
+  namespace: ontology-platform
+  labels:
+    app.kubernetes.io/part-of: ontology-platform
+    app.kubernetes.io/component: neo4j
+spec:
+  selector:
+    app.kubernetes.io/component: neo4j
+  ports:
+    - port: 7474
+      targetPort: 7474
+      name: http
+    - port: 7687
+      targetPort: 7687
+      name: bolt

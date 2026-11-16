@@ -51,6 +51,9 @@ class CapabilityExecuteBatch(BaseModel):
     # M4-A④ / TP-04-06：联邦读 + 成本确认（与单实例执行同契约）
     federated: Optional[bool] = Field(default=None)
     cost_confirmed: bool = Field(default=False)
+    # HF-11：批量幂等键（同一键的并发/重发请求去重，避免多个批量并发互锁写回）。
+    # 服务端按「能力 id + 幂等键」在请求窗口内去重；省略则不启用。
+    idempotency_key: Optional[str] = Field(default=None, max_length=128)
 
 
 class FederatedPreview(BaseModel):

@@ -41,6 +41,12 @@ from urllib.parse import parse_qs
 from action_engine import ActionEngine
 from config import get_settings
 from core.storage import JsonStore
+from core.trace import (  # V2-22 过程链 trace（M4-J）
+    make_instance_get_steps,
+    make_capability_steps,
+    make_action_steps,
+    record_trace,
+)
 from fastapi.responses import JSONResponse
 from lineage import build_instance_lineage  # V2-08 细粒度血缘（M3-B）
 from logging_setup import get_logger
@@ -84,13 +90,16 @@ TOOLS_CONTRACT = {
     "instance_get": {
         "reads": ["实例ABox"], "writes": [],
         "preconditions": ["本体已发布"],
-        "postconditions": ["返回实例及其溯源标记（含外部MCP来源着色）"], "side_effect": False,
+        "postconditions": ["返回实例及其溯源标记（含外部MCP来源着色）",
+                           "V2-22 include_trace=true 时返回 process_trace（统一过程链，steps），过程链恒落库（append-only）"],
+        "side_effect": False,
     },
     "action_invoke": {
         "reads": ["Action定义", "目标外部系统"], "writes": ["外部系统", "本地执行日志"],
         "preconditions": ["Action 已定义",
                           "V2-13 风险分级：low 映射门禁通过自动回写 / medium AI 三条件评估通过自动回写（否则升级人工确认）/ high 需 confirmation_token 人工确认"],
-        "postconditions": ["幂等键已写入（已生效回写防重）", "执行结果+评估报告/签核标识已留痕（可重放失败场景）"],
+        "postconditions": ["幂等键已写入（已生效回写防重）", "执行结果+评估报告/签核标识已留痕（可重放失败场景）",
+                           "V2-22 include_trace=true 时返回 process_trace（统一过程链），过程链恒落库（append-only，trace_id 关联 log_id）"],
         "side_effect": True,
     },
     "term_lookup": {
@@ -103,7 +112,8 @@ TOOLS_CONTRACT = {
         "writes": ["实例ABox（output_attribute + __capability__ 元数据，dry_run 时不写；inputs 不写入）"],
         "preconditions": ["能力已发布(active)；实例存在且对象类型与能力目标一致"],
         "postconditions": ["返回四要素溯源（能力版本+输入实例+lookup命中原始值+计算值）",
-                           "inputs 覆盖值/数据缺口显式标注（input_overrides/data_gaps/inputs_persisted=false）"],
+                           "inputs 覆盖值/数据缺口显式标注（input_overrides/data_gaps/inputs_persisted=false）",
+                           "V2-22 include_trace=true 时返回 process_trace（统一过程链），过程链恒落库（append-only）"],
         "side_effect": True,
     },
     "alignment_candidates": {
@@ -133,6 +143,24 @@ TOOLS_CONTRACT = {
             "纯只读：不写实例、不写快照、不改源本体",
             "version 可固定引用融合本体任一历史版本（缺省当前版本）",
         ],
+        "side_effect": False,
+    },
+    "lineage_get": {
+        "reads": ["实例ABox（实例血缘：来源系统/源字段/导入批次/fetched_at/转换规则/上游实例）"], "writes": [],
+        "preconditions": ["实例已落库（instance_id 存在）", "实例所属本体已发布"],
+        "postconditions": ["返回六要素血缘（垂直链）；联邦读内容不持久化故不出现血缘；与 REST /api/lineage/instances/{id} 及前端实例详情同一装配"],
+        "side_effect": False,
+    },
+    "quality_health": {
+        "reads": ["四维数据健康（完整性/唯一性/合规性/新鲜度）", "质量趋势快照序列"], "writes": [],
+        "preconditions": ["本体已发布；old 版本口径变化标注为 caliber_changed"],
+        "postconditions": ["返回 health（无快照则即时计算不落快照）＋trend（旧→新，附 caliber_changed/scale_changed/is_baseline）；观测性指标不阻断"],
+        "side_effect": False,
+    },
+    "connection_health": {
+        "reads": ["外部连接调用统计（read/cdc/federation 成功率时延最近成功）", "CDC 状态", "最近 schema 检查"], "writes": [],
+        "preconditions": ["连接已配置；AI 判定数据新鲜度依赖该视图"],
+        "postconditions": ["返回三类调用统计＋CDC 状态（running/not_supported/disabled/stopped_drift/circuit_open）＋最近 schema 检查；与 REST /api/mcp/connections/{id}/health 同口径"],
         "side_effect": False,
     },
 }
@@ -193,11 +221,29 @@ class _McpEndpoint:
             max_sessions=MCP_MAX_SESSIONS,
         )
         self._register_tools(self.mcp)
+        self._apply_tool_config()
         self._task: asyncio.Task | None = None
         self.started = False
 
     def _register_tools(self, m) -> None:
         _register_tools(self.owner, self.project_id, m)
+
+    def _apply_tool_config(self) -> None:
+        """M4-K（P1）：按项目工具暴露开关过滤注册的工具。
+
+        注册全部 13 个工具后，对停用的工具执行 self.mcp.remove_tool(name)——
+        SDK 会从 tools/list 移除、tools/call 对停用工具返回 "tool not found"
+        （标准 MCP 语义，等价于该工具未注册）。仅影响本项目 /mcp/{pid} 端点，
+        不影响 TOOLS_CONTRACT 静态契约与其他项目。
+        """
+        disabled = self.owner._disabled_tools(self.project_id)
+        if not disabled:
+            return
+        for name in disabled:
+            try:
+                self.mcp.remove_tool(name)
+            except Exception as e:  # noqa: BLE001——SDK 对未注册工具移除可能抛错，忽略
+                logger.warning("remove_tool 跳过 project_id=%s tool=%s: %s", self.project_id, name, e)
 
     def start(self) -> None:
         async def _run() -> None:
@@ -319,6 +365,60 @@ class McpServer:
 
     def _token_record(self, project_id: str) -> dict | None:
         return self._token_store(project_id).get("default")
+
+    # ---------- 按项目工具暴露开关（M4-K P1） ----------
+
+    def _tool_config_store(self, project_id: str) -> JsonStore:
+        return JsonStore("mcp_tool_config", project_id=project_id)
+
+    def _disabled_tools(self, project_id: str) -> set[str]:
+        """该项目被停用的工具集（缺省/未配置=全开）。"""
+        rec = self._tool_config_store(project_id).get("default") or {}
+        disabled = rec.get("disabled") or []
+        # 只认契约内已知工具名，避免脏数据把未知字符当工具名传入 remove_tool
+        return {name for name in disabled if name in TOOLS_CONTRACT}
+
+    def tool_config(self, project_id: str) -> dict:
+        """读取项目工具暴露开关：enabled（可调用）/ disabled（被停用）两组。默认全开。"""
+        disabled = sorted(self._disabled_tools(project_id))
+        enabled = [name for name in TOOLS_CONTRACT if name not in disabled]
+        return {
+            "project_id": project_id,
+            "enabled": enabled,
+            "disabled": disabled,
+            "all_tools": list(TOOLS_CONTRACT.keys()),
+            "default": "all_enabled",  # 未配置即全开（向后兼容，无历史配置）
+        }
+
+    def set_tool_config(self, project_id: str, enabled: list[str] | None = None,
+                        disabled: list[str] | None = None, actor: str = "-") -> dict:
+        """保存项目工具暴露开关（P1）：enabled/disabled 二选一提交，落盘并即时生效。
+
+        - enabled 提交：仅启用该集合内的工具，其余全部停用（显式清单，便于"白名单式"精确控制）；
+        - disabled 提交：仅停用该集合内的工具，其余保持启用（"黑名单式"增量停用）；
+        - 均不传：视为重置为全部启用。
+        立即对已存在的端点 _evict，下次连接按新配置重建（tools/list 与 tools/call 均生效）。
+        """
+        known = list(TOOLS_CONTRACT.keys())
+        if disabled is not None:
+            disabled = [name for name in disabled if name in known]
+        elif enabled is not None:
+            enabled = [name for name in enabled if name in known]
+            disabled = [name for name in known if name not in enabled]
+        else:
+            disabled = []
+        store = self._tool_config_store(project_id)
+        rec = {"id": "default", "disabled": disabled,
+               "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+               "updated_by": actor}
+        if store.get("default"):
+            store.update("default", rec)
+        else:
+            store.insert(rec)
+        # 即时生效：重建端点，使被停用工具从 tools/list 移除、调用返回 not found
+        self._evict(project_id)
+        logger.info("set_mcp_tool_config project_id=%s disabled=%s actor=%s", project_id, disabled, actor)
+        return self.tool_config(project_id)
 
     def generate_token(self, project_id: str) -> dict:
         """生成/轮换项目 MCP 接入 token（旧 token 立即失效）。"""
@@ -591,13 +691,17 @@ class McpServer:
 
     def status(self, project_id: str | None = None) -> dict:
         if project_id:
+            disabled = self._disabled_tools(project_id)
             return {
                 "published": project_id in self._published_ontologies,
                 "endpoint": f"/mcp/{project_id}",
                 "messages_endpoint": f"/mcp/{project_id}/messages/",
                 "transports": self.TRANSPORTS,
                 "protocol_versions": self.PROTOCOL_VERSIONS,
-                "tools": list(TOOLS_CONTRACT.keys()),
+                # M4-K（P1）：项目级 tools 反映实际启用工具；tool_config 单独提供开关明细
+                "tools": [name for name in TOOLS_CONTRACT if name not in disabled],
+                "tool_config": {"enabled": [name for name in TOOLS_CONTRACT if name not in disabled],
+                                 "disabled": sorted(disabled)},
                 "published_ontologies": self._ontology_names(project_id, self._published_ontologies.get(project_id, [])),
                 "token": self.token_status(project_id),
                 "resident": project_id in self._endpoints,
@@ -626,6 +730,12 @@ class McpServer:
         return project_id in self._published_ontologies
 
     def tools(self) -> list[dict[str, Any]]:
+        """M4-K（P0）：对外工具目录（完整契约，含前置/后置条件与读写边界）。
+
+        供前端「工具目录」展示有副作用工具警示；返回全部 13 个已注册工具及其
+        reads/writes/preconditions/postconditions/side_effect 元数据（契约静态，不受
+        按项目工具暴露开关影响——开关只影响实际 tools/list 与 tools/call）。
+        """
         return [
             {
                 "name": name,
@@ -633,6 +743,8 @@ class McpServer:
                 "side_effect": meta.get("side_effect", False),
                 "reads": meta.get("reads", []),
                 "writes": meta.get("writes", []),
+                "preconditions": meta.get("preconditions", []),
+                "postconditions": meta.get("postconditions", []),
                 "example": self._tool_example(name),
             }
             for name, meta in TOOLS_CONTRACT.items()
@@ -783,12 +895,14 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
 
     @m.tool()
     def instance_get(ontology_id: str, object_type: str = "", instance_id: str = "",
-                     limit: int = 50, offset: int = 0, fields: str | list[str] = "") -> str:
+                     limit: int = 50, offset: int = 0, fields: str | list[str] = "",
+                     include_trace: bool = False) -> str:
         """查询已落库实例（ABox）。ontology_id 接受本体名称或 32 位 ID。
         limit 默认 50/上限 200，offset 翻页，fields 为逗号分隔字符串或数组的属性名，做投影
         （如 "attr_name,attr_age"）。
 
         返回 total/has_more；结果被截断时会提示用 object_type 过滤或 offset 取余下数据。
+        include_trace=true 时响应附加 data.trace（统一过程链，V2-22）；过程链恒落库（append-only）。
         """
         oid = _resolve_ontology_id(owner, project_id, ontology_id)
         _require_published(owner, project_id, oid)
@@ -830,6 +944,11 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
         if has_more and not (object_type or instance_id):
             payload["hint"] = (f"共 {total} 条，本次返回 {off + 1}-{off + len(page)} 条。"
                                "建议加 object_type 缩小范围，或用 offset 取余下数据。")
+        # V2-22（M4-J）：过程链恒落库（append-only），仅响应附带受 include_trace 控制。
+        trace = make_instance_get_steps(None, payload).to_trace()
+        record_trace(project_id, trace, source="mcp:instance_get")
+        if include_trace:
+            payload["process_trace"] = trace
         return json.dumps(payload, ensure_ascii=False)
 
     @m.tool()
@@ -890,7 +1009,8 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
 
     @m.tool()
     def action_invoke(action_id: str, confirmation_token: str = "",
-                      input: str = "", dry_run: bool = False) -> str:
+                      input: str = "", dry_run: bool = False,
+                      include_trace: bool = False) -> str:
         """触发/确认执行 Action（V2-13 回写风险分级，trigger_source=mcp）。
 
         - 传 input（JSON 字符串）触发执行：按 risk_level 分流——
@@ -899,6 +1019,7 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
         - 传 confirmation_token 确认回写（签核标识=当前调用者身份+时间戳）。
         - dry_run=true 仅预览 planned_payload 与映射门禁结果，不回写。
         未启用真实回写（ONTOLOGY_WRITEBACK_ENABLED=false）时返回展示模式结果。
+        include_trace=true 时响应附加 data.trace（统一过程链，V2-22）；过程链恒落库（append-only）。
         """
         rec = actions.get(action_id)
         if not rec:
@@ -922,6 +1043,12 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
             result = owner._action_engine.execute(rec, {"input": parsed_input, "dry_run": dry_run},
                                                   project_id=project_id,
                                                   actor=mcp_actor, trigger_source="mcp")
+        # V2-22（M4-J）：过程链恒落库（append-only），仅响应附带受 include_trace 控制。
+        trace = make_action_steps(None, rec, result).to_trace()
+        record_trace(project_id, trace, log_id=result.get("log_id"),
+                     source="mcp:action_invoke")
+        if include_trace:
+            result["process_trace"] = trace
         return json.dumps(result, ensure_ascii=False)
 
     @m.tool()
@@ -957,7 +1084,7 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
 
     @m.tool()
     def capability_call(capability: str, instance_id: str = "", dry_run: bool = False,
-                        inputs: dict | None = None) -> str:
+                        inputs: dict | None = None, include_trace: bool = False) -> str:
         """执行已发布(active)能力（M1-B / V2-04 首片，派生型 expression 实现）。
         结果含四要素溯源：能力版本 + 输入实例 + lookup 命中（record_id/编码/原始值）+ 计算值。
 
@@ -968,6 +1095,7 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
         作为临时输入覆盖，仅参与本次计算、**不落库为实例内容**；返回 input_overrides /
         data_gaps / inputs_persisted=false 供外部 Agent 组装带溯源回答。
         仅 active 能力可经 MCP 执行，draft 返回 FORBIDDEN_DRAFT 错误。
+        include_trace=true 时响应附加 data.trace（统一过程链，V2-22）；过程链恒落库（append-only）。
         """
         from capabilities import CapabilityApiError, CapabilityService
 
@@ -995,6 +1123,12 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
         except CapabilityApiError as e:
             raise _err(ERR_CAPABILITY_FAILED,
                        f"{e.code}: {e.message} (http_status={e.http_status})")
+        # V2-22（M4-J）：过程链恒落库（append-only），仅响应附带受 include_trace 控制。
+        # 原有四要素溯源 res["trace"] 保留，统一过程链用独立键 process_trace（两层并存）。
+        trace = make_capability_steps(None, rec, res).to_trace()
+        record_trace(project_id, trace, source="mcp:capability_call")
+        if include_trace:
+            res["process_trace"] = trace
         return json.dumps(res, ensure_ascii=False)
 
     @m.tool()

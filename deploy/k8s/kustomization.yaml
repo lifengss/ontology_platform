@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# M4-H（V2-20 K8s 部署）入口：默认（单副本/演示）部署。
+# 多副本/生产配置见 overlays/prod（replicas=3 + INSTANCE_STORE_BACKEND=pg 收敛）。
+resources:
+  - base/namespace.yaml
+  - base/storage.yaml
+  - base/configmap.yaml
+  - base/secret.yaml
+  - base/backend-deployment.yaml
+  - base/backend-service.yaml
+  - base/frontend-deployment.yaml
+  - base/jena-statefulset.yaml
+  - base/neo4j-statefulset.yaml
+  - base/postgres-statefulset.yaml

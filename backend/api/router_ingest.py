@@ -718,9 +718,47 @@ def _stable_key_for(ontology: dict, object_type: str) -> str | None:
     return (obj or {}).get("stable_key")
 
 
+def _stable_key_tuple(ontology_id: str, key: str, value: Any) -> tuple[str, str, str]:
+    """稳定匹配键 (ontology_id, stable_key, str(stable_key_value))。
+
+    与 _match_by_stable_key 的匹配条件一致：ontology_id 归一（存量缺省视为当前本体）、
+    str 化比较 stable_key_value（避免 int/str 类型漂移导致漏匹配）。
+    """
+    return (str(ontology_id or ""), str(key or ""), str(value))
+
+
+def _build_stable_key_index(instance_store, ontology_id: str, object_type: str,
+                            key: str) -> dict[tuple[str, str, str], dict]:
+    """HF-13：一次性读取该对象类型全部记录，构建去重匹配索引。
+
+    返回 dict[(ontology_id, stable_key, str(stable_key_value))] -> record。
+    只把「带 stable_key/stable_key_value 元数据」的存量记录纳入索引——无主键元数据的
+    存量实例不参与匹配（与 _match_by_stable_key 原语义一致，不被静默改写）。
+    这样 approve 落库对候选逐行走 O(1) 索引命中，而不是每行 find(limit=None) 整对象
+    全表扫描（O(n²)，万级导入时单批 >180s 超时）。
+    """
+    index: dict[tuple[str, str, str], dict] = {}
+    if not key:
+        return index
+    for r in instance_store.find(object_type=object_type, limit=None):
+        rk = r.get("stable_key")
+        rv = r.get("stable_key_value")
+        if not rk or rv is None:
+            continue
+        index[_stable_key_tuple(r.get("ontology_id") or ontology_id, rk, rv)] = r
+    return index
+
+
 def _match_by_stable_key(instance_store, ontology_id: str, object_type: str,
-                         key: str, value: Any) -> dict | None:
-    """按 (本体, 对象类型, 主键字段, 主键值) 命中已有实例；无该元数据的存量实例不参与。"""
+                         key: str, value: Any,
+                         index: dict[tuple[str, str, str], dict] | None = None) -> dict | None:
+    """按 (本体, 对象类型, 主键字段, 主键值) 命中已有实例；无该元数据的存量实例不参与。
+
+    index 非空时走 O(1) 索引命中（HF-13：approve 批量去重，避免每行一次整表扫描）；
+    未传 index 时回退 find(limit=None) 全表扫描（保留原有语义，供非 approve 复用）。
+    """
+    if index is not None:
+        return index.get(_stable_key_tuple(ontology_id, key, value))
     for r in instance_store.find(object_type=object_type, limit=None):
         if (r.get("ontology_id") or ontology_id) != ontology_id:
             continue
@@ -747,6 +785,11 @@ def _approve_one(rec: dict, candidate_id: str, project_id: str) -> dict:
         rec["status"] = "imported"
         instance_store = _instance_store_for(project_id)
         key = _stable_key_for(ontology, rec.get("object_type"))
+        # HF-13：对候选落库前一次性读取该对象类型全部记录，构建去重匹配索引，
+        # 逐行走 O(1) 命中，替代原「每行 _match_by_stable_key → find(limit=None) 整对象全表扫描」(O(n²))。
+        # 万级导入时该 O(n²) 造成单批 >180s 超时（hotfix §14.8 / HF-13）。
+        match_index = _build_stable_key_index(instance_store, rec.get("ontology_id"),
+                                              rec.get("object_type"), key)
         uploader = rec.get("created_by")  # V2-06：上传型内容默认仅上传者可读
         # V2-02（M4-A①）：渠道分流——源连接型（external_mcp/cdc）非键内容值永不落地（INV-1），
         # 只持久化关系快照（键值+关系边+_source）；SHACL 门禁仍用候选全量值做边界校验（上面已完成）。
@@ -782,7 +825,8 @@ def _approve_one(rec: dict, candidate_id: str, project_id: str) -> dict:
                 instance_record["stable_key"] = key
                 instance_record["stable_key_value"] = key_value
                 matched = _match_by_stable_key(instance_store, rec.get("ontology_id"),
-                                               rec.get("object_type"), key, key_value)
+                                               rec.get("object_type"), key, key_value,
+                                               index=match_index)
                 if matched:
                     # 联邦渠道只合并键/关系/_source（内容值不进本地存储）；
                     # 旧记录基线先按快照键域剥离，防止迁移前遗留的非键值借 dedup 更新残留（INV-1）
@@ -810,6 +854,10 @@ def _approve_one(rec: dict, candidate_id: str, project_id: str) -> dict:
                     n_deduped += 1
                     continue
             instance_store.insert(instance_record)
+            # HF-13：把本次新增的带主键记录同步进索引，使「批次内重复 key」仍能命中并收敛
+            # （等价于原逐行 find 全表能看到本次已 insert 记录的行为，防止重复追加）。
+            if key and key_value is not None and key_value != "":
+                match_index[_stable_key_tuple(rec.get("ontology_id"), key, key_value)] = instance_record
             n_inserted += 1
         result["inserted"] = n_inserted
         result["dedup_updated"] = n_deduped

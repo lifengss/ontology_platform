@@ -742,6 +742,26 @@ class ActionEngine:
             "outcome": "simulated" if simulated else ("success" if success else "failed"),
         }
         _log_store_for(project_id).insert(log_record)
+        # V2-10 旁路操作日志（M4-G）：Action 执行事件（含 display_only 模拟/熔断不例外之外呼）。
+        try:
+            import sidecar_log as sidecar_svc
+            _sidecar_payload = {
+                "action_id": action_id,
+                "kind": kind,
+                "invoke_url": (invoke or {}).get("url", ""),
+                "idempotency_key": idem,
+                "risk_level": risk,
+                "trigger_source": trigger_source,
+                "display_only": bool(_display_only()),
+            }
+            _sidecar_result = {"executed": executed, "outcome": log_record["outcome"],
+                               "log_id": log_id, "identity": identity,
+                               "external_status": (external_response or {}).get("status")}
+            sidecar_svc.record(type_=sidecar_svc.TYPE_ACTION_EXECUTION, actor=_actor_username(actor),
+                               project_id=project_id, target_type="action", target_id=action_id,
+                               payload=_sidecar_payload, result=_sidecar_result)
+        except Exception as e:  # noqa: BLE001  旁路失败不影响主流程（TCE-10-01）
+            logger.debug("sidecar: action 执行旁路日志写失败（已忽略）: %s", e)
         logger.info("writeback action_id=%s log_id=%s kind=%s outcome=%s identity=%s",
                     action_id, log_id, kind, log_record["outcome"], identity)
 

@@ -389,6 +389,7 @@
             <button class="subtab active" id="subtabForm" onclick="setEditorMode('form')">表单建模</button>
             <button class="subtab" id="subtabAi" onclick="setEditorMode('ai')">AI 生成</button>
             <button class="subtab" id="subtabDoc" onclick="setEditorMode('doc')">文档逆向</button>
+            <button class="subtab" id="subtabTemplate" onclick="setEditorMode('template')">模板库</button>
           </div>
 
           <div id="modeForm">
@@ -426,6 +427,24 @@
               <button class="btn" onclick="uploadDoc()" id="btnDocParse">开始解析</button>
               <span class="text-xs text-slate-500 self-center">解析为异步任务，右下角提示状态</span>
             </div>
+          </div>
+
+          <div id="modeTemplate" class="hidden">
+            <label>输入外部 LinkML 模板地址（http/https），预览后可一键实例化</label>
+            <div class="flex gap-2 mt-2 mb-3">
+              <input id="tplUrl" class="w-full" placeholder="https://example.com/supply-chain.yaml" />
+              <button class="btn" onclick="previewExternalTemplate()">预览结构</button>
+            </div>
+            <div id="tplError" class="text-xs text-red-400 mb-2 hidden"></div>
+            <div id="tplPreview" class="hidden">
+              <div id="tplSummary" class="text-xs text-slate-400 mb-2"></div>
+              <div id="tplObjects" class="space-y-3 mb-3 max-h-64 overflow-y-auto"></div>
+              <div class="flex gap-2">
+                <input id="tplName" class="w-1/2" placeholder="实例化后本体名称（可选）" />
+                <button class="btn success flex-1" id="btnTplInst" onclick="instantiateExternalTemplate()">一键实例化为可编辑本体</button>
+              </div>
+            </div>
+            <div class="text-xs text-slate-500 mt-2">离线时提示「网络不可达」，本地模板库与表单建模仍可用；恶意/超大/格式非法模板会拒绝。</div>
           </div>
         </div>
 
@@ -1194,6 +1213,23 @@
         <div class="card p-4">
           <h3 class="font-medium mb-3">工具清单</h3>
           <div id="mcpToolsList" class="space-y-2 max-h-[360px] overflow-auto"></div>
+        </div>
+      </div>
+
+      <div class="col-span-12">
+        <div class="card p-4">
+          <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <div>
+              <h3 class="font-medium mb-1">按项目工具暴露开关（MCP 工具等级）</h3>
+              <div class="text-xs text-slate-500">按项目控制哪些 MCP 工具对外可用：被停用的工具在 <code>tools/list</code> 中不出现、调用返回 not found（仅影响本项目端点）。默认全部启用。</div>
+            </div>
+            <div class="flex gap-2">
+              <button class="btn secondary" type="button" onclick="setAllMcpTools(true)">全部启用</button>
+              <button class="btn secondary" type="button" onclick="setAllMcpTools(false)">全部停用</button>
+              <button class="btn" type="button" onclick="saveMcpToolConfig()">保存并生效</button>
+            </div>
+          </div>
+          <div id="mcpToolConfigList" class="grid grid-cols-2 lg:grid-cols-3 gap-2 text-xs"></div>
         </div>
       </div>
       <div class="col-span-12 lg:col-span-6">

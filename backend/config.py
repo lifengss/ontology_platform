@@ -59,6 +59,10 @@ class Settings:
             "POSTGRES_DSN", "postgresql://ont:ontsecret@localhost:5432/ont"
         )
 
+        # V2-20（M4-H）实例存储后端：'jsonl'（本地文件，MVP 默认）/ 'pg'（收敛进 Postgres，
+        # 多副本共享一致——TC-20-03）。K8s 部署时设 INSTANCE_STORE_BACKEND=pg。
+        self.instance_store_backend: str = os.getenv("INSTANCE_STORE_BACKEND", "jsonl").strip().lower()
+
         # 本地持久化（无需 Postgres 也能跑通 VS0/VS1 的演示路径）
         self.data_dir: str = os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
         self.secrets_dir: str = os.getenv("SECRETS_DIR", os.path.join(os.path.dirname(__file__), "secrets"))

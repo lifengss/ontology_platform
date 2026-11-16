@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: ontology-platform
+  labels:
+    app.kubernetes.io/part-of: ontology-platform
+    app.kubernetes.io/component: backend
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: backend
+    spec:
+      containers:
+        - name: backend
+          image: ontology-platform/backend:2.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: backend-config
+            - secretRef:
+                name: backend-secret
+          env:
+            # 数据/日志/密钥目录（挂载到 PVC / EmptyDir）
+            - name: DATA_DIR
+              value: "/app/data"
+            - name: LOG_DIR
+              value: "/app/logs"
+            - name: SECRETS_DIR
+              value: "/app/secrets"
+          volumeMounts:
+            - name: backend-data
+              mountPath: /app/data
+            - name: backend-secrets
+              mountPath: /app/secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 25
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+      volumes:
+        - name: backend-data
+          persistentVolumeClaim:
+            claimName: backend-data-pvc
+        - name: backend-secrets
+          emptyDir: {}
