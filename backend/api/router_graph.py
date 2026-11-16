@@ -12,7 +12,6 @@ from core.responses import ApiError, success
 from core.storage import JsonStore
 from jena_adapter.client import sparql_query
 from logging_setup import get_logger
-from reasoning import inference_trace
 from tenant import ensure_schema_visible
 from viz import Viz
 
@@ -40,27 +39,34 @@ def graph_data(
     return success(_viz.graph_data(ontology_id, rec, mode=mode, project_id=project_id, max_instances=max_instances))
 
 
-def _inference_trace_response(ontology_id: str, rec: dict[str, Any], focus: str | None = None) -> dict[str, Any]:
-    steps = inference_trace(rec, focus)
-    return {"ontology_id": ontology_id, "focus": focus, "steps": steps}
+def _inference_trace_response(ontology_id: str, rec: dict[str, Any], focus: str | None = None,
+                              project_id: str = "", engine: str | None = None) -> dict[str, Any]:
+    from reasoning import engine as rengine
+    # V2-16：双引擎推理（local / fuseki），Fuseki 失败自动降级本地
+    data = rengine.run_inference(rec, project_id, ontology_id, focus=focus, engine=engine)
+    return {"ontology_id": ontology_id, "focus": focus, **data}
 
 
 @router.get("/ontologies/{ontology_id}/inference")
-def inference_trace_endpoint(ontology_id: str, request: Request, focus: str | None = None, project_id: str = Depends(project_id_param)):
+def inference_trace_endpoint(ontology_id: str, request: Request, focus: str | None = None,
+                             engine: str | None = Query(default=None, pattern="^(local|fuseki)$",
+                                                       description="V2-16 推理引擎：local / fuseki，缺省按运行时配置"),
+                             project_id: str = Depends(project_id_param)):
     rec = _store_for(project_id).get(ontology_id)
     if not rec:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
     ensure_schema_visible(request, project_id, rec)
-    return success(_inference_trace_response(ontology_id, rec, focus))
+    return success(_inference_trace_response(ontology_id, rec, focus, project_id, engine))
 
 
 @router.get("/inference/trace/{ontology_id}")
-def inference_trace_by_id(ontology_id: str, project_id: str = Depends(project_id_param)):
+def inference_trace_by_id(ontology_id: str, engine: str | None = Query(default=None, pattern="^(local|fuseki)$"),
+                          project_id: str = Depends(project_id_param)):
     """推理链路接口别名，兼容 /api/inference/trace/{ontology_id} 调用。"""
     rec = _store_for(project_id).get(ontology_id)
     if not rec:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
-    return success(_inference_trace_response(ontology_id, rec, focus=None))
+    return success(_inference_trace_response(ontology_id, rec, focus=None, project_id=project_id, engine=engine))
 
 
 @router.post("/inference/impact")

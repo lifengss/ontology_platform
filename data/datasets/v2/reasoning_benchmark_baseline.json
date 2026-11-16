@@ -1,0 +1,40 @@
+{
+  "case": "TC-16-05",
+  "input": {
+    "ttl": "D:\\self_coding\\ontology_platform\\data\\datasets\\v2\\benchmark_graph.ttl",
+    "triples": 54801,
+    "note": "基准规模集（2000 类/6000 属性/约 4 万三元组）"
+  },
+  "rounds": 3,
+  "statistic": "median",
+  "local": {
+    "ms": [
+      333.7,
+      362.6,
+      338.2
+    ],
+    "median_ms": 338.2,
+    "closure_triples": 171399,
+    "derived_triples": 116598
+  },
+  "fuseki": {
+    "ms": [
+      20933.0,
+      30411.6,
+      20205.9
+    ],
+    "median_ms": 20933.0,
+    "closure_compute_ms_median": 273.4,
+    "push_ms_median": 9992.5,
+    "writeback_verify_ms_median": 16139.1,
+    "closure_triples": 171399,
+    "pushed_triples": 54801,
+    "materialized_triples": 116598,
+    "verified": true
+  },
+  "closure_consistent": true,
+  "note": "混合模式：闭包由平台推理核心计算（Jena 5.1.0 无 Fuseki 物化推理器），远程路径 = 闭包计算 ＋ 推送/写回/读回验证 HTTP 往返；远程时延不低于纯本地属预期结构，不作'远程优于本地'断言（见 V2-16 依赖约束注记）。",
+  "generated_at": "2026-11-16T01:22:22.004588+00:00",
+  "base_url": "http://localhost:3030",
+  "dataset": "ontology"
+}
