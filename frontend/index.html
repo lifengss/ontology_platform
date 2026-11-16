@@ -659,9 +659,18 @@
     <section id="inference" class="tab-content hidden grid grid-cols-12 gap-4">
       <div class="col-span-12 lg:col-span-4 flex flex-col gap-4">
         <div class="card p-4">
+          <h3 class="font-medium mb-2">推理引擎 <span class="text-xs font-normal text-slate-500">V2-16 双引擎</span></h3>
+          <div id="engineSwitchBox" class="text-xs text-slate-500">加载中…</div>
+        </div>
+        <div class="card p-4">
+          <h3 class="font-medium mb-2">SHACL 校验引擎 <span class="text-xs font-normal text-slate-500">V2-17 双跑</span></h3>
+          <div id="shaclEngineBox" class="text-xs text-slate-500">加载中…</div>
+          <p class="mt-2 text-xs text-slate-400">Jena 侧经 Java 子进程执行（与推理服务同一 Jena/RDF 栈、同一形状文件）；失败自动回退本地并提示。</p>
+        </div>
+        <div class="card p-4">
           <h3 class="font-medium mb-3">选择本体</h3>
           <select id="inferOntology" class="w-full mb-3" onchange="loadInference()"></select>
-          <p class="text-xs text-slate-400">下方两块推理：① 业务影响推理（实例值变化 → 下游影响）；② 模式层推理（本体公理推导）。</p>
+          <p class="text-xs text-slate-400">下方两块推理：① 业务影响推理（实例值变化 → 下游影响）；② 模式层推理（本体公理推导，按上方引擎执行）。</p>
         </div>
         <div class="card p-4">
           <h3 class="font-medium mb-2">业务影响推理 <span class="text-xs font-normal text-slate-500">实例值变化 → 下游业务影响</span></h3>
@@ -695,9 +704,11 @@
         </div>
         <div class="card p-4">
           <div class="flex items-center justify-between mb-1">
-            <h3 class="font-medium">模式层推理（OWL2-RL 风格）</h3>
+            <h3 class="font-medium">模式层推理（OWL2-RL 风格）<span id="inferenceEngineBadge" class="ml-2 text-xs font-normal"></span></h3>
             <span class="text-xs text-slate-500">公理推导：inverseOf 对称性 / subClassOf 传递 / 属性域值域继承（与具体实例无关）</span>
           </div>
+          <div id="inferenceDegradeBar" class="hidden mb-2 text-xs rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 px-3 py-2 leading-relaxed"></div>
+          <div id="inferenceRemoteInfo" class="hidden mb-2 text-xs rounded border border-sky-500/40 bg-sky-500/10 text-sky-300 px-3 py-2 leading-relaxed"></div>
           <div id="inferenceSteps" class="space-y-2 max-h-[400px] overflow-auto"></div>
         </div>
       </div>

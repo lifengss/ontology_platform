@@ -97,6 +97,34 @@ def _build_classes(g: Graph, objects, obj_by_id) -> None:
             g.add((cls, RDFS.subClassOf, OWL.Thing))
 
 
+_XSD_ZH = {"string": "字符串", "integer": "整数", "float": "浮点数", "boolean": "布尔", "date": "日期"}
+
+
+def _attr_sh_message(attr: dict[str, Any], c: dict[str, Any]) -> str:
+    """属性 PS 的中文 sh:message（V2-17 M4-D）：约束摘要，两引擎违规明细 message 同源。
+
+    pyshacl 与 Jena SHACL 对同一失败的约束组件各自生成一条 sh:ValidationResult；
+    message 均取本 PS 的 sh:message（存在时覆盖引擎默认模板）→ 双引擎违规明细
+    （severity/path/focus_node/message）可逐条一致比对（TC-17-01）。
+    """
+    parts = [f"类型为{_XSD_ZH.get(attr.get('data_type', 'string'), attr.get('data_type'))}"]
+    if attr.get("required"):
+        parts.append("必填")
+    if c.get("min_length") is not None:
+        parts.append(f"长度≥{c['min_length']}")
+    if c.get("max_length") is not None:
+        parts.append(f"长度≤{c['max_length']}")
+    if c.get("pattern"):
+        parts.append(f"匹配模式 {c['pattern']}")
+    if c.get("minimum") is not None:
+        parts.append(f"值≥{c['minimum']}")
+    if c.get("maximum") is not None:
+        parts.append(f"值≤{c['maximum']}")
+    if c.get("enum"):
+        parts.append("取值属于枚举 [" + "、".join(str(x) for x in c["enum"]) + "]")
+    return f"属性[{attr.get('name', attr['id'])}]约束不满足：须" + "、".join(parts)
+
+
 def _build_shapes(g: Graph, objects, obj_by_id, ontology) -> None:
     for o in objects:
         cls = URIRef(BASE + _local(o["id"]))
@@ -133,6 +161,9 @@ def _build_shapes(g: Graph, objects, obj_by_id, ontology) -> None:
                 g.add((ps, SH.maxInclusive, Literal(float(c["maximum"]))))
             if c.get("enum"):
                 _add_sh_in(g, ps, c["enum"], attr.get("data_type", "string"))
+            # V2-17（M4-D）：PS 级中文 sh:message——两引擎（pyshacl / Jena SHACL）
+            # 违规明细 message 同源（取自形状定义），保证双跑违规明细一致（TC-17-01/02）。
+            g.add((ps, SH.message, Literal(_attr_sh_message(attr, c))))
 
         for rel in o.get("relations", []):
             prop = URIRef(BASE + _local(rel["id"]))
@@ -168,6 +199,12 @@ def _build_shapes(g: Graph, objects, obj_by_id, ontology) -> None:
                 g.add((list1, RDF.first, shape_lit))
                 g.add((shape_lit, SH["datatype"], sk_dt))
                 g.add((list1, RDF.rest, RDF.nil))
+                # V2-17（M4-D）：关系 PS 中文 sh:message（双形态约束，与属性 PS 同源策略）
+                g.add((ps, SH.message, Literal(
+                    f"关系[{rel.get('name', rel['id'])}]约束不满足："
+                    f"取值须为目标对象[{tgt.get('name', tgt['id'])}]的实例引用，"
+                    f"或为其业务主键（stable_key）字面量"
+                )))
 
     # 全局约束（仅处理 unique 规则）：把 uniqueKey 编译为 RDF list 供模型导出/兼容。
     # 注意 sh:uniqueKey 不是 SHACL 标准约束组件，pyshacl 不会执行；实例级唯一性由

@@ -74,10 +74,52 @@ def upload_ttl(ontology_id: str, ttl: str, project_id: str | None = None) -> dic
 
 
 def shacl_validate(data_graph: Graph, shapes_graph: Graph) -> dict | None:
-    """SHACL 校验权威实现（VS2）。
+    """SHACL 校验双引擎入口（V2-17 M4-D；VS2 权威实现）。
+
+    引擎分发（jena_adapter.shacl_engine，优先级 runtime > env > 缺省 local）：
+    - local：本地 pyshacl（默认路径，_local_shacl_validate；pyshacl 未安装返回 None，
+      由调用方回退到结构校验——与原契约一致）；
+    - jena：Jena SHACL 引擎（org.apache.jena.shacl，随 Fuseki fat jar 内置，与推理服务
+      同一 Jena/RDF 栈），经 Java 子进程执行（jena_adapter.shacl_jena）；任一环节失败
+      （引擎缺失/进程失败/超时）→ 自动回退本地 pyshacl（degraded=True + degrade_reason），
+      保证入库门始终执行不悬空（TCE-17-02）。
+
+    诚实口径：Fuseki standalone fat jar 无 SHACL HTTP 服务端点（2026-11-16 依赖事实，
+    见 fuseki-config.ttl 头部注记），故「Jena 侧」为 Java 子进程执行 Jena SHACL 引擎，
+    每次校验含 JVM 启动＋文件序列化开销——时延基线如实记录（TC-17-05），不断言快于本地。
+
+    返回 { valid: bool, violations: [{ severity, path, focus_node, message }] }
+    ＋ V2-17 字段（engine/requested_engine/degraded/degrade_reason；local 默认路径下
+    pyshacl 缺失仍返回 None，V2-17 字段仅在成功返回 dict 时携带）。
+    违规明细格式统一——前端展示与 422 明细共用（TC-17-02）。
+    """
+    from jena_adapter import shacl_engine
+    engine, _source = shacl_engine.get_configured_engine()
+    if engine == "jena":
+        from jena_adapter import shacl_jena
+        try:
+            r = shacl_jena.jena_shacl_validate(data_graph, shapes_graph)
+        except Exception:  # noqa: BLE001 - 任何异常回退本地，入库门不得悬空
+            r = None
+        if r is not None:
+            r.update(engine="jena", requested_engine="jena", degraded=False, degrade_reason=None)
+            return r
+        reason = shacl_jena.last_error() or "jena_shacl_failed"
+        logger.warning("Jena SHACL 执行失败，回退本地 pyshacl：%s", reason)
+        local = _local_shacl_validate(data_graph, shapes_graph)
+        if local is not None:
+            local.update(engine="local", requested_engine="jena", degraded=True, degrade_reason=reason)
+        return local
+    local = _local_shacl_validate(data_graph, shapes_graph)
+    if local is not None:
+        local.update(engine="local", requested_engine="local", degraded=False, degrade_reason=None)
+    return local
+
+
+def _local_shacl_validate(data_graph: Graph, shapes_graph: Graph) -> dict | None:
+    """本地 pyshacl 校验（VS2 原默认路径）。
 
     优先 pyshacl（纯 Python，离线可用）；若 pyshacl 未安装返回 None，由调用方回退到结构校验。
-    生产可改为调用 Fuseki SHACL 端点（参数不变，仅替换实现）。
     返回 { valid: bool, violations: [{ severity, path, focus_node, message }] }。
     """
     try:

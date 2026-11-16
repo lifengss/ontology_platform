@@ -1428,3 +1428,93 @@
 
 - `backend/tests/test_v2_15_query.py` **9/9**（临时 DATA_DIR、file 模式图）：TC-15-01 命名图查询（schema＋关系快照＋上传型值同图）/ TC-15-02 REST（对象类型＋条件＋分页）＋GraphQL（动态 schema＋实例查询）/ TC-15-03 401/403（三接口一致）/ TC-15-04 跨图子句拒绝（`CROSS_GRAPH_FORBIDDEN`）＋本图仅本本体实例 / TC-15-05 源连接型非键内容不返回（SPARQL 图无值＋REST/GraphQL 边界提示）/ TC-15-06 三类来源标记 / TC-15-07 上传型默认不可读→显式开放后可读 / TCE-15-01 语法错误标准语义＋行数上限（1000/5000，GraphQL 200）/ TCE-15-02 未发布→404 不暴露存在性 / TCE-15-03 introspection 仅已发布。
 - 回归：L5 `backend/tests` **138/138**。
+
+## 35. V2-16 推理引擎接口（M4-C，2026-11-16）
+
+推理双引擎（local rdflib / Fuseki 远程）与推理图范围检查。§4 `GET /api/ontologies/{id}/inference` 增加可选查询参数 `engine=local|fuseki`（缺省跟运行时引擎配置）；响应新增 35.4 所列 V2-16 字段。
+
+**依赖事实（2026-11-16 实测，Jena 5.1.0）**：Fuseki 数据集无法挂载物化推理器（TDB2/TDB1/通用/内存装配器均无 reasoner 属性，OWL2-RL 模块不存在，`DatasetRDFS` 未注册——详见 `backend/fuseki-config.ttl` 头部注记），纯远程 OWL2-RL 推理不可行。故「远程管道」为**混合模式**：本地构建命名图（schema＋关系快照＋上传型值，`build_full_graph` 同口径）→ 推送远端命名图（先清空再载入，持久化）→ 闭包由平台推理核心计算（`local_materialize`，与本地引擎同一闭包集，两模式 steps 逐字段一致）→ 派生三元组写回远端物化（SPARQL 可直接查）→ COUNT 读回验证（不符 → `fuseki_verify_failed` 降级）。远程管道的价值＝推理结果在远端物化存储＋读回一致性验证，**不是**「远程推理快于本地」（远程时延含本地闭包计算＋HTTP 往返＋TDB2 写入开销，见 TC-16-05 基线）。
+
+### 35.1 `GET /api/reasoning/engine`
+
+当前生效引擎（read 权限）。响应（success 信封）：
+
+```json
+{
+  "engine": "local", "source": "default",
+  "env_engine": null,
+  "fuseki": {"base_url": "http://localhost:3030", "dataset": "ontology", "reachable": true}
+}
+```
+
+优先级：运行时配置 `data/reasoning_engine.json`（`source=runtime`）＞ 环境变量 `ONTOLOGY_REASONING_ENGINE`（`source=env`）＞ 缺省 `local`（`source=default`）。`fuseki.reachable` 为连通探测结果（供前端展示）。
+
+### 35.2 `PUT /api/reasoning/engine`
+
+运行时切换引擎（write 权限，401/403 同 V2-05）。body `{"engine": "local"|"fuseki"}`，非法值 → 422 `VALIDATION_ERROR`。响应同 35.1（`source=runtime`）。
+
+### 35.3 `GET /api/reasoning/scope/{ontology_id}`
+
+推理图范围检查（TC-16-04 负向断言；read＋schema 可见性）。`?project_id=`。响应（success 信封）：`ok`（无违规）/ `graph{uri,triples,schema_triples,instance_triples}` / `instances{total,upload,source_connection}` / `stats{type_label_triples,relation_edge_triples,upload_value_triples,other_triples}` / `violations[]`（源连接型实例的非键内容三元组逐条列出，`reason_zh` 说明）。
+
+### 35.4 推理响应 V2-16 字段
+
+`GET /api/ontologies/{id}/inference`（及别名 `GET /api/inference/trace/{id}`）响应（success 信封）新增：
+
+| 字段 | 说明 |
+|---|---|
+| `engine` | 实际使用引擎（`local`/`fuseki`） |
+| `requested_engine` | 请求引擎（显式 `engine` 参数＞运行时配置） |
+| `degraded` | 是否自动降级本地（请求 fuseki 且失败时为 `true`） |
+| `degrade_reason` | 原因码：`fuseki_unreachable` / `fuseki_update_failed` / `fuseki_query_failed` / `fuseki_query_timeout` / `fuseki_verify_failed`；未降级 `null` |
+| `hint_zh` | 降级提示文案（前端展示）；未降级 `null` |
+| `remote` | local 引擎为 `null`；fuseki 引擎含 `base_url/dataset/graph/pushed_triples/materialized_triples/closure_triples`（恒等 `pushed+materialized`）/`verified(true)`/`closure_computation("local")`/`extra_inferences`（当前实现恒 0，诊断性字段） |
+
+### 35.5 验收
+
+- `backend/tests/test_v2_16_reasoning.py` **11/11**（mock Fuseki＝纯 HTTP ThreadingHTTPServer，TDB2 同语义：DELETE 清空＋INSERT 追加＋COUNT 计存储三元组）：TC-16-01 引擎切换（runtime/env/default 三级优先）/ TC-16-02 两模式 steps 逐字段一致＋remote 契约 / TC-16-03 宕机降级（`fuseki_unreachable`＋hint_zh）/ TC-16-04 范围负向断言 / TC-16-05 混合管道契约（`closure_computation=local`、`verified`、计数恒等）/ TCE-16-01 部分失败（update/query 失败码）/ 读回验证失败降级（`fuseki_verify_failed`）。
+- TC-16-05 时延基线 `data/datasets/v2/reasoning_benchmark_baseline.json`（3 次中位数，目标值不冻结；真实 Fuseki 实测 remote ≈ 62× local，主因两次 TDB2 大写入放大——基线如实记录，不断言远程优于本地）；基准脚本 `scripts/bench_v2_16_reasoning.py`。
+- 回归：L5 `backend/tests` **149/149**。
+
+## 36. V2-17 SHACL 校验引擎接口（M4-D，2026-11-16）
+
+SHACL 校验双引擎（local pyshacl / Jena SHACL）。统一入口 `jena_adapter.client.shacl_validate(data_graph, shapes_graph)` 升级为双引擎分发层——签名不变，入库批量校验（`ingestion.approve`）、实例更新预检（`validate_instance`，422 details）、前端展示全部复用同一结果结构；成功返回 dict 时附带 36.3 所列 V2-17 字段。
+
+**依赖事实（2026-11-16 实测，Jena 5.1.0）**：Fuseki standalone fat jar（`deps/apache-jena-fuseki-5.1.0/fuseki-server.jar`）不含 ARQ CLI 主类（`org.apache.jena.sparql.ARQ` 不存在），且 SHACL HTTP 服务端点（`SHACL_Validation` servlet）未注册进默认服务组——「Fuseki SHACL 扩展执行路径」不可行。但 jar 内置完整 Jena SHACL 引擎（`org.apache.jena.shacl`，5.1.0 新实现，183 个 SHACL 类）与 riot/IRI 基础设施。故「Jena 侧」＝**Java 单文件源启动子进程**（`java -Xmx1g -cp fuseki-server.jar backend/jena_adapter/java/ShaclEval.java shapes.nt data.nt`）执行 Jena SHACL 引擎——与推理服务（Fuseki）同一 Jena/RDF 栈、同一形状文件（形状版本一致，TP-17-02）。输出首行 `CONFORMS=true|false`＋报告图 NT，报告图经与本地路径**同一函数** `_parse_shacl_report` 解析（格式天然一致）。开销诚实口径：每次校验＝JVM 启动（约 1–3s）＋两图 NT 序列化/反序列化＋引擎执行，**不断言 Jena 快于本地**（TC-17-05 基线如实记录）。
+
+### 36.1 `GET /api/shacl/engine`
+
+当前生效 SHACL 校验引擎（read 权限）。响应（success 信封）：
+
+```json
+{
+  "engine": "local", "source": "default",
+  "env_engine": null,
+  "jena": {"available": true, "detail": "ok"}
+}
+```
+
+优先级：运行时配置 `data/shacl_engine.json`（`source=runtime`，tmp＋os.replace 原子写）＞ 环境变量 `ONTOLOGY_SHACL_ENGINE`（`source=env`）＞ 缺省 `local`（`source=default`）。`jena.available` 为 Jena 侧执行器可达探测（fat jar 存在＋PATH 有 JDK 11+ `java`）；`detail` 为探测说明/不可用原因（前端展示）。
+
+### 36.2 `PUT /api/shacl/engine`
+
+运行时切换引擎（write 权限，401/403 同 V2-05）。body `{"engine": "local"|"jena"}`，非法值 → 422 `VALIDATION_ERROR`。响应同 36.1（`source=runtime`）。
+
+### 36.3 SHACL 校验结果 V2-17 字段
+
+`shacl_validate` 成功返回 dict 时在既有 `{valid, violations:[{severity,path,focus_node,message}]}` 基础上追加：
+
+| 字段 | 说明 |
+|---|---|
+| `engine` | 实际使用引擎（`local`/`jena`） |
+| `requested_engine` | 请求引擎（运行时配置值） |
+| `degraded` | 是否自动降级本地 pyshacl（请求 jena 且任一环节失败时 `true`） |
+| `degrade_reason` | 原因码：Jena 侧失败原因（jar 缺失/java 缺失/进程失败/超时/输出格式异常等）；未降级 `null` |
+
+local 为缺省路径且 pyshacl 缺失时仍返回 `None`（调用方回退结构校验——原契约不变）。违规明细 message 取自平台形状的中文 `sh:message`（属性/关系 PS 的约束摘要，pyshacl 与 Jena 同取形状值覆盖引擎默认模板）→ 两引擎违规明细（severity/path/focus_node/message）四元组可逐条一致比对（TC-17-01）；Jena 路径对完全相同的重复行（同 PS 多约束同时失败）做规范化去重。
+
+### 36.4 验收
+
+- `backend/tests/test_v2_17_shacl.py` **11/11**：引擎开关（GET/PUT＋非法 422＋runtime/env/default 三级优先）/ TC-17-01 双跑违规明细一致（jena 子进程路径实测，四元组逐条相同）/ TC-17-02 格式统一（422 明细 `validate_instance` 同源）/ TC-17-03 执行器不可用回退（degraded＋原因）/ 超时回退（TCE-17-02，入库门不悬空）/ jena 路径成功打标（engine=jena、degraded=false）/ TC-17-04 校验范围负向断言（非 schema 字段不入图、不产生校验）/ TC-17-05 基线 JSON 结构 / TCE-17-01 全违规批次零入库（approve → imported=0＋violations 明细完整＋实例库无记录）。
+- TC-17-05 时延/吞吐基线 `data/datasets/v2/shacl_benchmark_baseline.json`（1600 实例/9590 三元组/注入 20 条违规，3 次中位数，目标值不冻结；local 中位 976.5ms、jena 子进程中位 3372.5ms——JVM 启动＋NT 序列化开销如实记录，**不断言 Jena 快于本地**；违规明细 20/20 一致 `violations_consistent=True`）；基准脚本 `scripts/bench_v2_17_shacl.py`。
+- 回归：L5 `backend/tests` **160/160**（149 既有＋11 新增）。

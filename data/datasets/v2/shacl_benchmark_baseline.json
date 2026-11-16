@@ -1,0 +1,26 @@
+{
+  "benchmark": "V2-17 SHACL 双引擎校验时延/吞吐基线（local pyshacl vs Jena SHACL）",
+  "generated_at": "2026-11-16T02:14:33.945355+00:00",
+  "rounds": 3,
+  "input_instances": 1600,
+  "input_triples": 9590,
+  "violations_injected": 20,
+  "local_median_ms": 976.5,
+  "jena_median_ms": 3372.5,
+  "local_median_trips_per_sec": 9820.3,
+  "jena_median_trips_per_sec": 2843.6,
+  "local_ms": [
+    1401.6,
+    976.5,
+    961.1
+  ],
+  "jena_ms": [
+    3233.8,
+    4489.1,
+    3372.5
+  ],
+  "violations_local_count": 20,
+  "violations_jena_count": 20,
+  "violations_consistent": true,
+  "note": "口径：Jena 侧=Java 子进程执行 Jena SHACL 引擎（Fuseki standalone fat jar 无 SHACL HTTP 服务端点，2026-11-16 依赖事实），每次校验含 JVM 启动+两图 NT 序列化开销；本地侧=进程内 pyshacl。本基线仅记录时延/吞吐与双引擎违规明细（severity/path/focus_node/message）规范化一致性，不做『Jena 快于本地』断言；回退契约（Jena 失败自动回退本地）由 L5 测试覆盖。"
+}

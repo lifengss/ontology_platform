@@ -1377,7 +1377,7 @@ es.derived 返回摘要（id/authoritative/note），完整记录经 GET /derive
 - logo：用户指定官方**品牌蓝**「浪潮信息」PNG（`D:\inspur\...\微信图片_20231121113704.png`，已读图确认透明底蓝字）→ 复制为 `frontend/assets/logo-inspur-light.png`（150KB）；markup 加双 `<img>`（`#brandLogo` 白色版＋`#brandLogoLight` 蓝色版），CSS 按主题 display 切换；移除上一轮 `filter:brightness(0)` 反黑 hack。JS 无 `brandLogo` 引用，切换纯 CSS。
 - 编排画布：`#orchCanvas` 背景为**内联样式**（`#0b1220`＋深色点阵）→ 新增 `[data-theme="light"] #orchCanvas { background-color:#f1f5f9 !important; background-image:radial-gradient(circle, rgba(100,116,139,.30) 1px, transparent 1px) !important; }`（内联样式须 `!important` 压）。节点（半透明 tint＋彩色 border，文字继承 `--text`）与连线/箭头（`var(--orch-edge)`）已主题自适应，无需改 JS。
 - 纯 CSS 改动（无 Python），未跑 L5（不影响 pytest）；agent-browser 自带 Chromium 在本环境拉不起（exit 0 无 DevToolsActivePort，M3-F 当时走用户手开的 CDP 9222，现未开）→ 未截图，用户刷新 8123 自验。
-- 同样**未 commit**（worktree 与 M4-B WIP 混杂，待 M4-B 收口统一提交）。
+- 提交：`0a89256`（本地，未 push——M4 阶段惯例 M4-I 终验后统一 push），含 `frontend/assets/logo-inspur-light.png`＋index.html 浅色主题＋本分节；一轮 RBAC 热修已随 M4-B 收口入库（`403bac7`）。用户决策：开源项目亦为公司资产，logo 应入库。
 
 ## §53 M4-B V2-15 开放查询接口（SPARQL/REST/GraphQL）交付（2026-11-13，本地 commit 未 push）
 
@@ -1420,3 +1420,84 @@ es.derived 返回摘要（id/authoritative/note），完整记录经 GET /derive
 ### 53.6 状态与下一步
 - M4-B ✅（验收 9/9＋L5 138/138＋API 文档 §34＋前端查询 tab）。
 - 下一步：**M4-C**（V2-16 Fuseki 远程推理：SPARQL 端点远程推理模式）→ M4-D…→ M4-H → **M4-K（MCP 工具目录展示＋按项目工具暴露开关，§51 定稿）** → M4-I 终验统一 push。
+
+## §54 hotfix 衍生待修复项登记入开发计划（2026-11-16）
+
+### 54.1 背景
+- 用户指令：「hotfix 内容又有更新，将新增的待修复问题添加到开发计划里」。
+- `hotfix/hotfix.md` 新增 §10～§13（2026-11-13，成本核算业务线工作：F 备件直接成本落地／G1/G2 修复／预计算固定值清理／Q3 赛题批量验证），其中**平台侧未修复项**登记入 `docs/V2-开发里程碑.md`。
+
+### 54.2 登记结果（`docs/V2-开发里程碑.md` 新增「九、待修复问题清单」节＋M4 总览行指针）
+| 项 | 优先级 | 摘要 |
+|---|---|---|
+| HF-11 | P1 | `execute-batch` 大批量不可靠：默认 limit=1000／回写逐实例全 JSONL 重写 O(n²)（2698 行约 25 分钟）／Windows `os.replace` 瞬时文件锁 `INTERNAL_ERROR`＋超时重发互锁 → 内置分块调度（250 行/块）＋回写退避重试＋幂等键去重 |
+| HF-09 | P1 | 表达式 `binds` 无条件预求值＋`execute.inputs`「覆盖＋缺失回落实例值」合并语义（33 实例 18 个静默失败／批量静默失真）→ 文档 from_input/from_instance＋引擎 `has_attr()`＋定义期静态检查 |
+| HF-10 | P2 | `PATCH /api/ingest/instances/{id}` 无删键语法（null 被 SHACL 拒）→ `{"__delete__":true}` 或 `delete_attrs` 数组 |
+| HF-08 后续 | P2 | changeset 响应固定返回 `warnings` 数组（核心阻断逻辑已修，缺结构化展示） |
+| approve 拒绝原因 | P2 | 批量 approve 瞬态拒条无报告 → 逐条返回拒绝原因 |
+- 全部排入 M4（M4-I 终验前完成；P2 可插空）。
+- **不登记项**（需业务裁决、非平台开发任务）：C1 NBD/4H 海外 K 双口径、C2 4/5 年年限系数双口径、C3 美国行 4H 机器值列映射、PD-1 现场服务率基线精度（见 `hotfix/hotfix.md` §11.4/§13.2）。
+
+### 54.3 备注
+- 本次仅改 `docs/V2-开发里程碑.md`（新增 §九＋M4 总览行），无代码改动；未 commit（随下一 M4 切片收口提交）。
+- `hotfix/hotfix.md` §10～§13 属成本核算业务线工作记录，按既有惯例该文件与 `cost_baseline_kit/` 等**有意保留不提交**。
+- 周报（`docs/周工作进展-2026-11-09_11-16.md`）已于本日产出并存入 docs/（用户要求：按要点、无 M1/M4 编号、面向领导）。
+
+## §55 M4-C V2-16 双引擎推理（混合模式）交付与收口
+
+（2026-11-16）用户指令「按之前的方案处理，进度写入wiki，按需披露加载。继续为完成的任务」→ M4-C 全量交付并收口。
+
+**架构决策（诚实校准，不奉迎）**：纯远程 OWL2-RL 物化推理在 Jena 5.1.0 不可行（逐项实测：TDB2/TDB1/通用 `ja:RDFDataset`/内存装配器均无 reasoner 属性、OWL2-RL 模块不存在、`DatasetRDFS` 未注册进默认组且 `ja:reasonerFactory` 须 Resource、`ja:Dataset` 被 `OntModelSpecAssembler` 抢占；全部记入 `backend/fuseki-config.ttl` 头部注记）→ 实现**混合模式**：本地 `build_full_graph` 同口径建图 → 推送远端命名图（DELETE WHERE 清空＋INSERT DATA 载入）→ 平台推理核心 `local_materialize` 算闭包（与本地引擎同一闭包集，两模式 steps 逐字段一致）→ 派生三元组写回远端**物化**（SPARQL 可查推理结论）→ COUNT 读回验证（不符 → `fuseki_verify_failed` 降级）。契约：`closure_computation="local"`、`verified=true`、`closure_triples==pushed+materialized`、`extra_inferences`（恒 0，诊断性）。降级原因码 5 类＋`hint_zh`。
+
+**交付**：`backend/reasoning/engine.py`（重写）＋`reasoning/benchmark.py`（新）＋`scripts/bench_v2_16_reasoning.py`（新）＋`api/router_reasoning.py`（新：GET/PUT `/api/reasoning/engine` 三级优先 runtime>env>缺省＋GET `/api/reasoning/scope/{oid}`；推理端点增 `engine` 查询参数）＋`tests/mock_fuseki.py`（新，纯 HTTP，TDB2 同语义＋故障注入）＋`tests/test_v2_16_reasoning.py`（新，11 用例）＋前端推理引擎卡片（`#engineSwitchBox`）与推理页徽标/降级横幅/远程物化信息＋`data/datasets/v2/reasoning_benchmark_baseline.json`（TC-16-05 基线）＋文档（API §35 新＋V2-16 措辞按混合架构诚实校准：功能需求描述/测试大纲 TP-16-05/测试用例 TC-16-05 含执行结果登记/开发里程碑 M4-C 交付结果行）。
+
+**验证**：单文件 **11/11**；L5 全量 **149/149**（复跑，前次 test_07 首跑 flake 未复现）；TC-16-05 基线定值（真实 Fuseki 3 轮中位数：输入 54801/闭包 171399/派生 116598；local 338.2ms vs fuseki 20933.0ms≈62×，主因两次 TDB2 大写入，`closure_consistent=True`、`verified=True`；诚实时延口径：远程=本地闭包计算＋3 次 HTTP 往返＋TDB2 写入放大，**不断言远程优于本地**）；真实后端 HTTP 端点验证（uvicorn :8000＋Fuseki :3030）main（admin 登录→engine GET/PUT→混合推理 degraded=false 1672ms pushed=1380/materialized=12/closure=1392/verified=true→显式 engine=local 覆盖 steps 逐条一致→scope ok=true 43 实例 0 违规→恢复 local）＋degrade（停 Fuseki→`fuseki_unreachable`＋hint_zh）＋`restart_fuseki.ps1` 恢复复跑全通。
+
+**git**：M4-C 未提交（代码＋文档均在工作区，下一会话统一 commit；M4-I 终验后统一 push）。成本核算业务线有意保留。
+
+**清理**：临时脚本已删（`backend/_check_brackets.py`、`_probe_fuseki.py`、`_probe_api.py`、`_tmp_data/`、项目根 `_tmp_*.txt/py`、`backend/_boot*.log`）；`backend/_uvicorn*.log` 被运行中服务占用保留。
+
+**wiki**（用户级 `~/.workbuddy/wiki-knowledge`）：raw 快照 `raw/projects/ontology-platform/2026-11-16-M4-C-双引擎推理混合模式.md`（新建）＋进展与测试 M4-C 节＋对话历史 #52＋实体页（当前状态 M4-C✅ 下一步 M4-D、导航表 M4-C 行、sources、updated 2026-11-16）＋log.md milestone 条目＋index.md 条目更新。
+
+**下一步 M4-D**（V2-17 SHACL Jena 侧：批量校验双跑/违规明细两侧一致/Fuseki 不可达回退本地/校验范围边界/时延吞吐基准/违规批次零入库）→ M4-E（V2-18 MCP stdio）→ M4-F（V2-19 LinkML 外部模板）→ M4-G（V2-10 JSONL 旁路日志）→ M4-H（V2-20 K8s 部署）→ M4-J（V2-22 过程链 trace＋NL 驱动）→ M4-K（MCP 工具目录展示＋按项目工具暴露开关）→ M4-I 终验＋统一 push。
+
+## §56 M4-D V2-17 SHACL Jena 侧（双引擎校验）交付与收口
+
+（2026-11-16）用户指令「按之前的方案处理，进度写入wiki，按需披露加载。继续为完成的任务」→ M4-D（V2-17 SHACL Jena 侧）全量交付并收口（含 M4-C 欠账两批 commit，均本地不 push）。
+
+**依赖事实（诚实校准，2026-11-16 实测 Jena 5.1.0）**：Fuseki standalone fat jar **无 SHACL HTTP 服务端点**（`SHACL_Validation` servlet 未注册进任何默认服务组、配置格式无文档）、**无 ARQ CLI main class**，但有完整 Jena SHACL 引擎（`org.apache.jena.shacl`，183 类）与 riot/IRI → 实现为 **Java 子进程运行 Jena SHACL 引擎**（非 HTTP 端点），事实注记写入 `backend/fuseki-config.ttl` 头部；每次校验含 JVM 启动＋文件序列化开销，不断言快于本地。
+
+**交付**：
+- `backend/jena_adapter/java/ShaclEval.java`（新）：单文件源码启动 `java -Xmx1g -cp <fuseki-server.jar> ShaclEval.java <shapes.nt> <data.nt>`，输出第 1 行 `CONFORMS=true|false`＋report 图 NT（`org.apache.jena.shacl.api.Report`）。
+- `backend/jena_adapter/shacl_jena.py`（新）：`jena_shacl_validate(data, shapes, timeout=180)`——NT 暂存（tempfile）→ 子进程 → 解析 CONFORMS 行＋report NT → `_parse_shacl_report`（**与本地路径同一函数**，违规明细格式天然统一）→ 规整去重；jar/java/ShaclEval.java 缺失、进程失败、超时、输出格式异常、report 解析失败均返回 None（调用方回退本地）；`last_error()` 诊断；`java_shacl_available()` 可达性探测。
+- `backend/jena_adapter/shacl_engine.py`（新）：引擎开关三级优先——runtime `data/shacl_engine.json`（原子写 tmp＋os.replace）> env `ONTOLOGY_SHACL_ENGINE` > 缺省 local；返回 `(engine, source)`（runtime/env/default）。
+- `backend/jena_adapter/client.py`：`shacl_validate` 升级为**双引擎分发层**（签名不变；jena 任一环节失败→自动回退本地 pyshacl，`degraded=True`＋`degrade_reason`，入库门不悬空 TCE-17-02；pyshacl 缺失仍返回 None 维持原契约）；成功结果标注 `engine/requested_engine/degraded/degrade_reason`。
+- 双跑一致关键设计：属性/关系 PS 均带中文 `sh:message`（`modeling_translator._attr_sh_message` 约束摘要）→ pyshacl 与 Jena 的违规消息**同源**（覆盖引擎默认模板）→ 四元组（severity/path/focus_node/message）逐条一致（TC-17-01）。
+- `backend/api/router_shacl.py`（新）：GET `/api/shacl/engine`（当前 engine/source/env_engine＋jena{available,detail} 探测）＋PUT `/api/shacl/engine`（写开关，401/403 同 V2-05，非法值 422 VALIDATION_ERROR）。
+- `backend/main.py`：挂载 `shacl_router`（＋M4-C 的 `reasoning_router`）。
+- 前端（`app.js`＋`index.html`）：推理引擎卡片区新增「SHACL 校验引擎」卡片（双按钮切换＋Jena 可达性指示点＋env 优先提示；＋M4-C 推理引擎卡片）。
+- `backend/tests/test_v2_17_shacl.py`（新，11 用例）＋TC-17-05 基线 `data/datasets/v2/shacl_benchmark_baseline.json`（新）＋`scripts/bench_v2_17_shacl.py`（新）。
+- 文档：API-INTERFACE-DOC **§36**（36.1 GET / 36.2 PUT / 36.3 结果 V2-17 字段 / 36.4 验收）；V2-测试用例 TC-17-01~05/TCE-17-01~02；V2-测试大纲 TP-17-01~05/EP-17-01~02；V2-功能需求 V2-17 描述按子进程事实校准（诚实措辞）；V2-开发里程碑 M4-D ✅ 交付结果行；proj_wiki source-V2-测试用例.md M4-D 验收行。
+
+**验证**：
+- `test_v2_17_shacl.py` **11/11**：01 缺省引擎（local/default）/02 切换与非法值 422/03 三级优先（runtime>env>缺省，清理还原）/04 TC-17-01 双跑违规明细一致（Jena 子进程路径实测、四元组逐条）/05 TC-17-02 违规明细格式统一（422 明细同源）/06 TC-17-03 执行器不可用回退（degraded=True＋degrade_reason）/07 TCE-17-02 超时回退（入库门不悬空）/08 jena 路径成功标记（engine=jena、degraded=false、消息同源）/09 TC-17-04 校验范围边界负断言（非 schema 字段值不入图、不产生校验）/10 TC-17-05 基线 JSON 结构/11 TCE-17-01 全违规批次零入库（approve→imported=0＋违规明细完整＋实例记录零）。
+- L5 全量回归 **160/160**（149 既有＋11 新增）。
+- TC-17-05 基准（真实子进程 3 轮中位数，`scripts/bench_v2_17_shacl.py`）：1600 实例 / 9590 三元组 / 注入 20 违规 → local（pyshacl）976.5ms（9820.3 trips/s）vs jena 子进程 3372.5ms（2843.6 trips/s）；Jena 子进程含 JVM 启动＋NT 文件序列化开销、慢于进程内 local 属客观事实，**如实记录不断言 Jena 快于本地**；违规两侧 20/20 一致 `violations_consistent=True`；目标值未冻结。
+
+**坑位（新增）**：
+1. Jena 5.1.0 fat jar 无 SHACL HTTP 服务端点、无 ARQ CLI →「Jena 侧」只能走 Java 子进程源码启动（单文件 `.java`＋`-cp fuseki-server.jar`）；JVM 启动约 1.9s/次（实测）。
+2. Jena 引擎不输出 sh:message（默认模板英文且与 pyshacl 不一致）→ 必须在 PS 层注入中文 `sh:message` 使双跑消息同源；report 图按 pyshacl `conforms()` report 同构解析（`sh:source/sh:resultPath/sh:resultSeverity`＋focus 节点取 `rdf:subject`）。
+3. Jena 子进程对同一违规可能输出重复行 → 必须四元组规整去重，否则逐条一致断言失败。
+4. `validate_instance` 的 422 违规明细与前端展示共用同一来源（TC-17-02）——勿造第二套渲染路径。
+
+**git（两批 commit，本地，未 push）**：
+- 批 1（M4-C 核心 9 文件）：`api/router_reasoning.py`/`reasoning/{engine,benchmark,__init__.py}`/`tests/{mock_fuseki,test_v2_16_reasoning}.py`/`data/datasets/v2/reasoning_benchmark_baseline.json`/`scripts/bench_v2_16_reasoning.py`/`api/router_graph.py`（推理端点 engine 参数）。共享文件（main.py/frontend/docs/fuseki-config.ttl）按惯例归 M4-D 批。
+- 批 2（M4-D 全量）：shacl 三新 py＋`java/ShaclEval.java`＋`tests/test_v2_17_shacl.py`＋`shacl_benchmark_baseline.json`＋`bench_v2_17_shacl.py`＋`client.py`/`main.py`/`modeling_translator`/`fuseki-config.ttl`＋docs×6＋frontend×2＋proj_wiki 测试用例登记＋本 checkpoint。
+- 有意不提交（惯例保留）：成本核算业务线（`hotfix/hotfix.md`、`cost_baseline_kit/`、`docs/数据缺口*.md`、周报、`docs/备份/`、成本核算*.md、`data/instance_import_batch4.xlsx`）。
+- M4-I 终验后统一 push。
+
+**清理**：`backend/_shacl_probe/`、`backend/_probe_arq.py` 已确认删除（Test-Path False）。
+
+**wiki（用户级 `~/.workbuddy/wiki-knowledge`）**：raw 快照 `raw/projects/ontology-platform/2026-11-16-M4-D-SHACL-Jena双引擎.md`（新建）＋进展与测试 M4-D 节＋对话历史 #53＋实体页（当前状态 M4-D✅ 下一步 M4-E、导航表 M4-D 行、sources＋1）＋log.md milestone 条目＋index.md 条目更新。
+
+**下一步 M4-E**（V2-18 MCP stdio 传输：stdio 传输端点（initialize/tools list/call 全链路）→工具能力集与 http 一致（diff 空）→鉴权与发布态同 http→会话清理→非法 JSON-RPC 容错）→ M4-F（V2-19 LinkML 外部模板）→ M4-G（V2-10 JSONL 旁路日志）→ M4-H（V2-20 K8s 部署）→ M4-J（V2-22 过程链 trace＋NL 驱动）→ M4-K（MCP 工具目录展示＋按项目工具暴露开关）→ M4-I 终验＋统一 push。

@@ -304,6 +304,8 @@ async function refreshActiveTabAfterScopeChange() {
     } else if (tab === 'graph') {
       await loadGraph();
     } else if (tab === 'inference') {
+      loadInferenceEngine();
+      loadShaclEngine();
       await loadInference();
     } else if (tab === 'home') {
       await loadHome();
@@ -1041,7 +1043,7 @@ function switchTab(name) {
   }
   if (name === 'graph') { loadOntologies().then(() => { renderOntologySelects(); loadGraph(); }); }
   if (name === 'query') { loadOntologies().then(() => { renderOntologySelects(); qyOntologyChanged(); }); }
-  if (name === 'inference') { loadOntologies().then(() => { renderOntologySelects(); loadInference(); }); }
+  if (name === 'inference') { loadInferenceEngine(); loadShaclEngine(); loadOntologies().then(() => { renderOntologySelects(); loadInference(); }); }
   if (name === 'action') { loadActions(); }
   if (name === 'orchestration') { loadOrchestration(); }
   if (name === 'dictionary') { loadDictionary(); }
@@ -4758,13 +4760,117 @@ function instanceDisplayLabel(inst, maps) {
   return label !== null && label !== undefined ? String(label) : String(inst.id || '').slice(0, 8);
 }
 
-// ---- 推理 ----
+// ---- 推理（V2-16 双引擎） ----
+async function loadInferenceEngine() {
+  const box = $('engineSwitchBox');
+  if (!box) return;
+  try {
+    const j = await api('/api/reasoning/engine');
+    const d = j.data || {};
+    const cur = d.engine || 'local';
+    const fuseki = d.fuseki || {};
+    const sourceZh = { runtime: '运行时配置（本页面可改）', env: '环境变量', default: '缺省' }[d.source] || d.source;
+    box.innerHTML =
+      '<div class="flex gap-2 mb-2">' +
+      ['local', 'fuseki'].map(n =>
+        '<button type="button" onclick="setInferenceEngine(\'' + n + '\')" class="flex-1 px-2 py-1.5 rounded border text-xs ' +
+        (cur === n
+          ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-300 font-medium'
+          : 'border-slate-700 text-slate-400 hover:border-slate-600') +
+        '>' + (n === 'local' ? '本地（rdflib）' : 'Fuseki 远程') + '</button>'
+      ).join('') +
+      '</div>' +
+      '<div class="text-slate-500">当前来源：' + esc(sourceZh) + '</div>' +
+      '<div class="mt-1 flex items-center gap-1.5">' +
+      '<span class="inline-block w-2 h-2 rounded-full ' + (fuseki.reachable ? 'bg-emerald-400' : 'bg-rose-400') + '"></span>' +
+      '<span class="text-slate-400">Fuseki ' + (fuseki.reachable ? '可达' : '不可达') + '（' + esc(fuseki.base_url || '-') + ' / ' + esc(fuseki.dataset || '-') + '）</span>' +
+      '</div>' +
+      '<p class="mt-2 text-[11px] text-slate-600 leading-relaxed">远程引擎：闭包由平台推理核心计算并写回 Fuseki 物化（Jena 5.1.0 无物化推理器），Fuseki 承担持久存储＋SPARQL 验证；不可达时自动降级本地。</p>';
+  } catch (e) {
+    box.innerHTML = '<span class="text-rose-400">加载引擎状态失败：' + esc(e.message) + '</span>';
+  }
+}
+
+async function setInferenceEngine(name) {
+  try {
+    await api('/api/reasoning/engine', { method: 'PUT', body: JSON.stringify({ engine: name }) });
+    toast('推理引擎已切换为 ' + (name === 'local' ? '本地' : 'Fuseki 远程'), 'ok');
+    loadInferenceEngine();
+    loadInference();
+  } catch (e) { toast('切换引擎失败: ' + e.message, 'err'); }
+}
+
+async function loadShaclEngine() {
+  const box = $('shaclEngineBox');
+  if (!box) return;
+  try {
+    const j = await api('/api/shacl/engine');
+    const d = j.data || {};
+    const cur = d.engine || 'local';
+    const jena = d.jena || {};
+    const sourceZh = { runtime: '运行时配置（本页面可改）', env: '环境变量', default: '缺省' }[d.source] || d.source;
+    box.innerHTML =
+      '<div class="flex gap-2 mb-2">' +
+      ['local', 'jena'].map(n =>
+        '<button type="button" onclick="setShaclEngine(\'' + n + '\')" class="flex-1 px-2 py-1.5 rounded border text-xs ' +
+        (cur === n
+          ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-300 font-medium'
+          : 'border-slate-700 text-slate-400 hover:border-slate-600') +
+        '>' + (n === 'local' ? '本地（pyshacl）' : 'Jena 侧（双跑）') + '</button>'
+      ).join('') +
+      '</div>' +
+      '<div class="text-slate-500">当前来源：' + esc(sourceZh) + '</div>' +
+      '<div class="mt-1 flex items-center gap-1.5">' +
+      '<span class="inline-block w-2 h-2 rounded-full ' + (jena.available ? 'bg-emerald-400' : 'bg-rose-400') + '"></span>' +
+      '<span class="text-slate-400">Jena 执行器 ' + (jena.available ? '可用' : '不可用') + '（' + esc(jena.detail || '-') + '）</span>' +
+      '</div>';
+  } catch (e) {
+    box.innerHTML = '<span class="text-rose-400">加载 SHACL 引擎状态失败：' + esc(e.message) + '</span>';
+  }
+}
+
+async function setShaclEngine(name) {
+  try {
+    await api('/api/shacl/engine', { method: 'PUT', body: JSON.stringify({ engine: name }) });
+    toast('SHACL 校验引擎已切换为 ' + (name === 'local' ? '本地（pyshacl）' : 'Jena 侧'), 'ok');
+    loadShaclEngine();
+  } catch (e) { toast('切换 SHACL 引擎失败: ' + e.message, 'err'); }
+}
+
 async function loadInference() {
   const id = $('inferOntology').value;
   if (!id) return;
   try {
     const j = await api('/api/ontologies/' + id + '/inference');
     const steps = j.data.steps || [];
+    // V2-16：实际使用引擎徽标
+    const badge = $('inferenceEngineBadge');
+    if (badge) {
+      const eng = j.data.engine || 'local';
+      badge.textContent = '（引擎：' + (eng === 'local' ? '本地' : 'Fuseki 远程') + '）';
+      badge.className = 'ml-2 text-xs font-normal ' + (eng === 'local' ? 'text-slate-500' : 'text-sky-400');
+    }
+    // V2-16：降级提示（Fuseki 失败自动降级本地）
+    const dbar = $('inferenceDegradeBar');
+    if (dbar) {
+      if (j.data.degraded) {
+        dbar.classList.remove('hidden');
+        dbar.innerHTML = '<b>已自动降级本地推理</b>（原因：' + esc(j.data.degrade_reason || '-') + '）<br>' + esc(j.data.hint_zh || '');
+      } else { dbar.classList.add('hidden'); dbar.innerHTML = ''; }
+    }
+    // V2-16：远程物化图信息
+    const rbox = $('inferenceRemoteInfo');
+    if (rbox) {
+      const r = j.data.remote;
+      if (r && r.graph) {
+        rbox.classList.remove('hidden');
+        rbox.innerHTML = '远端物化图 <span class="font-mono">' + esc(r.graph) + '</span>（' + esc(r.base_url || '') + '/' + esc(r.dataset || '') + '）：' +
+          '推送 ' + (r.pushed_triples ?? '-') + ' 条 → 闭包 ' + (r.closure_triples ?? '-') + ' 条' +
+          '（写回物化派生 ' + (r.materialized_triples ?? '-') + ' 条）｜读回验证 ' + (r.verified ? '通过' : '未验证') +
+          '｜闭包计算：<span title="Jena 5.1.0 的 Fuseki 无物化推理器，闭包由平台推理核心计算后写回远端物化">平台核心' + (r.closure_computation === 'local' ? '' : '（' + esc(r.closure_computation) + '）') + '</span>。' +
+          '该图经 SPARQL 查询接口可直接检索推理结果（下次图谱同步全量替换时清除）。';
+      } else { rbox.classList.add('hidden'); rbox.innerHTML = ''; }
+    }
     const el = $('inferenceSteps');
     // 业务人员可读为主（*_zh 中文推断），OWL2-RL 原始形式折叠在"查看原始规则"里供技术排查
     el.innerHTML = steps.length ? steps.map((s, i) =>

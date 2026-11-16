@@ -37,6 +37,8 @@ from api.router_namespaces import router as namespaces_router
 from api.router_ontologies import router as ontologies_router
 from api.router_projects import router as projects_router
 from api.router_query import router as query_router  # V2-15 开放查询接口（M4-B）
+from api.router_reasoning import router as reasoning_router  # V2-16 推理引擎配置（M4-C）
+from api.router_shacl import router as shacl_router  # V2-17 SHACL 执行路径配置（M4-D）
 from api.router_system import router as system_router
 from api.router_templates import router as templates_router
 from api.router_identity import router as identity_router  # V2-14i 身份联邦（M2-B）
@@ -142,6 +144,8 @@ app.include_router(orchestration_router)  # V2-14 Action 编排（M3-F）
 app.include_router(alignment_router)  # V2-02 跨本体对齐（M4-A②）
 app.include_router(fusion_router)  # V2-02 跨本体融合与融合查询（M4-A③）
 app.include_router(query_router)  # V2-15 开放查询接口（M4-B）
+app.include_router(reasoning_router)  # V2-16 推理引擎配置（M4-C）
+app.include_router(shacl_router)  # V2-17 SHACL 执行路径配置（M4-D）
 
 
 # VS6: 由 mcp_server 模块按项目挂载 /mcp/{project_id}，双传输（2026-10-28 MCP 接入层修复）：

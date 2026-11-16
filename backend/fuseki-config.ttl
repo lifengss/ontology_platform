@@ -1,5 +1,31 @@
-# Fuseki 服务配置：可写 TDB2 数据集 ontology（持久化到 backend/data/fuseki）
+# Fuseki 服务配置：
+#   - ontology：可写 TDB2 数据集（持久化到 backend/data/fuseki）
+#     * M4-B SPARQL 持久查询（explicit，rdf_sync 命名图）
+#     * V2-16 远程推理（M4-C）：推理管道复用同一命名图（graph_uri_for），
+#       闭包由平台推理核心计算后将派生三元组写回物化，SPARQL 可查推理结果
 # 启动：java -jar fuseki-server.jar --port 3030 --config <本文件>
+#
+# 依赖事实（Jena 5.1.0，2026-11-13 逐一实测，全部配置路径均不可行）：
+#   - TDB2 装配器不支持挂载 reasoner（tdb2:reasoner 属性不存在，写了被静默忽略）；
+#   - TDB1（org.apache.jena.tdb1，旧版支持 tdb:reasoner）装配器已移除 reasoner 支持；
+#   - 发行包不含 OWL2-RL 物化推理器（内置仅 RDFS / OWL Micro / OWL Mini 规则推理器）；
+#   - org.apache.jena.rdfs 的 DatasetRDFS 装配器存在但未注册进 Fuseki 默认装配器组
+#     （配置引用报 NoSpecificTypeException）；
+#   - ja:Dataset 类型被 OntModelSpecAssembler（Model 级）抢占，产物无法作为 Fuseki
+#     数据集（OntModelSpec cannot be cast to Dataset）；
+#   - ja:RDFDataset（DatasetAssemblerGeneral）与 mem:MemoryDataset 均无 reasoner 属性。
+# SHACL 事实（Jena 5.1.0，2026-11-16 实测，V2-17/M4-D）：
+#   - 本 standalone fat jar 无 SHACL HTTP 服务端点（SHACL_Validation servlet 未注册进
+#     默认服务组），亦无 ARQ CLI 主类（org.apache.jena.sparql.ARQ 不存在）
+#     ——「Fuseki SHACL 扩展执行路径」不可行；
+#   - 但 jar 内置完整 Jena SHACL 引擎（org.apache.jena.shacl，5.1.0 新实现，183 个
+#     SHACL 类）与 riot/IRI 基础设施 →「Jena 侧」SHACL 校验经 Java 单文件源启动子进程
+#     执行（backend/jena_adapter/java/ShaclEval.java，java -cp 本 jar 直调引擎），
+#     与推理服务同一 Jena/RDF 栈、同一形状文件；每次校验含 JVM 启动＋NT 序列化开销
+#     （TC-17-05 基线如实记录，不断言快于本地 pyshacl）。
+# 结论：本环境 Fuseki 仅承担持久化物化存储＋SPARQL 查询/验证，
+# 闭包计算由平台推理核心（reasoning.local_materialize，三规则族）完成，
+# 推理结果写回远端命名图物化（见 reasoning/engine.py _fuseki_pipeline）。
 @prefix fuseki: <http://jena.apache.org/fuseki#> .
 @prefix rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
@@ -9,7 +35,7 @@
     fuseki:services ( <#ontology> ) .
 
 <#ontology> a fuseki:Service ;
-    rdfs:label "Ontology Dataset" ;
+    rdfs:label "Ontology Dataset (explicit)" ;
     fuseki:name "ontology" ;
     fuseki:serviceQuery "query" ;
     fuseki:serviceUpdate "update" ;
@@ -19,7 +45,5 @@
 
 # Jena 5.1.0 官方 TDB2 数据集装配器（见发行包 run/templates/config-tdb2）：
 # 前缀名 tdb2、IRI 为 2016/tdb 命名空间、类型 DatasetTDB2。
-# 注意：tdb:DatasetTDB 是 TDB1（legacy）装配器——在 TDB2 格式存储目录上会打开失败，
-# Fuseki 会静默回退 in-memory 数据集（数据重启即丢），切勿写回。
 <#ontologyDS> a tdb2:DatasetTDB2 ;
     tdb2:location "d:/self_coding/ontology_platform/backend/data/fuseki" .
