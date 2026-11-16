@@ -1501,3 +1501,158 @@ es.derived 返回摘要（id/authoritative/note），完整记录经 GET /derive
 **wiki（用户级 `~/.workbuddy/wiki-knowledge`）**：raw 快照 `raw/projects/ontology-platform/2026-11-16-M4-D-SHACL-Jena双引擎.md`（新建）＋进展与测试 M4-D 节＋对话历史 #53＋实体页（当前状态 M4-D✅ 下一步 M4-E、导航表 M4-D 行、sources＋1）＋log.md milestone 条目＋index.md 条目更新。
 
 **下一步 M4-E**（V2-18 MCP stdio 传输：stdio 传输端点（initialize/tools list/call 全链路）→工具能力集与 http 一致（diff 空）→鉴权与发布态同 http→会话清理→非法 JSON-RPC 容错）→ M4-F（V2-19 LinkML 外部模板）→ M4-G（V2-10 JSONL 旁路日志）→ M4-H（V2-20 K8s 部署）→ M4-J（V2-22 过程链 trace＋NL 驱动）→ M4-K（MCP 工具目录展示＋按项目工具暴露开关）→ M4-I 终验＋统一 push。
+
+## §57 M4-E V2-18 MCP stdio 传输交付与收口
+
+（2026-11-16）用户指令「按之前的方案处理，进度写入wiki，按需披露加载。继续为完成的任务」→ M4-E（V2-18 MCP stdio transport）全量交付并收口。
+
+**交付**：
+- `backend/mcp_stdio_server.py`（新，平台原生 stdio 入口）：`main()` 先 `_force_logging_to_stderr()`（遍历 root＋所有命名 logger＋lastResort，把指向 stdout 的 StreamHandler 重定向 stderr，否则污染 stdio 管道致客户端解析失败——M4-E 实测关键坑）→ `_parse_args()`（`--project`/`--token`）→ `_load_token(args.project)`（从平台 `data/projects/<pid>/mcp_tokens.json` 读预期 token，与 http 鉴权同源）→ token 校验（未配置 `expected==''` / 未提供 / `compare_digest` 不匹配 → `sys.stderr` 说明＋`return 1`，等效 http 401 语义）→ 构建 `MCPServer(f"EnterpriseOntologyMCP_{pid}", instructions=...)`＋`_register_tools(owner, pid, mcp)`（与 http 端点同一 `_register_tools`，工具集天然一致 TC-18-02）→ `asyncio.run(mcp.run_stdio_async())`；`except KeyboardInterrupt/Exception` 捕获（异常断开/非法请求不崩溃 TCE-18-02，进程退出即会话清理 TCE-18-01）。
+- `backend/tests/test_v2_18_stdio.py`（新，6 用例）：mcp SDK `stdio_client`＋ClientSession 子进程驱动；test_01 全链路 / test_02 工具能力集一致（契约子集＋平台注册全集 `{TOOLS_CONTRACT} ∪ {lineage_get, quality_health, connection_health}`）/ test_03 无效/空 token 拒绝启动（`pytest.raises`）/ test_04 未发布/不存在本体 isError（text 含「不存在」或「未发布」）/ test_05 桥接并存 / test_06 断开清理（再次拉起可用）。
+- **依赖事实**：mcp SDK 2.3.0 提供 `run_stdio_async()`（server 侧）与 `stdio_client`（客户端测试驱动），无需新增依赖；stdio 子进程独立于 FastAPI，共享 `DATA_DIR` 与 `McpServer` 单例（`get_mcp_server()`）→ 工具/发布态/token 语义与 HTTP 一致。
+- 文档：API-INTERFACE-DOC **§37**（37.1 入口与用法 / 37.2 Token 鉴权 / 37.3 工具一致 / 37.4 日志与 stdio 约束 / 37.5 会话清理容错 / 37.6 验收）；V2-测试用例十九 TC-18-01~04/TCE-18-01~02 执行结果行；V2-测试大纲 TP-18-01~04/EP-18-01~02；V2-开发里程碑 M4-E ✅ 交付结果行（API 文档 §待补→§37）；proj_wiki source-V2-测试用例.md M4-E 验收行。
+
+**验证**：`test_v2_18_stdio.py` **6/6**；L5 全量回归 **166/166**（160 既有＋6 新增）。
+
+**坑位（新增）**：
+1. **stdio 下 stdout 只能承载 JSON-RPC 帧**——平台日志经 `logging_setup.setup_logging` 挂到命名 logger（如 `api.main`，propagate=False），其 StreamHandler 可能指向 stdout→污染管道致客户端解析失败；`_force_logging_to_stderr()` 必须遍历 root＋**所有命名 logger（loggerDict）**＋lastResort（仅处理 root 不够）。
+2. `mcp_stdio_server.py` 命令行中文文件名在部分 shell 会损坏→`docs/V2-*` 类路径用 ASCII 通配。
+3. **前端「外部 MCP 连接」的 stdio 传输选择是客户端侧**（平台作为客户端调用外部），与平台自身作为 server 的 stdio transport 是两回事，勿混淆。
+4. mcp.json 不要写 env 字段（Node spawn env 为整体替换，写 env 丢 SystemRoot，Windows 下 Python import asyncio 抛 WinError 10106，宿主只显示「连接失败」无日志）。
+
+**git（本地，未 push）**：
+- 新增：`mcp_stdio_server.py`、`tests/test_v2_18_stdio.py`。
+- 修改：`docs/API-INTERFACE-DOC.md`（+§37）、`docs/V2-开发里程碑.md`（M4-E 行 §待补→§37）、`proj_wiki/wiki-knowledge/wiki/source-V2-测试用例.md`（M4-E 验收行）、本 checkpoint §57。
+- 有意不提交（惯例保留）：成本核算业务线（`hotfix/hotfix.md`、`cost_baseline_kit/`、`docs/数据缺口*.md`、周报、`docs/备份/`、成本核算*.md、`data/instance_import_batch4.xlsx`）。
+- M4-I 终验后统一 push。
+
+**引入工具子集**（`_register_tools` 注册全集＝`TOOLS_CONTRACT` 10 个＋`lineage_get/quality_health/connection_health`，合计 13 个）。
+
+**下一步 M4-F**（V2-19 LinkML 外部模板：模板网络加载 URL/registry＋结构预览→一键实例化为可编辑本地本体→离线优雅降级→恶意/超大/格式非法模板拒绝）→ M4-G（V2-10 JSONL 旁路日志）→ M4-H（V2-20 K8s 部署）→ M4-J（V2-22 过程链 trace＋NL 驱动）→ M4-K（MCP 工具目录展示＋按项目工具暴露开关）→ M4-I 终验＋统一 push。
+
+## §58 M4-F（V2-19 LinkML 外部模板）交付与收口（2026-11-16）
+
+**M4-F（V2-19 LinkML 外部模板网络加载）已交付。** 在 M4-E 基础上完成：
+
+- **后端**（`backend/template/__init__.py`，`TemplateManager`）：
+  - `load_external(url)`：httpx 拉取（**仅 http/https**，`ALLOWED_SCHEMES` 禁 file://；`FETCH_TIMEOUT_SECONDS=10`；`MAX_TEMPLATE_BYTES=5MiB` 超大拒绝；follow_redirects）→ 失败映射（Timeout→`TIMEOUT`、HTTPError/非 200→`NETWORK`、超 5MiB→`TOO_LARGE`、非 UTF-8→`MALFORMED`）。
+  - `parse_linkml(text)`：`yaml.safe_load` 解析 **LinkML 子集**（顶层 `classes`/`slots`/`attributes`/`license`）→ 翻译为平台 `OntologyCreate` 模型：对象（`id`/`name`/`business_definition`(取 `description`) /`stable_key`(优先 `id`/`identifier`) /`attributes`/`relations`）；属性（`data_type` 经 `_map_type` 映射 string/integer/float/boolean/date；`required`；约束子集 `pattern`/`min_length`/`max_length`/`minimum`/`maximum`/`enum`）；attr `range` 指向其他类 → `many_to_one` 关系；`license` 等许可声明并入 `description`。
+  - **结构护栏**：`_validate_model` 复用 `modeling_translator.blocking_violations`（对象数≤`MAX_OBJECTS=200`、单对象属性≤`MAX_ATTRIBUTES_PER_OBJECT=200`），翻译后立即校验→异常即拒绝，**不生成半成品本体**。
+- **路由**（`api/router_templates.py` +§）：`POST /api/templates/preview-external`（body `{url}`）→ `preview_external` 返回 `{name, description, object_count, objects[{id,name,business_definition,stable_key,attributes[{id,name,data_type,required,constraints}],relations}], license}`；`POST /api/templates/instantiate-external`（body `{url,name?}`）→ 复用 `create_ontology` 创建可编辑 draft（返回 201）。**错误映射**（`TemplateError`→HTTP，`_handle_template_error`）：`UNSAFE_SCHEME→400`/`TOO_LARGE→413`/`TIMEOUT→408`/`NETWORK→502`/`MALFORMED→422`。「离线优雅降级」＝网络不可达（502）时前端提示「网络不可达」，本地模板库（`GET /api/templates`）与表单建模仍可用。
+- **前端**（`frontend/index.html`＋`app.js`）：新建本体编辑器新增第 4 个 tab **「模板库」**（`setEditorMode('template')`）——输入 URL→「预览结构」（`previewExternalTemplate`）→渲染对象/属性/关系/许可（`_renderTplPreview`）→「一键实例化为可编辑本体」（`instantiateExternalTemplate`，`btnTplInst`）；离线/非法时 UI 显示错误提示（`_tplError`）。`startCreate` 调用 `resetTemplatePanel()` 重置。
+- **验证**：`tests/test_v2_19_template.py` **5/5**（TC-19-01 预览/TC-19-02 一键实例化 201/TC-19-03 离线 502＋本地模板库可用/TC-19-04 恶意·超大·非法拒绝/TCE-19-01 malformed 缺 `classes`）；**L5 全量回归 171/171**＝166 既有＋5 新增。
+- **文档**：API-INTERFACE-DOC §13 模板管理·V2-19 外部加载（preview-external/instantiate-external 端点＋错误映射＋LinkML 子集说明）；V2-测试用例十九 TC-19-01~04/TCE-19-01（补执行结果行）；V2-开发里程碑 M4-F 节（交付结果）；proj_wiki source-V2-测试用例.md M4-F 验收行。
+- **坑位**：① `ApiError` 支持 `http_status`，`_handle_template_error` 用 `raise _handle_template_error(e)` 抛出，`app.exception_handler(ApiError)`→`fail(exc)` 用 `err.http_status` → 502/413/408/400/422 正确映射；② 路由需把固定路径 `preview-external`/`instantiate-external` 放在 `/{template_id}` 之前（FastAPI 按注册顺序匹配，避免被动态路径吞）——已放在末尾，因方法不同（POST vs GET/PUT/DELETE）实际不冲突，但保持固定前缀先注册更稳；③ LinkML 结构校验复用 `modeling_translator.blocking_violations`（error 级，warning 不阻断）；④ 测试须 mock **单例 `template_manager._fetch`**（路由实际使用的实例），局部 `TemplateManager()` 只测纯逻辑，须 `finally` 恢复原 `_fetch`；⑤ `registry_key`（registry 挂载点）为预留扩展，当前仅支持 `url`。
+- **git（本地，未 push）**：新增 `backend/template/__init__.py`（改写原占位）、`backend/tests/test_v2_19_template.py`；修改 `backend/api/router_templates.py`（+preview-external/instantiate-external）、`docs/API-INTERFACE-DOC.md`（§13）、`docs/V2-测试用例.md`（TC-19/TCE-19 执行结果）、`docs/V2-开发里程碑.md`（M4-F 交付结果）、`proj_wiki/.../source-V2-测试用例.md`（M4-F 登记）、`TASK_CHECKPOINT.md`（§58）；成本核算业务线有意保留不提交；M4-I 终验后统一 push。
+- **下一步 M4-G**（V2-10 JSONL 旁路操作日志）→ M4-H（V2-20 K8s 部署）→ M4-J（V2-22 过程链 trace＋NL 驱动）→ M4-K（MCP 工具目录展示＋按项目工具暴露开关）→ M4-I 终验＋统一 push。
+
+## §59 HF-11（execute-batch 大批量限制）修复与收口（2026-11-16）
+
+**用户指令「先修复HF-11」**：在 M4-F 收口后优先处理 hotfix.md §13.3 的 HF-11（execute-batch 大批量限制）。按 §9 修复状态约定（用户明确要求）落地实际平台源码修复，非建模/核算任务。
+
+- **复现 / 目标**（hotfix §13.3）：对 2698 行 BOM 直接 `POST /api/capabilities/{id}/execute-batch`（不带 instance_ids）：①默认 `limit=1000` 只跑前 1000 行；②回写为逐实例全 JSONL 重写（2698 行约 25 分钟，O(n²) IO）；③`instance_store._write_file` 的 `os.replace` 遇 Windows 瞬时文件锁抛 `INTERNAL_ERROR`（PermissionError WinError 5），客户端超时重发还会造成后端多个批量并发互锁。修复意见：分块调度（250 行/块）＋回写重试（replace 退避 3 次）＋批量幂等键去重。
+- **修复实现**：
+  1. `core/instance_store.py` **`_write_file` 的 `os.replace` 退避重试**（`_REPLACE_RETRIES=3`、`_REPLACE_BACKOFF_SEC=0.05` 递增等待；捕获 `PermissionError`/`FileNotFoundError`，末次仍失败才 `raise`）。
+  2. `core/instance_store.py` 抽象基类新增 **`update_many(object_type, patches)`**：同对象类型一次读一次写（消除逐实例全量重写 O(n²)）；`JsonlInstanceStore` 实现（按 id 匹配只更新列出的记录＋写 `updated_at`），`JenaInstanceStore` 占位抛 `NotImplementedError`。
+  3. `capabilities/__init__.py` **`execute_batch` 改造**：未传 `instance_ids` 时 `find(..., limit=None)` 取全部匹配实例（不再受默认 limit=1000 截断）；外层按 `_BATCH_CHUNK=250` 分块调度；抽出 `_build_write_back_patch`（`_write_back` 复用），非联邦实例块末聚合 `pending[object_type][instance_id]=patch` 后一次性 `update_many`，联邦实例仍走 `_save_derived`；幂等键 `idempotency_key` 开头去重（`project_id:cap_id:key` 在 `_IDEMPOTENCY_TTL_SEC=3600` 窗口内重发返回 `{idempotent:true,...}` 不重复调度，过期自动清理）。
+  4. `schemas/capability.py` `CapabilityExecuteBatch` 新增 `idempotency_key`（可选，≤128 字符）；`api/router_capabilities.py` 路由透传 `payload.idempotency_key`。
+- **验证**：`tests/test_hf11_execute_batch.py` **5/5**（① 分块全量执行 8/8 含写回计算值；② `update_many` 批量一次读一次写且只更新列出的记录、空补丁返回 0；③ `os.replace` 首抛 PermissionError 重试后成功（至少重试 1 次）；④ 幂等键同键重发返回 `idempotent:true` 且实例值未重复写回）。回归：`test_v2_04_federated.py` 9/9、`test_v2_02_fusion.py`/`test_v2_02_content_access.py`/`test_v2_15_query.py`/`test_vs2`/`test_vs3`/`test_vs4` 均通过（execute-batch 完整契约未破坏）。
+- **坑位**：① `JsonlInstanceStore.insert`（及 `JsonStore.insert`）为**追加语义**（同 id 会重复行），HF-11 测试须每个测试用唯一 PID 保证对象文件干净，否则 `update_many` 按 id 匹配会把重复行都算进 `updated` 计数（全量跑最初失败根因）；② 新增抽象方法 `update_many` 需 `JenaInstanceStore` 同步实现（占位）；③ 块末 `update_many` 仅聚合**非联邦**实例；联邦实例走 `_save_derived` 写派生图，不混入实例批量写回。
+- **文档**：`hotfix/hotfix.md` §13.3 补「修复结果」＋新增 §13.4 修复详情表；`docs/API-INTERFACE-DOC.md` §能力执行 execute-batch 表格行补字段并追加 HF-11 说明段（分块调度/批量写回/幂等键/写回重试）；`proj_wiki/.../source-V2-测试用例.md` 登记 HF-11 验收行（脚本 `backend/tests/test_hf11_execute_batch.py`，PASS=5/FAIL=0）。
+- **git（本地，未 push）**：修改 `backend/core/instance_store.py`、`backend/capabilities/__init__.py`、`backend/schemas/capability.py`、`backend/api/router_capabilities.py`、`docs/API-INTERFACE-DOC.md`、`hotfix/hotfix.md`、`proj_wiki/.../source-V2-测试用例.md`、`TASK_CHECKPOINT.md`（§59）；新增 `backend/tests/test_hf11_execute_batch.py`。M4 各片 commit 仍本地未 push（M4-I 终验后统一 push）。
+- **下一步**：回到里程碑主线 M4-G（V2-10 JSONL 旁路操作日志）→ M4-H（V2-20 K8s）→ M4-J（V2-22）→ M4-K（MCP 工具目录展示＋按项目工具暴露开关）→ M4-I 终验＋统一 push。
+
+## §60 M4-G（V2-10 JSONL 旁路操作日志）交付（2026-11-16）
+
+完成 M4-G（V2-10 JSONL 旁路操作日志，P2）。把三类"打到系统外的真实操作"（本体变更/Action 执行/外部读取）统一写入 append-only JSONL 旁路日志（与 V2-09 审计不同：审计回答"谁在何时改了什么"，旁路回答"当天实际打到外部系统的所有写/读操作"，供运维按天回放对账）；**旁路非主存储**，写失败不影响主流程；append-only＋哈希链，无修改/删除接口。
+
+- **存储与 schema**：`backend/sidecar_log.py` 写 `data/sidecar/sidecar.jsonl`（单文件 JSON Lines，逐行追加，永不修改/删除）。统一 schema `{id, time, actor, type, project_id, target_type, target_id, payload, result, prev_hash}`；`type` 三类 `ontology_change`/`action_execution`/`external_read`。**哈希链**：每行 `prev_hash`=上一行整行 SHA-256（首行 `"0"*64`），`verify_chain()` 逐行校验（篡改任一行→`broken_at` 定位到断裂行）。
+- **接入点**（统一走 `record`/`record_from_request`，写失败内部 try/except 吞掉并告警，不影响主流程）：
+  1. 本体变更 `api/router_ontologies.py`：create_ontology / update_ontology / patch_ontology_object / delete_ontology（payload 含 action/name/ontology_id/instances_deleted）。
+  2. Action 执行 `action_engine._do_writeback`：成功回写（或展示模拟）后（payload 含 action_id/kind/invoke_url/idempotency_key/risk_level/trigger_source/display_only，result 含 executed/outcome/log_id/identity/external_status）。
+  3. 外部读取 `content_access.federate_values`：联邦成功回源后（payload 含 instance_id/key_field/key_value/read_tool/attr_ids/viewer_mode/resolved_as，result 含 values）。
+- **API**（`api/router_sidecar.py`，main.py 挂载）：`GET /api/sidecar`（组合检索 type/actor/project_id/target_type/target_id/target/day，追加序分页 page/page_size≤500）、`GET /api/sidecar/stats`（按类型/操作者计数）、`GET /api/sidecar/replay`（按天重建当日 Action 回写序列供对账）、`GET /api/sidecar/verify`（哈希链校验）；PUT/PATCH/DELETE → **405 `SIDECAR_IMMUTABLE`**（无修改/删除接口）。
+- **验证**：`tests/test_v2_10_sidecar.py` **12/12**（TC-10-01 三类事件统一 append-only＋组合检索＋真实 API 创建本体触发 `ontology_change`／TC-10-02 按天回放＋统计／TC-10-03 哈希链未篡改 ok+篡改 broken_at 定位＋无修改/删除 405＋读取·统计·回放·校验 API／TCE-10-01 写失败不影响主流程（record 吞异常＋`_do_writeback` 展示模拟 sidecar 失败不崩＋本体变更路径被吞））。回归：`test_v2_04_federated`＋`test_v2_10_sidecar` 21/21、`test_action_resilience`＋`test_ontologies_api` 16/16、**L5 全量 188/188**（176 既有＋12 新增）。
+- **坑位**：① 旁路为项目级单文件，`record` 每次读文件尾部取上一行算 prev_hash（O(n) 读尾部），且检索/统计全量读内存（量大须后续按天分片/缓存尾部哈希）；② 测试隔离用 monkeypatch `sidecar_log._log_path` 指向临时文件，避免污染 `backend/data`；③ ActionEngine 对 sidecar 调用另有外层 try/except 兜底（record 内部已有 + 外层双保险）；④ `federate_values` 的 actor 取 `user_id`（无用户名），与其余两类事件的用户名不同（可接受，外部读取以连接/实例为对象）。
+- **文档**：`docs/API-INTERFACE-DOC.md` §38（V2-10 旁路日志：存储 schema/事件类型/端点/验收）；`docs/V2-测试用例.md` 二十 V2-10 执行结果行（PASS=12/FAIL=0）；`docs/V2-开发里程碑.md` M4-G 交付结果；`proj_wiki/.../source-V2-测试用例.md` M4-G 验收行。
+- **git（本地，未 push）**：新增 `backend/sidecar_log.py`、`backend/api/router_sidecar.py`、`backend/tests/test_v2_10_sidecar.py`；修改 `backend/main.py`、`backend/api/router_ontologies.py`、`backend/action_engine/__init__.py`、`backend/content_access.py`、`docs/API-INTERFACE-DOC.md`、`docs/V2-测试用例.md`、`docs/V2-开发里程碑.md`、`proj_wiki/.../source-V2-测试用例.md`、`TASK_CHECKPOINT.md`（§60）。M4 各片 commit 仍本地未 push（M4-I 终验后统一 push）。
+- **下一步**：回到里程碑主线 **M4-H（V2-20 K8s 部署）** → M4-J（V2-22 过程链 trace＋NL 驱动）→ M4-K（MCP 工具目录展示＋按项目工具暴露开关）→ M4-I 终验＋统一 push。
+
+## §61 M4-H（V2-20 K8s 部署）交付（2026-11-16）
+
+完成 M4-H（V2-20 K8s 部署，P1）。交付分两部分：**实例存储收敛 PG（多副本一致，TC-20-03）＋ K8s kustomize 部署物**。
+
+- **实例存储收敛**：`backend/core/pg_instance_store.py` 的 `PgInstanceStore`（实现同一 `InstanceStore` 抽象，接口语义与 `JsonlInstanceStore` 一致——`insert/get/find/update/update_many/delete/count/all`）。表 `instance_records(project_id, object_type, id, rec_json JSONB, created_at, updated_at)`，主键 `(project_id, id)`，`rec_json` 存整条 record（与 jsonl 逐行 JSON 兼容）；`update`/`update_many` 用 `BEGIN` → `SELECT ... FOR UPDATE` → 改 → `UPDATE` → `COMMIT`，PG 侧行锁 + 事务保证 read-modify-write 原子性，杜绝多副本基于旧值互相覆盖（**无副本间文件分叉**，TC-20-03 负向断言）。**选择器**：`core/instance_store.py#get_instance_store(project_id, backend)`——`backend='pg'` 或环境变量 `INSTANCE_STORE_BACKEND=pg` 时返回 `PgInstanceStore`；默认 `jsonl`（向后兼容，L5 全量不改）。**配置**：`config.py#instance_store_backend`（env `INSTANCE_STORE_BACKEND`，默认 `jsonl`）。
+- **K8s 部署物**（`deploy/k8s/`，kustomize）：入口 `kustomization.yaml`（默认/演示，backend 单副本）；生产/多副本 `overlays/prod`（backend 扩到 3 副本 + `INSTANCE_STORE_BACKEND=pg`）。组件：`base/backend-deployment.yaml`+`backend-service.yaml`（rollingUpdate maxSurge=1/maxUnavailable=0、readiness/liveness 探针 `GET /health` 8000、`backend-data-pvc` 挂 `/app/data`、`backend-secret` 挂 `/app/secrets`）；`base/frontend-deployment.yaml`（nginx 反代 `http://backend:8000`）；`base/jena-statefulset.yaml`/`base/neo4j-statefulset.yaml`/`base/postgres-statefulset.yaml`（各自 StatefulSet + headless Service + `volumeClaimTemplates` 持久卷数据保留）；`base/configmap.yaml`（依赖服务地址/应用配置/`INSTANCE_STORE_BACKEND`）、`base/secret.yaml`（`NEO4J_AUTH`/`POSTGRES_PASSWORD` 等 Opaque）、`base/storage.yaml`（jena/neo4j/postgres/backend-data 4 个 PVC）。每个工作负载都配 readiness+liveness 探针（健康检查，TCE-20-01/03 部署侧基座）。`kubectl kustomize` 渲染 base/prod 均通过。
+- **验证**：`tests/test_v2_20_k8s.py` **6/6**（TC-20-03 多副本一致——并发副本写+更新读回一致无分叉／`get_instance_store(backend='pg')` 与 `INSTANCE_STORE_BACKEND=pg` 返回 `PgInstanceStore`／`PgInstanceStore` 与 `JsonlInstanceStore` 接口语义一致／TC-20-01 部署物结构——Deployment/StatefulSet/Service/PVC/ConfigMap/Secret/Namespace、探针齐全、backend 8000 端口／prod overlay 扩 3 副本 + pg 收敛）；回归 L5 **192/192**（188 既有＋4 新增 V2-20）。
+- **坑位**：① 本地无 docker/minikube 实跑集群，TC-20-01/02/04/05 与 TCE-20-01~03 依赖真实 K8s + 构建镜像 → 登记「待人工测试」，提供的 `overlays/prod` 为扩缩容/滚动/故障演练部署基座（自动验证 overlay 结构）；② 部署物用 kustomize（环境探测 kubectl v1.35+kustomize v5.7），未用 Helm；③ `INSTANCE_STORE_BACKEND` 默认 `jsonl`，多副本必须显式设 `pg`，否则仍是本地文件分叉风险（deploy/prod 已收敛）；④ PG 单机（非外部 managed PG），生产建议托管外部 PG + Secret 注入 `POSTGRES_DSN`；⑤ PowerShell 重定向 `>` 产生 UTF-16 编码、内联 python 引号会被转义为 `\'` 致语法错误（验证用临时脚本文件而非内联）。
+- **文档**：`docs/API-INTERFACE-DOC.md` §39（V2-20 K8s 部署与实例存储收敛：`INSTANCE_STORE_BACKEND`/`POSTGRES_DSN` 配置、PG 收敛、K8s 部署物结构）；`docs/V2-测试用例.md` 二十 V2-20 执行结果行（PASS=6/FAIL=0，含 TC-20-01/03 已自动化、TC-20-02/04/05 与 TCE-20-01~03 待人工）；`docs/V2-开发里程碑.md` M4-H 交付结果；`proj_wiki/.../source-V2-测试用例.md` M4-H 验收行。
+- **git（本地，未 push）**：新增 `backend/core/pg_instance_store.py`、`deploy/k8s/**`（kustomization/base/overlays）、`backend/tests/test_v2_20_k8s.py`；修改 `backend/core/instance_store.py`（get_instance_store 加 pg 分支）、`backend/config.py`（instance_store_backend）、`docs/API-INTERFACE-DOC.md`、`docs/V2-测试用例.md`、`docs/V2-开发里程碑.md`、`proj_wiki/.../source-V2-测试用例.md`、`TASK_CHECKPOINT.md`（§61）。M4 各片 commit 仍本地未 push（M4-I 终验后统一 push）。
+- **下一步**：回到里程碑主线 **M4-J（V2-22 计算过程链 trace＋NL 驱动业务动作）** → M4-K（MCP 工具目录展示＋按项目工具暴露开关）→ M4-I 终验＋统一 push。
+
+## §62 M4-J（V2-22 计算过程链 trace＋NL 驱动业务动作）交付（2026-11-16）
+
+完成 M4-J（V2-22，P1，2026-11-12 新增需求）。交付：**统一过程链 trace（`process_trace`）＋ NL 驱动业务动作端点（`POST /api/nl/drive`）**。
+
+- **统一过程链**（`backend/core/trace.py`）：`TraceBuilder`（step.type 白名单 data_fetch/capability/action/compute/result，`seq` 单调递增、`details`、`started_at/finished_at`）+ `make_capability_steps`/`make_action_steps`/`make_instance_get_steps`/`make_nl_steps` 由各执行结果装配统一 steps。`record_trace` **恒开**（append-only，同 `trace_id` 幂等不重复），落库 `JsonStore("trace_logs", project_id)`；落库对 details 做集合类限量（前 20＋total）与大值截断（字符串>2000、detail 体积>20000 字节）。**证据链**：`trace_id` ↔ `run_id` ↔ `log_id` ↔ `audit_event_id`。
+- **两层并存（用户决策 2026-11-12）**：能力执行四要素溯源 `res["trace"]`（inputs/null_inputs/lookups/refs）保留不动；统一过程链用**独立键 `process_trace`**，互不覆盖；落库恒开独立于 `include_trace` 参数（参数只控制响应是否携带）。
+- **MCP 三工具**（`mcp_server/__init__.py`）：`instance_get`/`capability_call`/`action_invoke` 增加 `include_trace: bool = False` 参数（`_annotate` 更新 schema + `TOOLS_CONTRACT` 同步）；`include_trace=true` 时响应附 `process_trace`（分别 `make_instance_get_steps`/`make_capability_steps`/`make_action_steps`）；落库 source `mcp:instance_get`/`mcp:capability_call`/`mcp:action_invoke`（action_invoke 带 `log_id`）。
+- **REST**：`api/router_capabilities.py` execute `success({**res, "process_trace": trace})`（保四要素），落库 `source="rest:capability_execute"`；`api/router_trace.py` 新增 `GET /api/trace`（仅管理员，`project_id`/`trace_id`/`run_id`/`log_id` 过滤，分页 page/page_size≤200，倒序分页）与 `GET /api/trace/export`（JSONL 导出）；PUT/PATCH/DELETE → **405 `TRACE_IMMUTABLE`**（append-only）。`_require_admin` 复用审计权限分级（非 admin 403 `FORBIDDEN` 并记录 `audit_access_denied`）。
+- **NL 驱动业务动作**（`api/router_nl.py`）：`POST /api/nl/drive` —— `_classify_intent`（override 优先 user，否则关键词回退 fallback，默认 query）；query 路径 `nl_to_sparql`+`sparql_query` 只读执行（`ontology_id` 必填）；action 路径 `_match_capability`（显式 capability 优先，否则按关键词匹配 active 能力）→ `CapabilityService.execute(cap, ..., channel="nl", trigger_source="nl", dry_run, inputs)`（中/高危走 V2-13 确认流）；响应 `{kind, outcome, trace, intent_source, process_trace}`，落库 `source="nl:drive"`。
+- **编排 run 输入快照**：`backend/orchestration/__init__.py` run 详情 node_states 补 `st["input"]=resolved`（输入快照）。
+- **验证**：`tests/test_v2_22_trace.py` **8/8**（TC-22-01/02/04/05、TCE-22-01/02：REST execute 返回 process_trace＋四要素保留；多次执行追加独立记录不覆盖＋record_trace 幂等；run_id/log_id 透传关联；NL 驱动 action 触发能力执行 value=9.0＋意图回退；非管理员 403＋PATCH/DELETE 405）；回归 L5 **202/202**（194 既有＋8 新增 V2-22）。
+- **坑位**：① 实现键名 `process_trace`（文档需求 `data.trace`）——因 `trace` 已被四要素溯源占用，改独立键两层并存（需求文档已注明）；② `record_trace` 幂等按 `trace_id` 去重（防并发/重试叠写）；③ Starlette TestClient 每请求新事件循环、`self.cap_id` 不跨方法 → module 级 `_ctx`；④ `_require_admin` 测试用带 `state`/`url.path` 的假 `_Req`（TestClient 无 `req.state` 可直接赋值）；⑤ 曾误用 `success({**res, "trace": trace})` 覆盖四要素导致 test_v2_04 KeyError，改为独立键修复。
+- **文档**：`docs/API-INTERFACE-DOC.md` §40（V2-22 过程链 trace＋NL 驱动）；`docs/V2-测试用例.md` 十一·补 V2-22 执行结果行（PASS=8/FAIL=0，TC-22-01/02/04/05、TCE-22-01/02）；`docs/V2-开发里程碑.md` M4-J 交付结果；`proj_wiki/.../source-V2-测试用例.md` M4-J 验收行。
+- **git（本地，未 push）**：新增 `backend/core/trace.py`、`backend/api/router_trace.py`、`backend/api/router_nl.py`、`backend/tests/test_v2_22_trace.py`；修改 `backend/mcp_server/__init__.py`（三工具 include_trace + process_trace）、`backend/api/router_capabilities.py`、`backend/orchestration/__init__.py`（node_states input 快照）、`backend/main.py`（挂载 trace/nl router）、`docs/API-INTERFACE-DOC.md`、`docs/V2-测试用例.md`、`docs/V2-开发里程碑.md`、`proj_wiki/.../source-V2-测试用例.md`、`TASK_CHECKPOINT.md`（§62）。M4 各片 commit 仍本地未 push（M4-I 终验后统一 push）。
+- **下一步**：回到里程碑主线 **M4-K（MCP 工具目录展示＋按项目工具暴露开关）** → M4-I 终验＋统一 push。
+
+## §63 HF-13 修复：approve 去重扫描 O(n²)（2026-11-16）
+
+**问题（hotfix §14.8 / HF-13，P1 批量导入阻断）**：`_approve_one` 对候选内**每一行**都调 `_match_by_stable_key` → `instance_store.find(object_type, limit=None)` 整对象全表扫描。批量 1000 行单批 >180s 超时，且随对象增长线性恶化（O(n²)）；500 行批次也偶发 `os.replace WinError 5`（文件锁）。HF-11（§13.4）只修了 execute_batch 的写入侧，**未覆盖 approve 的逐行去重扫描**。万级导入（D1 122,500 行／Q1 缺口 22,655 行）被此卡死。
+
+**根因**：`backend/api/router_ingest.py:_match_by_stable_key` → `find(limit=None)`；`instance_store` 无按 `stable_key` 的索引/字典，且 `insert/update` 仍是整文件读改写或逐行 append。
+
+**修复（采用 hotfix 方案 3：集合式去重，一次索引）**——选择理由：对调用方无额外约束（不需保证"传入即唯一"），保留「同主键更新」「批次内重复收敛」语义，且不引入 append 专用通道导致的分叉：
+- **`backend/api/router_ingest.py`**：
+  - 新增 `_stable_key_tuple(ontology_id, key, value)`：统一匹配键 `(ontology_id, stable_key, str(stable_key_value))`（ontology_id 归一当前本体、str 化比较，与原 `_match_by_stable_key` 语义一致）。
+  - 新增 `_build_stable_key_index(store, ontology_id, object_type, key)`：**一次** `find(limit=None)` 读取该对象类型全部记录构建内存索引；无 `stable_key/stable_key_value` 元数据的存量记录不入索引（不被静默改写，安全性不变）。
+  - `_match_by_stable_key` 增加可选 `index` 参数：非 None 走 O(1) 命中，None 回退原全表扫描（供非 approve 复用，行为不变）。
+  - `_approve_one` 落库前构建一次 `match_index`，循环内逐行传 `index=...`；**本次新增带主键记录同步写入 `match_index`**，保持批次内重复收敛（防重复追加）。
+  - 复杂度：`_approve_one` 从「每行一次全表扫描 O(行数×现存)」降为「一次 O(现存) 读＋每行 O(1) 命中」。
+- **`backend/core/instance_store.py`**：`_write_file` 的 `os.replace` 退避重试 `_REPLACE_RETRIES` 3→5、`_REPLACE_BACKOFF_SEC` 0.05→0.08（应付文件锁偶发 WinError 5）；`_read_file` 已对损坏 JSONL 行容错跳过（`JsonDecodeError` 告警），写回时因坏行被过滤而顺带清理（不引入跨进程文件锁，避免平台差异风险）。
+
+**验证**：新增 `backend/tests/test_hf13_approve_dedup.py` **5/5**（去重更新：同 stable_key 二次 approve → dedup=1/inserted=0、实例合并保留原 id；批次内重复收敛：单候选两条同 key 只 insert 1；索引命中与全表扫描语义等价：ontology_id 归一、int/str str 化比较、无主键元数据不参与；损坏 JSONL 行读取容错＋写回顺带清理）。L5 全量回归 **207/207**（202 既有＋5 新增 HF-13，412.5s 全绿）。
+
+**交付**：hotfix §14.8.1 已登记（状态「已修复 HF-13」）；`proj_wiki/.../source-V2-测试用例.md` 追加 HF-13 登记行；`TASK_CHECKPOINT.md` §63。**遗留**：既有撕裂残行（D1 `obj_cost_detail.jsonl` 的 `00"}` 等）读侧已容错、写回顺带清理，不主动扫全库（避免误删有效实例）；跨进程并发 append 文件锁加固未纳入本期（单进程下进程内 RLock 已够）。
+
+**改动文件（本地 commit 未 push）**：`backend/api/router_ingest.py`、`backend/core/instance_store.py`、`backend/tests/test_hf13_approve_dedup.py`（新增）、`hotfix/hotfix.md`、`proj_wiki/.../source-V2-测试用例.md`、`TASK_CHECKPOINT.md`。
+
+## §64 M4-K（MCP Server 工具目录展示＋按项目工具暴露开关）交付（2026-11-16）
+
+完成 M4-K（P1，2026-11-13 新增需求）。交付：**工具目录只读展示（P0，有副作用工具红色警示）＋ 按项目工具暴露开关（P1）**。
+
+- **P0 工具目录展示**（`mcp_server/__init__.py`）：`TOOLS_CONTRACT` 补全至 **13 个工具**（原 10 个缺 `lineage_get`/`quality_health`/`connection_health`，补 reads/writes/preconditions/postconditions/side_effect 完整元数据）；`tools()` 返回 `preconditions`/`postconditions`。前端 `loadMcpTools()` 重写为 `<details>` 展开卡片：展示 reads/writes/preconditions/postconditions；有副作用工具 `⚠ 有副作用` 红色警示、只读 `🔒 只读`。
+- **P1 按项目工具暴露开关**（`mcp_server/__init__.py` + `api/router_mcp.py`）：
+  - `_tool_config_store(project_id)` / `_disabled_tools(project_id)` / `tool_config(project_id)` / `set_tool_config(project_id, enabled, disabled, actor)`：`JsonStore("mcp_tool_config", project_id)` 按项目存储，缺省全开（`disabled=[]`）；enabled 白名单优先、非法名过滤、落盘、`_evict` 即时生效。
+  - `_McpEndpoint.__init__` 在 `_register_tools` 后调用 `_apply_tool_config()`，对停用工具 `self.mcp.remove_tool(name)`（try/except 忽略）——停用后 `tools/list` 不含、`tools/call` 返回 not found（标准 MCP 语义）。
+  - `status(project_id)` 项目级 `tools` 改为实际启用工具，并内嵌 `tool_config`。
+  - REST：新增 `GET /server/tool-config`（读取）、`PUT /server/tool-config`（`_ToolConfigBody`：enabled/disabled 二选一；`current_user(request)` 取 actor；审计 `mcp_tool_config_updated`；`_evict` 即时生效）。
+- **前端**（`frontend/app.js` + `frontend/index.html`）：新增 `loadMcpToolConfig()`（checkbox 列表，有副作用叠加 `⚠`）、`saveMcpToolConfig()`（PUT `{enabled}`，`JSON.stringify`，保存后刷新）、`setAllMcpTools(all)`；`switchTab('mcp')` 增加 `loadMcpToolConfig()` 调用；新增「按项目工具暴露开关」卡片（全部启用/全部停用/保存并生效按钮 + `#mcpToolConfigList`）。
+- **验证**：新增 `tests/test_v2_23_mcp_tool_config.py` **8/8**（契约完整含 side_effect 识别/缺省全开/停用后 list 隐藏/PUT 白名单即时生效/项目隔离/审计留痕/恢复全开）；L5 全量回归 **215/215**（207 既有＋8 新增 V2-23）。
+- **坑位**：① `ep.mcp.list_tools()` 是协程（async）→ `asyncio.run`；② `list_tools()` 返回 `list[Tool]` 非 `.tools` 对象；③ 前端 `api()` body 需 `JSON.stringify`（fetch 不自动序列化对象）；④ 审计查询用 `auth_svc.list_audit(event=...)` 且 `any()` 匹配 target（无 `audit_query`）；⑤ `saveMcpToolConfig` PUT body 曾误传对象导致 422，改 `JSON.stringify`。
+- **兼容性**：与既有 `test_v2_18_stdio.py` 兼容（TOOLS_CONTRACT 补全后其动态断言仍成立）；受影响既有测试 `test_v2_18_stdio`＋`test_vs5_vs8` 共 11 passed 无破坏。
+- **文档**：`docs/API-INTERFACE-DOC.md` §41（V2-23 MCP 工具目录＋工具暴露开关）；`docs/V2-测试用例.md` 追加 V2-23 用例区（TC-23-01~07/TCE-23-01）＋执行结果统计（合计 241）；`docs/V2-开发里程碑.md` M4-K 节追加执行结果；`proj_wiki/.../source-V2-测试用例.md` M4-K 验收行。
+- **git（本地，未 push）**：新增 `backend/tests/test_v2_23_mcp_tool_config.py`；修改 `backend/mcp_server/__init__.py`、`backend/api/router_mcp.py`、`frontend/app.js`、`frontend/index.html`、`docs/API-INTERFACE-DOC.md`、`docs/V2-测试用例.md`、`docs/V2-开发里程碑.md`、`proj_wiki/.../source-V2-测试用例.md`、`TASK_CHECKPOINT.md`（§64）。M4 各片 commit 仍本地未 push（M4-I 终验后统一 push）。
+- **下一步**：回到里程碑主线 **M4-I（终验＋统一 push）**；此前 M4-G（V2-10 JSONL 旁路操作日志）、M4-H（V2-20 K8s 部署）、M4-J（V2-22 过程链 trace）、M4-K（V2-23 工具目录＋暴露开关）已全部交付。
+
+## §65 M4-I（里程碑退出终验＋统一 push）交付（2026-11-16）
+
+完成 M4-I（里程碑退出终验），M4 全里程碑（V2-10~V2-23）收口。
+
+- **自动化验收**：L5 全量回归 **215/215** 通过（207 既有＋8 新增 V2-23；含 V2-10/15/16/17/18/19/20/22/23 全部 V2 系列自动化）；关键 E2E `test_vs10_e2e`/`test_vs5_vs8`/`test_vs2_business_gate` **21 通过**；对齐/融合/内容访问/联邦（V2-02/04/06）回归 **34 通过**。自动化侧全绿。
+- **统一 commit＋push**：将 M4-E/F/G/H/J/K＋HF-11/13 的未提交改动统一提交（commit `d10f098`，覆盖 M4-E stdio/M4-F LinkML/M4-G sidecar/M4-H k8s/M4-J trace/M4-K 工具配置＋HF-11/HF-13），连同此前 M4-A~D 一起 **push 到 origin/main**，现本地与远程同步（`Your branch is up to date with origin/main`）。
+- **push 网络坑**：`git push` 首次报 `Connection was reset`、重试报 `Could not connect to server`（超时 21s）；`curl.exe` 测 github.com 返回 200（网络可达）。根因疑似 HTTP/2 连接中断。**解决**：`git -c http.version=HTTP/1.1 push origin main` 成功。后续在 Windows 上 push 遇网络中断可复用此开关。
+- **排除项（不入提交，有意保留）**：`cost_baseline_kit/`、`data/instance_import_batch4.xlsx`、`docs/answer.*`、`docs/备份/`、`docs/成本核算*`、`docs/答题要求.md`、`docs/赛题答题要求.md`、`docs/数据缺口与待业务沟通问题清单.md`（仅行尾变化）等成本核算/材料/草稿类文件。
+- **M4 全里程碑交付确认**：M4-A①~④ ✅、M4-B V2-15 ✅、M4-C V2-16 ✅、M4-D V2-17 ✅、M4-E V2-18 ✅、M4-F V2-19 ✅、M4-G V2-10 ✅、M4-H V2-20 ✅、M4-J V2-22 ✅、M4-K V2-23 ✅。
+- **文档**：本 checkpoint §65；用户级 wiki 六件套（raw 快照 2026-11-16-M4-I、实体页、进展与测试、对话历史、log、index）已同步。
+
