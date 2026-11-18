@@ -1047,7 +1047,7 @@ function switchTab(name) {
   if (name === 'action') { loadActions(); }
   if (name === 'orchestration') { loadOrchestration(); }
   if (name === 'dictionary') { loadDictionary(); }
-  if (name === 'capability') { loadCapabilities(); }
+  if (name === 'capability') { loadOntologies().then(() => { renderOntologySelects(); loadCapabilities(); }); }
   if (name === 'quality') {
     loadOntologies().then(() => {
       renderQualityOntologySelect();
@@ -1115,7 +1115,7 @@ function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').
 function renderOntologySelects() {
   const active = state.ontologies.filter(o => (o.status || 'active') === 'active');
   const opts = active.map(o => '<option value="' + o.id + '">' + esc(o.name) + '</option>').join('');
-  ['ingestOntology', 'graphOntology', 'inferOntology', 'qyOntology'].forEach(id => {
+  ['ingestOntology', 'graphOntology', 'inferOntology', 'qyOntology', 'capOntology'].forEach(id => {
     const sel = $(id);
     if (!sel) return;
     const prev = sel.value;
@@ -6274,6 +6274,56 @@ async function loadDictAudit() {
    版本化：draft→publish 锁定引用版本；active 内容变更自动 minor+1 发新版（旧版可溯源）。 */
 const capState = { list: [], editingId: null };
 
+// 能力层子tab：表单建模 / AI 生成（与本体页 setEditorMode 保持一致）
+function setCapMode(mode) {
+  ['form', 'ai'].forEach(m => {
+    const pan = $('capMode' + m[0].toUpperCase() + m.slice(1));
+    const tab = $('capSubtab' + m[0].toUpperCase() + m.slice(1));
+    if (pan) pan.classList.toggle('hidden', m !== mode);
+    if (tab) tab.classList.toggle('active', m === mode);
+  });
+}
+
+// 能力页 AI 生成：结合业务描述 + 已选本体的对象模型，调用后端生成能力并落盘，
+// 成功后刷新列表 + 弹窗展示 created/skipped 明细（LLM 不可用降级为 fallback 不报错）。
+async function generateCapabilitiesFromText() {
+  const oid = ($('capOntology') && $('capOntology').value) || '';
+  const text = ($('capAiText') && $('capAiText').value.trim()) || '';
+  if (!oid) return toast('请先选择关联本体（作为对象模型上下文）', 'info');
+  if (!text) return toast('请先输入业务描述', 'info');
+  $('btnCapAiGen').disabled = true;
+  toast('AI 正在生成本体的派生型能力…（思考型模型可能需要 1~3 分钟）', 'info', 5000);
+  try {
+    const j = await api('/api/capabilities/generate', { method: 'POST', body: JSON.stringify({ text, ontology_id: oid }) });
+    const r = j.data || {};
+    loadCapabilities();
+    if (r.gen_mode === 'fallback') {
+      toast('LLM 生成失败，已回退到确定性兜底（未生成能力）。请检查「设置 → LLM」后重试', 'err', 8000);
+    } else {
+      toast('已生成并落库 ' + (r.created || 0) + ' 条能力，跳过 ' + (r.skipped || []).length + ' 条', r.created ? 'ok' : 'warn');
+    }
+    // 弹窗展示完整明细（created + skipped）
+    const createdRows = (r.items || []).map(c =>
+      '<tr><td class="p-1 font-mono">' + esc(c.name || '') + '</td><td class="p-1">' + esc(c.display_name || '') + '</td><td class="p-1 font-mono text-slate-400">' + esc(c.object_type || '') + '</td><td class="p-1">v' + esc(c.version || '') + '</td><td class="p-1 text-amber-300">草稿</td></tr>'
+    ).join('');
+    const skippedRows = (r.skipped || []).map(s =>
+      '<tr><td class="p-1 font-mono">' + esc((s && s.name) || '-') + '</td><td class="p-1 text-rose-300">' + esc((s && s.message) || (s && s.error) || '非法能力') + '</td></tr>'
+    ).join('');
+    const content =
+      '<div class="text-xs mb-2">gen_mode=' + esc(r.gen_mode) + ' · 落库 ' + (r.created || 0) + ' 条 · 跳过 ' + (r.skipped || []).length + ' 条</div>' +
+      '<div class="text-xs text-slate-400 mb-1 font-medium">已创建（' + (r.items || []).length + '）</div>' +
+      '<table class="w-full text-xs border-collapse mb-3"><thead><tr class="text-slate-400"><th class="text-left p-1">name</th><th class="text-left p-1">显示名</th><th class="text-left p-1">对象类型</th><th class="text-left p-1">版本</th><th class="text-left p-1">状态</th></tr></thead><tbody>' + (createdRows || '<tr><td colspan="5" class="p-1 text-slate-500">无</td></tr>') + '</tbody></table>' +
+      '<div class="text-xs text-slate-400 mb-1 font-medium">跳过（' + (r.skipped || []).length + '）</div>' +
+      '<table class="w-full text-xs border-collapse"><thead><tr class="text-slate-400"><th class="text-left p-1">name</th><th class="text-left p-1">原因</th></tr></thead><tbody>' + (skippedRows || '<tr><td colspan="2" class="p-1 text-slate-500">无</td></tr>') + '</tbody></table>';
+    showModal('AI 生成能力结果', content);
+    return;
+  } catch (e) {
+    toast('生成失败: ' + e.message, 'err');
+  } finally {
+    $('btnCapAiGen').disabled = false;
+  }
+}
+
 async function loadCapabilities() {
   const st = ($('capFilterStatus') && $('capFilterStatus').value) || '';
   try {
@@ -6776,7 +6826,22 @@ function showLogin(message) {
   $('loginOverlay')?.classList.remove('op-hidden');
   $('appShell')?.classList.add('op-hidden');
   $('appHeader')?.classList.add('op-hidden');
+  // 回到普通登录表单（隐藏强制改密面板）
+  $('passwdChangeForm')?.classList.add('op-hidden');
+  document.querySelector('#loginOverlay form.op-login-card:not(#passwdChangeForm)')
+    ?.classList.remove('op-hidden');
   if (message) $('loginError').textContent = message;
+}
+
+function showPasswordChange() {
+  $('loginOverlay')?.classList.remove('op-hidden');
+  $('appShell')?.classList.add('op-hidden');
+  $('appHeader')?.classList.add('op-hidden');
+  // 隐藏登录表单，只显示强制改密面板
+  document.querySelector('#loginOverlay form.op-login-card:not(#passwdChangeForm)')
+    ?.classList.add('op-hidden');
+  $('passwdChangeForm')?.classList.remove('op-hidden');
+  $('passwdChangeError').textContent = '';
 }
 
 function hideLogin() {
@@ -6791,6 +6856,8 @@ async function loadSession() {
     state.session = j.data;
     applyPermissionMatrix(j.data.permissions || {});
     $('loginError').textContent = '';
+    // 硬控：初始密码未修改的用户不进入主应用，强制走改密面板
+    if (j.data?.user?.must_change_password) { showPasswordChange(); return; }
     hideLogin();
     // 业务页加载失败不应把已认证用户踢回登录页
     try { await bootApp(); } catch (e2) { clientLog('error', 'app boot failed', { message: e2.message }); }
@@ -6840,6 +6907,28 @@ async function submitLogin() {
   }
 }
 
+async function submitPasswordChange() {
+  const oldPw = $('pcOldPassword').value;
+  const newPw = $('pcNewPassword').value;
+  const confirmPw = $('pcConfirmPassword').value;
+  $('passwdChangeError').textContent = '';
+  if (!oldPw || !newPw) { $('passwdChangeError').textContent = '请填写当前密码与新密码'; return; }
+  if (newPw.length < 8) { $('passwdChangeError').textContent = '新密码至少 8 位'; return; }
+  if (newPw !== confirmPw) { $('passwdChangeError').textContent = '两次输入的新密码不一致'; return; }
+  const btn = $('pcSubmitBtn');
+  btn.disabled = true;
+  try {
+    await api('/api/auth/change-password', {
+      method: 'POST', body: JSON.stringify({ old_password: oldPw, new_password: newPw }),
+      skipAuthRedirect: true,
+    });
+    $('pcOldPassword').value = ''; $('pcNewPassword').value = ''; $('pcConfirmPassword').value = '';
+    await loadSession(); // 改密成功后端已签发新会话，此处校验通过后进入主应用
+  } catch (e) {
+    $('passwdChangeError').textContent = e.message || '修改失败';
+  } finally { btn.disabled = false; }
+}
+
 async function logoutUser() {
   try { await api('/api/auth/logout', { method: 'POST', skipAuthRedirect: true }); } catch (e) { /* ignore */ }
   state.session = null;
@@ -6848,6 +6937,8 @@ async function logoutUser() {
 
 async function loadAuthUsers() {
   try {
+    const depts = authDepartmentOptions();
+    const deptOpts = depts.map(d => `<option value="${esc(d)}">${esc(d)}</option>`).join('');
     const j = await api('/api/auth/users?pageSize=200');
     const rows = j.data.items || [];
     const labels = { viewer: '只读', modeler: '建模人', reviewer: '审核人', admin: '管理员' };
@@ -6859,41 +6950,113 @@ async function loadAuthUsers() {
         <td><select id="role_${u.id}" class="bg-[#0f1627] border border-slate-700/60 rounded px-1 py-1">
           ${Object.keys(labels).map(r => `<option value="${r}" ${r === u.role ? 'selected' : ''}>${labels[r]}</option>`).join('')}
         </select></td>
+        <td><select id="dept_${u.id}" class="bg-[#0f1627] border border-slate-700/60 rounded px-1 py-1 w-28">
+          <option value="">（未分配）</option>${deptOpts}</select></td>
         <td><input id="grantProject_${u.id}" class="bg-[#0f1627] border border-slate-700/60 rounded px-1 py-1 w-28" value="${esc(g.target || '')}" placeholder="项目 ID" /></td>
         <td><select id="grantLevel_${u.id}" class="bg-[#0f1627] border border-slate-700/60 rounded px-1 py-1">
           ${Object.keys(levels).map(l => `<option value="${l}" ${l === (g.level || 'read') ? 'selected' : ''}>${levels[l]}</option>`).join('')}
         </select></td>
-        <td><button class="btn secondary" onclick="saveAuthUser('${u.id}')">保存</button></td>
+        <td><button class="btn secondary" onclick="saveAuthUser('${u.id}')">保存</button>
+          <button class="btn secondary mr-1" onclick="toggleAuthUser('${u.id}', ${u.disabled ? 'true' : 'false'})">${u.disabled ? '恢复' : '禁用'}</button>
+          <button class="btn secondary mr-1" onclick="deleteAuthUser('${u.id}')">删除</button>
+        </td>
       </tr>`;
-    }).join('') || '<tr><td colspan="5" class="text-slate-500 py-3">暂无用户</td></tr>';
+    }).join('') || `<tr><td colspan="6" class="text-slate-500 py-3">暂无用户</td></tr>`;
+    // 回填部门下拉选中值
+    rows.forEach(u => {
+      const sel = $('dept_' + u.id);
+      if (sel) sel.value = u.department || '';
+    });
   } catch (e) { toast('加载用户失败：' + e.message, 'err'); }
+}
+
+function authDepartmentOptions() {
+  // 复用项目部门聚合（allDepartments），不另建部门表
+  const depts = allDepartments();
+  // 同步刷新新增用户表单的部门下拉（保留当前选中值）
+  const sel = $('newAuthDept');
+  if (sel) {
+    const current = sel.value;
+    sel.innerHTML = '<option value="">（未分配）</option>' +
+      depts.map(d => `<option value="${esc(d)}">${esc(d)}</option>`).join('');
+    if (current && depts.includes(current)) sel.value = current;
+  }
+  return depts;
 }
 
 async function saveAuthUser(id) {
   const role = $('role_' + id).value;
+  const dept = $('dept_' + id) ? $('dept_' + id).value : '';
   const target = $('grantProject_' + id).value.trim();
   const level = $('grantLevel_' + id).value;
   const grants = target ? [{ scope: 'project', target, level }] : [];
   try {
-    await api('/api/auth/users/' + id, { method: 'PUT', body: JSON.stringify({ role, grants }) });
+    await api('/api/auth/users/' + id, { method: 'PUT', body: JSON.stringify({ role, grants, department: dept }) });
     toast('授权已保存，目标用户无需重新登录即生效', 'ok');
     await loadAuthUsers();
     await loadAuthAudit();
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
 }
 
+async function toggleAuthUser(id, disabled) {
+  const action = disabled ? '恢复' : '禁用';
+  if (!confirm(`确定${action}该用户？${disabled ? '恢复后即可正常登录。' : '禁用后无法登录，可随时恢复。'}`)) return;
+  try {
+    await api('/api/auth/users/' + id, { method: 'PUT', body: JSON.stringify({ disabled }) });
+    toast((disabled ? '已恢复' : '已禁用') + '该用户', 'ok');
+    await loadAuthUsers();
+    await loadAuthAudit();
+  } catch (e) { toast('操作失败：' + e.message, 'err'); }
+}
+
+async function deleteAuthUser(id) {
+  if (!confirm('确定删除该用户？将完整删除所有数据与记录，不可恢复！')) return;
+  try {
+    await api('/api/auth/users/' + id, { method: 'DELETE' });
+    toast('已删除该用户', 'ok');
+    await loadAuthUsers();
+    await loadAuthAudit();
+  } catch (e) { toast('删除失败：' + e.message, 'err'); }
+}
+
 async function createAuthUser() {
   const username = $('newAuthUsername').value.trim();
   const password = $('newAuthPassword').value;
   const role = $('newAuthRole').value;
-  if (!username || !password) { toast('请填写账号与初始密码', 'err'); return; }
+  const dept = $('newAuthDept') ? $('newAuthDept').value : '';
+  if (!username) { toast('请填写账号', 'err'); return; }
+  if (password && password.length < 8) { toast('初始密码至少 8 位（留空则使用默认初始密码）', 'err'); return; }
   try {
-    await api('/api/auth/users', { method: 'POST', body: JSON.stringify({ username, password, role }) });
+    await api('/api/auth/users', { method: 'POST', body: JSON.stringify({ username, password: password || undefined, role, department: dept }) });
     $('newAuthUsername').value = ''; $('newAuthPassword').value = '';
-    toast('用户已创建', 'ok');
+    if ($('newAuthDept')) $('newAuthDept').value = '';
+    toast(password ? '用户已创建' : '用户已创建（默认初始密码 123456a?，首次登录将强制改密）', 'ok', password ? undefined : 5000);
     await loadAuthUsers();
     await loadAuthAudit();
   } catch (e) { toast('创建失败：' + e.message, 'err'); }
+}
+
+async function importAuthUsers() {
+  const input = $('authImportFile');
+  if (!input || !input.files || !input.files[0]) return toast('请选择 .xlsx 文件', 'info');
+  const form = new FormData();
+  form.append('file', input.files[0]);
+  const btn = $('btnAuthImport');
+  if (btn) btn.disabled = true;
+  toast('正在导入用户…', 'info', 2000);
+  try {
+    const j = await api('/api/auth/users/import', { method: 'POST', body: form });
+    const d = j.data || {};
+    let msg = `导入完成：成功 ${d.created || 0} 条`;
+    if (d.failed && d.failed.length) {
+      msg += '，失败 ' + d.failed.length + ' 条（' + d.failed.map(f => '第' + f.row + '行:' + f.reason).join('；') + '）';
+    }
+    toast(msg, d.failed && d.failed.length ? 'warn' : 'ok', 6000);
+    if (input) input.value = '';
+    await loadAuthUsers();
+    await loadAuthAudit();
+  } catch (e) { toast('导入失败：' + e.message, 'err'); }
+  finally { if (btn) btn.disabled = false; }
 }
 
 async function loadAuthAudit() {

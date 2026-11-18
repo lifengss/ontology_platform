@@ -889,10 +889,13 @@
 | 主凭据 | `Set-Cookie: op_session=<JWT>; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800`（JS 不接触 token） |
 | API 客户端 | `POST /api/auth/login?mode=bearer` 额外返回 `data.token`；请求带 `Authorization: Bearer <token>` |
 | HTTPS 部署 | 设 `ONTOLOGY_COOKIE_SECURE=true` 使 Cookie 带 `Secure` |
-| 初始管理员 | 首次启动自动创建 `admin`；密码取 `ONTOLOGY_BOOTSTRAP_ADMIN_PASSWORD`，未设置则随机生成写入 `secrets/bootstrap_admin.txt`（不硬编码默认口令） |
+| 初始管理员 | 首次启动自动创建 `admin`；密码取 `ONTOLOGY_BOOTSTRAP_ADMIN_PASSWORD`，未设置则用系统默认初始密码并置 `must_change_password=true`（2026-11-18 起**不再落盘任何明文密码文件**，旧 `secrets/bootstrap_admin.txt` 方案废弃） |
 | 过期/篡改/登出 | 固定 HS256（拒绝 `alg=none`）+ 恒定时间签名比较 + exp/iat/jti 校验；登出把 jti 写入撤销名单 → 401 |
+| 改密失效 | JWT claim 带 `pwd_epoch`（密码版本号）；改密/重置成功 `pwd_epoch+1`，此后旧 token 一律 401（不依赖时钟精度；历史无此字段的 token 放行，升级兼容） |
 
 密码 PBKDF2-HMAC-SHA256（`ONTOLOGY_PBKDF2_ITERATIONS` 默认 600000，可用 env 调整）；JWT HS256 仅用标准库实现，无新增第三方依赖（离线安装包友好）。
+
+**默认初始密码与强制改密（2026-11-18）**：新建用户（API 创建 / Excel 导入 / bootstrap admin）未显式指定密码时，统一使用系统默认初始密码（平台级约定口令），并置 `must_change_password=true`；前端 `loadSession()` 硬控——该标记为 true 的会话只显示强制改密面板，不允许进入主应用。改密成功后端**立即重签新会话**（cookie 覆写 / `?mode=bearer` 返回 token），当前操作不被弹回登录页。
 
 ### 21.2 全局过滤器与放行清单
 
@@ -924,11 +927,14 @@
 |---|---|---|---|
 | POST | `/api/auth/login` | 放行 | 账号密码登录（Cookie 或 `?mode=bearer`） |
 | POST | `/api/auth/logout` | 放行 | 撤销 jti + 清 Cookie |
+| POST | `/api/auth/change-password` | 登录 | 修改**本人**密码，body `{old_password,new_password}`（新密码 ≥8 位且不得与当前相同）；Cookie 或 `?mode=bearer`（2026-11-18）。成功：清 `must_change_password`、`pwd_epoch+1`（旧会话立即 401），并**直接签发新会话**（cookie 覆写 / bearer 额外返回 `token`），响应 `{changed,expires_at,user}`。失败（旧密码错/新密码同当前/过短/账号禁用）→ `400 INVALID_CREDENTIALS` |
 | GET | `/api/auth/me` | 登录 | 实时身份/权限矩阵（角色调整免重登即时生效） |
 | GET | `/api/auth/roles` | admin | 角色定义 |
-| GET | `/api/auth/users` | admin | 用户列表，`{items,total,page,page_size}` |
-| POST | `/api/auth/users` | admin | 创建用户 `{username,password,role,grants}`（201） |
-| PUT | `/api/auth/users/{id}` | admin | 改 role/grants/disabled/password，写 `permission_change` 审计（含 before/after） |
+| GET | `/api/auth/users` | admin | 用户列表，`{items,total,page,page_size}`（含 `department`） |
+| POST | `/api/auth/users` | admin | 创建用户 `{username,password?,role,grants,tenant_id,department}`（201）；**`password` 可选**：省略时用系统默认初始密码并置 `must_change_password=true`，显式传则须 ≥8 位 |
+| PUT | `/api/auth/users/{id}` | admin | 改 role/grants/disabled/password/tenant_id/department，写 `permission_change` 审计（含 before/after） |
+| DELETE | `/api/auth/users/{id}` | admin | 物理删除用户（2026-11-17），写 `user_deleted` 审计；不存在 404 |
+| POST | `/api/auth/users/import` | admin | Excel(.xlsx) 批量导入用户（2026-11-17）：逐行 `{账号,密码,角色,部门,租户}`，**密码列可空**（空 = 系统默认初始密码 + 强制改密；非空 <8 位该行进 failed）；响应 `{created,failed:[{row,reason}],total}`；失败行不阻断成功行 |
 | GET | `/api/auth/audit` | admin | 审计列表，支持 `event`/`actor`/`page`/`pageSize` |
 | GET | `/api/auth/sso/config` | 放行 | SSO 预留：`{enabled:false,providers:[],reserved:true}` |
 | POST | `/api/auth/sso/start` | 放行 | 未启用显式 `403 SSO_NOT_ENABLED`（不回落匿名） |
@@ -939,7 +945,8 @@
 
 - 防枚举：密码错误 / 账号不存在 / 账号锁定 / disabled 一律 `401 INVALID_CREDENTIALS`，文案统一「账号或密码错误」；连续 5 次失败锁定 300 秒（服务端审计可查，不向客户端暴露账号状态）。
 - 会话不残留权限：JWT 不含角色/权限，登出撤销，用户禁用/锁定即时拒绝。
-- 审计事件：`login_success`、`login_failed`、`logout`、`user_created`、`permission_change`、`permission_denied`、`auth_missing`、`auth_invalid`；含 `ts/actor/target/detail`。
+- 审计事件：`login_success`、`login_failed`、`logout`、`user_created`、`user_deleted`、`users_import`、`permission_change`、`permission_denied`、`auth_missing`、`auth_invalid`、`password_changed`、`password_change_failed`（2026-11-17/18 用户管理与密码策略新增）；含 `ts/actor/target/detail`。
+- 改密语义（2026-11-18）：`POST /api/auth/change-password` 属**个人会话操作**——需有效会话但不要求 `write` 权限（viewer 亦可改本人密码）；管理员经 `PUT /api/auth/users/{id}` 重置他人密码同样触发 `must_change_password=true` + `pwd_epoch+1`。
 - **已知边界（如实标注）**：① httpOnly Cookie 降低 XSS 窃取 token 风险，但 `mode=bearer` 返回的 token 由调用方自行保管，浏览器端不应持久化；生产建议配合 CSP 与 HTTPS。② 审计/撤销名单当前用 `JsonStore` 全量读写，适合单部门规模，多部门高并发前需换存储。③ 资源级授权按 `project_id` 判定，M2-C 多租户隔离（V2-06）与 M2-B 身份联邦（V2-14i）尚未实现。④ 直连 REST 的既有回归脚本在启用鉴权的部署上需携带 `Authorization: Bearer <token>`（由 `?mode=bearer` 登录获取）；测试态豁免不适用于跨进程服务。
 - 验收：`scripts/verify_m2a_auth_rbac.py` **PASS=67/FAIL=0/SKIP=0**（TP-05-01~05、EP-05-01~03、TC/TCE-05、真实 Chromium DOM、MCP 体系不受影响、默认启用断言）；回归 L5 **93/93**、M1-A **75/75**、M1-B **50/50（SKIP=1）**、M1-C **33/33**、M1-E **26/26**。
 
@@ -1034,6 +1041,9 @@
 |---|---|---|
 | project | `tenant_id` | 租户归属；创建时取创建人租户；存量项目视为 `default` |
 | user | `tenant_id` | 租户绑定；admin（平台治理）可跨租户 |
+| user | `department` | 部门（2026-11-17，**独立于租户**，仅展示/归属标签，缺省空串）；一个租户可有多个部门，二者不互相派生 |
+| user | `must_change_password` / `pwd_epoch` | 首次登录强制改密标记 / 密码版本号（2026-11-18）；改密或管理员重置后 `pwd_epoch+1`，JWT claim 版本不匹配的旧会话立即 401（机制详见 §21.1/§21.4/§21.5） |
+| user | `DELETE /api/auth/users/{id}` | 物理删除用户（仅 admin，2026-11-17），写 `user_deleted` 审计；`POST /api/auth/users/import` 支持 .xlsx 批量导入，失败行返回明细 |
 | ontology | `owner` / `sharing` / `shared_with` | 建模人 / 共享等级（private \| project \| department \| public）/ 项目组共享成员（可跨租户）；**新建默认 private**，存量无 `sharing` 字段视为 department（不收紧既有同租户协作） |
 | ingest_candidate | `created_by` | 上传者归属（上传/预览落库） |
 | instance | `uploaded_by` / `content_open` | 上传者 / 内容开放范围 `{users:[], departments:[]}`（departments=租户 id） |

@@ -81,6 +81,8 @@ READ_ONLY_POST_RE = re.compile(
     r"|mcp/server/status"
     r"|llm/test"
     r"|system/info"
+    # 个人会话操作：修改本人密码（需有效登录态，但不要求 write 权限）
+    r"|auth/change-password"
     # V2-15（M4-B）：开放查询接口（SPARQL/GraphQL 为只读计算型 POST）
     r"|query/sparql"
     r"|query/graphql"
@@ -157,6 +159,11 @@ def _store(collection: str) -> JsonStore:
 # --------------------------------------------------------------------------- #
 # 密码与 JWT
 # --------------------------------------------------------------------------- #
+#: 默认初始密码：bootstrap 管理员与"未指定密码新建"的用户统一使用该口令，
+#: 并置 must_change_password=True，首次登录必须改密后才能使用系统。
+DEFAULT_INITIAL_PASSWORD = "123456a?"
+
+
 def hash_password(password: str) -> str:
     iterations = _pbkdf2_iterations()
     salt = secrets.token_bytes(16)
@@ -232,7 +239,11 @@ def issue_token(user: dict[str, Any]) -> tuple[str, int]:
     now = _now()
     exp = now + TOKEN_TTL_SECONDS
     jti = uuid.uuid4().hex
-    token = encode_jwt({"sub": user["id"], "jti": jti, "iat": now, "exp": exp})
+    # pwd_epoch 密码版本号：改密/重置后递增，旧 token 版本不匹配即失效（不依赖时钟精度）
+    token = encode_jwt({
+        "sub": user["id"], "jti": jti, "iat": now, "exp": exp,
+        "pwd_epoch": int(user.get("pwd_epoch", 0) or 0),
+    })
     return token, exp
 
 
@@ -262,8 +273,10 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
         "role": user.get("role", "viewer"),
         "grants": user.get("grants", []),
         "tenant_id": user.get("tenant_id") or "default",
+        "department": user.get("department") or "",
         "disabled": bool(user.get("disabled", False)),
         "locked": bool(user.get("locked_until", 0) > _now()),
+        "must_change_password": bool(user.get("must_change_password", False)),
         "created_at": user.get("created_at"),
         "updated_at": user.get("updated_at"),
     }
@@ -282,21 +295,18 @@ def get_user(user_id: str) -> dict[str, Any] | None:
 def ensure_bootstrap() -> None:
     """幂等初始化：无用户时创建内置管理员。
 
-    初始密码优先取 ONTOLOGY_BOOTSTRAP_ADMIN_PASSWORD；否则生成随机密码并写入
-    secrets/bootstrap_admin.txt（仅本机可读），避免硬编码默认口令。
+    初始密码优先级：
+    1. 环境变量 ONTOLOGY_BOOTSTRAP_ADMIN_PASSWORD（部署者显式指定，不强制改密）
+    2. 系统默认初始密码 DEFAULT_INITIAL_PASSWORD（强制首次登录改密）
+
+    不再落盘任何明文密码文件（旧版 bootstrap_admin.txt 方案已废弃）。
     """
     store = _store("auth_users")
     if store.all():
         return
     password = os.getenv("ONTOLOGY_BOOTSTRAP_ADMIN_PASSWORD")
     if not password:
-        bootstrap_file = pathlib.Path(get_settings().secrets_dir) / "bootstrap_admin.txt"
-        if bootstrap_file.exists():
-            password = bootstrap_file.read_text(encoding="utf-8").strip()
-        else:
-            bootstrap_file.parent.mkdir(parents=True, exist_ok=True)
-            password = secrets.token_urlsafe(18)
-            bootstrap_file.write_text(password, encoding="utf-8")
+        password = DEFAULT_INITIAL_PASSWORD
     store.insert({
         "id": uuid.uuid4().hex,
         "username": "admin",
@@ -306,6 +316,7 @@ def ensure_bootstrap() -> None:
         "disabled": False,
         "failed_attempts": 0,
         "locked_until": 0,
+        "must_change_password": password == DEFAULT_INITIAL_PASSWORD,
         "created_at": _ts(),
         "updated_at": _ts(),
     })
@@ -377,23 +388,55 @@ def authenticate(username: str, password: str) -> tuple[dict[str, Any] | None, s
     return get_user(user["id"]), ""
 
 
-def create_user(username: str, password: str, role: str = "viewer",
+def change_password(user: dict[str, Any], old_password: str,
+                    new_password: str) -> str:
+    """用户修改本人密码（须验证当前密码）。返回错误信息，空串表示成功。
+
+    成功后：清除 must_change_password、重置失败计数、并使改密前签发的
+    旧会话立即失效（pwd_epoch 版本校验，见 resolve_request_user）。
+    """
+    if user.get("disabled"):
+        return "账号已被禁用"
+    if not verify_password(old_password, user.get("password_hash", "")):
+        audit("password_change_failed", actor=user.get("username", "-"),
+              detail={"reason": "wrong_old_password"})
+        return "当前密码不正确"
+    if new_password == old_password:
+        return "新密码不能与当前密码相同"
+    _store("auth_users").update(user["id"], {
+        "password_hash": hash_password(new_password),
+        "must_change_password": False,
+        "failed_attempts": 0,
+        "locked_until": 0,
+        "pwd_epoch": int(user.get("pwd_epoch", 0) or 0) + 1,
+        "updated_at": _ts(),
+    })
+    audit("password_changed", actor=user.get("username", "-"), target=user["id"])
+    return ""
+
+
+def create_user(username: str, password: str | None = None, role: str = "viewer",
                 grants: list[dict[str, Any]] | None = None,
-                tenant_id: str | None = None) -> dict[str, Any]:
+                tenant_id: str | None = None,
+                department: str | None = None) -> dict[str, Any]:
+    """创建用户。未指定密码时使用 DEFAULT_INITIAL_PASSWORD 并强制首次登录改密。"""
     if role not in ROLES:
         raise ValueError(f"未知角色: {role}")
     if find_user(username):
         raise ValueError("用户名已存在")
+    use_default = not password
     rec = _store("auth_users").insert({
         "id": uuid.uuid4().hex,
         "username": username,
-        "password_hash": hash_password(password),
+        "password_hash": hash_password(password or DEFAULT_INITIAL_PASSWORD),
         "role": role,
         "grants": grants or [],
         "tenant_id": tenant_id or "default",
+        "department": department or "",
         "disabled": False,
         "failed_attempts": 0,
         "locked_until": 0,
+        "must_change_password": use_default,
         "created_at": _ts(),
         "updated_at": _ts(),
     })
@@ -405,17 +448,29 @@ def update_user(user_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
     if rec is None:
         return None
     allowed = {k: v for k, v in patch.items()
-               if k in ("role", "grants", "disabled", "password", "tenant_id") and v is not None}
+               if k in ("role", "grants", "disabled", "password", "tenant_id", "department") and v is not None}
     if "role" in allowed and allowed["role"] not in ROLES:
         raise ValueError(f"未知角色: {allowed['role']}")
     password = allowed.pop("password", None)
     if password:
+        # 管理员重置：用户未参与选密 → 强制其首次登录改密，并使旧会话立即失效
         allowed["password_hash"] = hash_password(password)
         allowed["failed_attempts"] = 0
         allowed["locked_until"] = 0
+        allowed["must_change_password"] = True
+        allowed["pwd_epoch"] = int(get_user(user_id).get("pwd_epoch", 0) or 0) + 1
     allowed["updated_at"] = _ts()
     updated = _store("auth_users").update(user_id, allowed)
     return _public_user(updated) if updated else None
+
+
+def delete_user(user_id: str) -> bool:
+    """物理删除用户记录。返回是否存在被删。"""
+    rec = get_user(user_id)
+    if rec is None:
+        return False
+    _store("auth_users").delete(user_id)
+    return True
 
 
 def list_users() -> list[dict[str, Any]]:
@@ -526,6 +581,12 @@ def resolve_request_user(token: str) -> dict[str, Any] | None:
     user = get_user(claims["sub"])
     if user is None or user.get("disabled") or user.get("locked_until", 0) > _now():
         return None
+    # 改密/重置密码前签发的旧会话立即失效（须用新密码重新登录）；
+    # 历史 token 无 pwd_epoch 字段则放行（升级兼容，首次改密后自动纳入管控）
+    epoch = user.get("pwd_epoch")
+    if epoch:
+        if int(claims.get("pwd_epoch", 0) or 0) != int(epoch):
+            return None
     return user
 
 

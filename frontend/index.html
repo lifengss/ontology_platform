@@ -262,6 +262,21 @@
       <button id="loginSubmitBtn" type="submit" class="btn" style="width:100%;margin-top:8px">登录</button>
       <div class="text-xs text-slate-500 mt-4">SSO 对接预留，当前仅支持账号密码登录</div>
     </form>
+    <form id="passwdChangeForm" class="op-login-card op-hidden" onsubmit="submitPasswordChange(); return false;">
+      <div class="text-lg font-semibold">首次登录 · 请修改初始密码</div>
+      <div class="text-xs text-slate-400 mt-2">为保护账号安全，您必须先修改初始密码后才能使用系统（初始密码为 <b>123456a?</b>）</div>
+      <label class="op-login-label">当前密码
+        <input id="pcOldPassword" type="password" class="op-login-input" autocomplete="current-password" />
+      </label>
+      <label class="op-login-label">新密码（至少 8 位）
+        <input id="pcNewPassword" type="password" class="op-login-input" autocomplete="new-password" />
+      </label>
+      <label class="op-login-label">确认新密码
+        <input id="pcConfirmPassword" type="password" class="op-login-input" autocomplete="new-password" />
+      </label>
+      <div id="passwdChangeError" class="text-xs mt-3" style="color:#f87171;min-height:18px"></div>
+      <button id="pcSubmitBtn" type="submit" class="btn" style="width:100%;margin-top:8px">修改密码并进入系统</button>
+    </form>
   </div>
 
   <div id="appShell" class="flex-1 flex overflow-hidden op-hidden">
@@ -835,21 +850,41 @@
               <button class="btn" type="button" onclick="openCapEditor()">＋ 新建能力</button>
             </div>
           </div>
-          <div id="capEditor" class="hidden mb-3 border border-slate-700/60 rounded-lg p-3 bg-slate-900/40"></div>
-          <div id="capValidateBox" class="hidden mb-3 text-xs"></div>
-          <div class="overflow-x-auto">
-            <table class="w-full text-xs border-collapse">
-              <thead><tr class="text-slate-400">
-                <th class="border-b border-slate-700 p-1.5 text-left">name</th>
-                <th class="border-b border-slate-700 p-1.5 text-left">显示名</th>
-                <th class="border-b border-slate-700 p-1.5 text-left">对象类型</th>
-                <th class="border-b border-slate-700 p-1.5 text-left">输出属性</th>
-                <th class="border-b border-slate-700 p-1.5 text-left">版本</th>
-                <th class="border-b border-slate-700 p-1.5 text-left">状态</th>
-                <th class="border-b border-slate-700 p-1.5 text-left whitespace-nowrap">操作</th>
-              </tr></thead>
-              <tbody id="capListBody"></tbody>
-            </table>
+          <div class="flex gap-2 mb-3 bg-slate-900/50 p-1 rounded-lg inline-flex">
+            <button class="subtab active" id="capSubtabForm" onclick="setCapMode('form')">表单建模</button>
+            <button class="subtab" id="capSubtabAi" onclick="setCapMode('ai')">AI 生成</button>
+          </div>
+
+          <div id="capModeForm">
+            <div id="capEditor" class="hidden mb-3 border border-slate-700/60 rounded-lg p-3 bg-slate-900/40"></div>
+            <div id="capValidateBox" class="hidden mb-3 text-xs"></div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-xs border-collapse">
+                <thead><tr class="text-slate-400">
+                  <th class="border-b border-slate-700 p-1.5 text-left">name</th>
+                  <th class="border-b border-slate-700 p-1.5 text-left">显示名</th>
+                  <th class="border-b border-slate-700 p-1.5 text-left">对象类型</th>
+                  <th class="border-b border-slate-700 p-1.5 text-left">输出属性</th>
+                  <th class="border-b border-slate-700 p-1.5 text-left">版本</th>
+                  <th class="border-b border-slate-700 p-1.5 text-left">状态</th>
+                  <th class="border-b border-slate-700 p-1.5 text-left whitespace-nowrap">操作</th>
+                </tr></thead>
+                <tbody id="capListBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div id="capModeAi" class="hidden">
+            <label class="text-sm text-slate-300">用自然语言描述业务场景，AI 结合所选本体的对象模型生成派生型公式能力</label>
+            <div class="mt-2">
+              <label class="text-xs text-slate-400">关联本体（作为对象模型上下文）</label>
+              <select id="capOntology" class="w-full"></select>
+            </div>
+            <textarea id="capAiText" rows="5" class="w-full mt-2" placeholder="例如：维保服务成本 = 工时成本 + 原材料成本；成本 = 上门率 × 标准工日 × 日费；请生成这些能力的公式表达式。"></textarea>
+            <div class="flex gap-2 mt-3 items-center">
+              <button class="btn" onclick="generateCapabilitiesFromText()" id="btnCapAiGen">开始生成</button>
+              <span class="text-xs text-slate-500 self-center">生成结果逐条经公式校验后落库（草稿），可继续「校验 → 发布」</span>
+            </div>
           </div>
         </div>
       </div>
@@ -1561,7 +1596,7 @@
         <div class="overflow-auto">
           <table class="w-full text-xs">
             <thead><tr class="text-slate-400">
-              <th class="text-left py-2">账号</th><th>角色</th><th>项目授权</th><th>级别</th><th>操作</th>
+              <th class="text-left py-2">账号</th><th>角色</th><th>部门</th><th>项目授权</th><th>级别</th><th>操作</th>
             </tr></thead>
             <tbody id="authUserTableBody"></tbody>
           </table>
@@ -1570,14 +1605,25 @@
       <div class="col-span-12 lg:col-span-5 card p-4">
         <div class="text-sm font-semibold mb-3">新增用户</div>
         <label class="op-login-label">账号<input id="newAuthUsername" class="op-login-input" /></label>
-        <label class="op-login-label">初始密码（至少 8 位）<input id="newAuthPassword" type="password" class="op-login-input" /></label>
+        <label class="op-login-label">初始密码（可选，至少 8 位）<input id="newAuthPassword" type="password" class="op-login-input" placeholder="留空使用系统默认初始密码" /></label>
+        <div class="text-[11px] text-slate-500 mb-2">留空时使用系统默认初始密码（123456a?），该用户首次登录将被强制改密</div>
         <label class="op-login-label">角色
           <select id="newAuthRole" class="op-login-input">
             <option value="viewer">只读</option><option value="modeler">建模人</option>
             <option value="reviewer">审核人</option><option value="admin">管理员</option>
           </select>
         </label>
-        <button id="createAuthUserBtn" class="btn mt-4" onclick="createAuthUser()">创建用户</button>
+        <label class="op-login-label">部门
+          <select id="newAuthDept" class="op-login-input"><option value="">（未分配）</option></select>
+        </label>
+        <div class="mt-4 space-y-2">
+          <button id="createAuthUserBtn" class="btn w-full" onclick="createAuthUser()">创建用户</button>
+          <div class="flex gap-2 items-center">
+            <input id="authImportFile" type="file" accept=".xlsx" class="op-login-input" />
+            <button id="btnAuthImport" class="btn secondary" onclick="importAuthUsers()">导入 Excel</button>
+          </div>
+          <div class="text-[11px] text-slate-500">支持 .xlsx 批量添加用户，表头：账号/密码/角色/部门/租户/权限。失败行返回明细。</div>
+        </div>
         <div class="text-sm font-semibold mt-6 mb-2">授权与鉴权审计</div>
         <div id="authAuditBody" class="text-xs text-slate-400" style="max-height:260px;overflow:auto"></div>
       </div>
