@@ -75,7 +75,7 @@ Section -install
   MessageBox MB_ICONSTOP "Install configuration did NOT finish (no result reported - the console window may have been closed, or the script crashed).$\r$\nSee log: <install dir>\logs\install.log$\r$\nRetry: close any leftover console/installer processes, then re-run$\r$\n<install dir>\scripts\install-deps.ps1 as admin. Or uninstall first (<install dir>\Uninstall.exe)$\r$\nand run this setup again."
   Goto .installEnd
 .depOk:
-  MessageBox MB_ICONINFORMATION "Installation completed.$\r$\nNote: ports may have been re-assigned automatically if defaults were busy.$\r$\nEntry URLs: see <install dir>\scripts\runtime-config.json$\r$\nStart/Stop: desktop shortcuts (Chinese names) or start-platform.bat / stop-platform.bat"
+  MessageBox MB_ICONINFORMATION "Installation completed.$\r$\n$\r$\nDefault login account: admin$\r$\nInitial password: 123456a?$\r$\nA password change is FORCED at first login (old password expires immediately).$\r$\n$\r$\nNote: ports may have been re-assigned automatically if defaults were busy.$\r$\nEntry URLs: see <install dir>\scripts\runtime-config.json$\r$\nStart/Stop: desktop shortcuts (Chinese names) or start-platform.bat / stop-platform.bat"
 .installEnd:
 SectionEnd
 

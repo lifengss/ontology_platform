@@ -699,5 +699,6 @@ Log "前端页面: http://localhost:$($ports['frontend'])"
 Log "后端 API: http://localhost:$($ports['backend'])   文档: http://localhost:$($ports['backend'])/docs"
 Log "服务端口: fuseki=$($ports['fuseki']) neo4j=$($ports['neo4jHttp'])/$($ports['neo4jBolt']) postgres=$($ports['postgres'])"
 Log "启动: 桌面「本体平台-启动」  停止: 桌面「本体平台-停止」"
+Log "默认登录账号: admin   初始密码: 123456a?   （首次登录强制改密，详见安装目录 README-产品说明.md）"
 Write-Result "OK" ("Install configuration completed. frontend=http://localhost:" + $ports['frontend'] + " backend=http://localhost:" + $ports['backend'])
 exit 0
