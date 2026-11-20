@@ -5,14 +5,20 @@ rem OPEN so the error is visible (prevents the silent "flash and close").
 rem Keep this file pure ASCII (cmd reads it as ANSI).
 setlocal
 cd /d "%~dp0.."
+rem /S flag passed by setup.nsi when running silent: skip the interactive pause
+rem (2026-11-20 install test: silent install + failure = installer hangs forever on
+rem  'pause' with nobody to press a key - ExecWait never returns, makensis output
+rem  file stays locked afterwards too)
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install-deps.ps1" -InstallDir "%~dp0.."
 set RC=%ERRORLEVEL%
 if not "%RC%"=="0" (
     echo.
     echo [FAILED] install-deps.ps1 exited with code %RC%.
     echo Check logs\install.log and logs\install-result.ini in the install directory for details.
-    echo Press any key to close this window...
-    pause >nul
+    if /I not "%~1"=="/S" (
+        echo Press any key to close this window...
+        pause >nul
+    )
 )
 endlocal
 exit /b %RC%

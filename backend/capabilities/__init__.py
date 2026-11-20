@@ -19,6 +19,7 @@ import hashlib
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -506,6 +507,20 @@ class CapabilityService:
             # V2-02（M4-A①）：lookup 命中源连接型实例且属性无本地值 → 治理身份单值回源
             #（批量联邦读＋成本提示随 M4-A④/TP-04-06）；命中缓存避免同一实例重复回源。
             fed_value_cache: dict[str, Any] = {}
+            # GAP-16：命中前并行预取（线程池）——池内源连接型且缺目标属性的实例一次并行回源，
+            # 总时延≈最慢单源；_fed_value 懒加载分支保留兜底（预取失败的实例仍可逐条回源）。
+            import content_access as _ca
+            _need = [r for r, iinst in pool
+                     if attr and attr not in iinst
+                     and _ca.is_federated(self.project_id, r)
+                     and r.get("id") not in fed_value_cache]
+            if _need:
+                try:
+                    for rid, (vals, _pmeta) in _ca.federate_values_many(
+                            self.project_id, _need, user_id=None, attr_ids=[attr]).items():
+                        fed_value_cache[rid] = vals.get(attr)
+                except Exception as e:  # noqa: BLE001 —— 预取失败退回懒加载路径
+                    logger.warning("lookup 并行预取联邦值失败（退回逐条回源）: %s", e)
 
             def _fed_value(irec: dict[str, Any], iinst: dict[str, Any], a: str) -> Any:
                 if a in iinst:
@@ -799,13 +814,37 @@ class CapabilityService:
         pending: dict[str, dict[str, dict[str, Any]]] = {}
         for chunk_start in range(0, len(records), self._BATCH_CHUNK):
             chunk = records[chunk_start:chunk_start + self._BATCH_CHUNK]
+            # GAP-19：联邦回源块内并行预取——_federate_input 是逐实例源系统 HTTP 调用，
+            # 原块内逐条串行时块时延≈各源时延之和；线程池并行后≈最慢单源。
+            # 预取失败按 EP-04-03 语义标记（主循环查表消费；未预取到的走原逐条路径兜底）。
+            fed_prefetch: dict[str, tuple] = {}
+            if use_federated and not dry_run:
+                fed_chunk = [r for r in chunk if is_federated(self.project_id, r)]
+                if len(fed_chunk) > 1:
+                    def _prefetch(r):
+                        try:
+                            return r.get("id"), (self._federate_input(r, attrs, user_id), None)
+                        except CapabilityApiError as e:
+                            # 与主循环解包结构 ((inputs, fed_meta), pre_err) 保持一致
+                            return r.get("id"), ((None, None), e)
+                    with ThreadPoolExecutor(max_workers=min(8, len(fed_chunk))) as ex:
+                        for rid, pair in ex.map(_prefetch, fed_chunk):
+                            fed_prefetch[rid] = pair
             for irec in chunk:
                 effective = irec
                 fed_meta: Optional[dict[str, Any]] = None
                 if use_federated and is_federated(self.project_id, irec):
-                    try:
-                        inputs, fed_meta = self._federate_input(irec, attrs, user_id)
-                    except CapabilityApiError as e:
+                    pre = fed_prefetch.get(irec.get("id"))
+                    if pre is not None:
+                        (inputs, fed_meta), pre_err = pre
+                    else:
+                        try:
+                            inputs, fed_meta = self._federate_input(irec, attrs, user_id)
+                            pre_err = None
+                        except CapabilityApiError as e:
+                            pre_err = e
+                    if pre_err is not None:
+                        e = pre_err
                         # EP-04-03：单实例回源失败 → 标记失败实例，不产生半口径结果
                         n_fed_failed += 1
                         cid, cname = self._fed_conn_info(irec)

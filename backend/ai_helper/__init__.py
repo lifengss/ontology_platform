@@ -7,7 +7,7 @@ from typing import Any
 
 from .client import call_llm, test_connection
 from .config import LLMConfig, get_llm_config, reload_llm_config
-from .prompts import render_ontology_generation
+from .prompts import render_capability_generation, render_ontology_generation
 from logging_setup import get_logger
 from modeling_translator import attr_uri, class_uri
 
@@ -209,6 +209,56 @@ def generate_ontology_from_document(
     return generate_ontology_from_text(text, endpoint, model, fallback=True, max_tokens=max_tokens)
 
 
+def _build_ontology_schema_summary(ontology: dict[str, Any], max_objects: int = 30) -> str:
+    """把本体对象模型压缩为 prompt 可用的 schema 摘要（限制对象数防止超长）。"""
+    objects = ontology.get("objects", [])
+    lines = ["本体的业务对象与属性："]
+    for o in objects[:max_objects]:
+        attrs = ", ".join(f"{a.get('id')}({a.get('name', '')})" for a in o.get("attributes", []))
+        lines.append(f"- {o.get('id')} ({o.get('name', '')}): {attrs}")
+        rels = ", ".join(
+            f"{r.get('id')}->{r.get('target_object')}"
+            for r in o.get("relations", [])
+            if r.get("target_object")
+        )
+        if rels:
+            lines.append(f"  关系: {rels}")
+    return "\n".join(lines)
+
+
+def generate_capabilities_from_text(
+    text: str,
+    ontology: dict[str, Any],
+    endpoint: str | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    """结合业务描述 + 本体对象模型，用 LLM 生成能力（capability）定义列表。
+
+    返回 (能力列表, 来源)：来源为 "llm"（模型真实产出）或 "fallback"（LLM 不可用/无产出）。
+    注意：这里只做 LLM 产出与结构抽取，**不落盘**；调用方（如 API 端点）需对每条能力
+    经 capabilities.CapabilityService.create_capability 校验并落地。
+    """
+    schema_text = _build_ontology_schema_summary(ontology)
+    prompt = render_capability_generation(text, schema_text)
+    try:
+        result = call_llm(prompt, base_url=endpoint, model=model, temperature=0.1, max_tokens=max_tokens)
+        message = result.get("choices", [{}])[0].get("message") or {}
+        content = message.get("content")
+        if not content:
+            logger.warning("[capability] LLM content 为空（reasoning 耗尽 max_tokens 或未输出正文）")
+            return [], "fallback"
+        data = extract_json(str(content))
+        caps = data.get("capabilities", []) if isinstance(data, dict) else []
+        if not isinstance(caps, list):
+            caps = []
+        logger.info("[capability] generate_capabilities_from_text llm ok count=%d", len(caps))
+        return caps, "llm"
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[capability] LLM 调用失败，generate_capabilities_from_text 返回空: %s", e)
+        return [], "fallback"
+
+
 # ---- 确定性 fallback：LLM 不可达时从关键词生成最小可用本体 ----
 
 FALLBACK_TEMPLATES: dict[str, dict[str, Any]] = {
@@ -279,6 +329,7 @@ __all__ = [
     "extract_json",
     "generate_ontology_from_text",
     "generate_ontology_from_document",
+    "generate_capabilities_from_text",
     "nl_to_sparql",
     "deterministic_extract_ontology",
     "LLMConfig",

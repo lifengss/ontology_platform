@@ -56,8 +56,12 @@ Section -install
 
   ; Launch via post-install.bat (2026-10-30 field report: inline powershell command
   ; line flashes and closes with no visible error when the script fails; the bat
-  ; keeps the window open on non-zero exit and points to the log files)
-  ExecWait "$INSTDIR\scripts\post-install.bat"
+  ; keeps the window open on non-zero exit and points to the log files).
+  ; 2026-11-20: pass /S in silent installs so the bat skips its interactive pause
+  ; (otherwise a silent unattended failure hangs the installer forever).
+  IfSilent 0 +2
+    StrCpy $R9 "/S"
+  ExecWait '"$INSTDIR\scripts\post-install.bat" $R9'
   ; Success/failure is decided by the result file written by the script (positive confirmation):
   ; Status=OK only when the whole provisioning run truly finished. A missing file means the
   ; console was closed / the script crashed - treat as failure in all non-OK cases.

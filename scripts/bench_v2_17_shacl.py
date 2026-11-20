@@ -3,9 +3,12 @@
 用法：
     python scripts/bench_v2_17_shacl.py [--customers 400] [--orders 1200]
         [--rounds 3] [--seed 42]
-        [--out data/datasets/v2/shacl_benchmark_baseline.json]
+        [--out data/datasets/v2/shacl_benchmark_baseline.json] [--freeze]
 
 口径（同 TC-16-05 模式）：每引擎 rounds 次取中位数；目标值不冻结，仅记录基线。
+--freeze（GAP-03）：双引擎违规明细一致时，把 local/jena 中位数分别冻结为
+perf 基线（shacl_local / shacl_jena → data/perf_baseline.json）；
+不一致时不冻结（先排查 TC-17-01）。
 
 诚实口径（2026-11-16 依赖事实）：Fuseki standalone fat jar 无 SHACL HTTP 服务端点，
 Jena 侧＝Java 子进程执行 Jena SHACL 引擎（org.apache.jena.shacl，随 fat jar 内置，
@@ -27,6 +30,7 @@ from statistics import median
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
+import perf  # noqa: E402
 from jena_adapter import shacl_jena  # noqa: E402
 from jena_adapter.client import _local_shacl_validate  # noqa: E402
 from modeling_translator import build_instance_graph, translate_to_shacl  # noqa: E402
@@ -114,6 +118,8 @@ def main() -> None:
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", default=str(ROOT / "data" / "datasets" / "v2" / "shacl_benchmark_baseline.json"))
+    ap.add_argument("--freeze", action="store_true",
+                    help="双引擎一致时冻结 perf 基线（shacl_local / shacl_jena，GAP-03）")
     args = ap.parse_args()
 
     ok, why = shacl_jena.java_shacl_available()
@@ -187,6 +193,12 @@ def main() -> None:
     print("=" * 64)
     if not consistent:
         sys.exit("双引擎违规明细不一致（应触发 TC-17-01 排查），基线不写入")
+
+    if args.freeze:
+        for scope, ms in (("shacl_local", local_median), ("shacl_jena", jena_median)):
+            entry = perf.freeze(scope, ms)
+            print(f"perf 基线已冻结 {scope}: {entry['baseline_ms']} ms "
+                  f"(target {entry['target_ms']} ms)")
 
     if args.out:
         out = Path(args.out)

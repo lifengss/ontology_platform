@@ -404,8 +404,10 @@ if (Test-Path $depsMarker) {
         }
     }
     Log "离线安装后端依赖（wheelhouse）..."
-    & $venvPython -m pip install --no-index --find-links (Join-Path $runtime "wheelhouse") -r (Join-Path $InstallDir "backend\requirements.txt") --quiet
-    if ($LASTEXITCODE -ne 0) { Fail "离线安装后端依赖失败（wheelhouse 不完整？）" }
+    # 2026-11-20 安装测试教训：--quiet 会吞掉 pip 具体报错（只留 exit≠0，日志只见"wheelhouse 不完整？"）
+    # 改为完整输出进 install.log；缺包类错误（No matching distribution found）一眼可定位
+    & $venvPython -m pip install --no-index --find-links (Join-Path $runtime "wheelhouse") -r (Join-Path $InstallDir "backend\requirements.txt") 2>&1 | ForEach-Object { Log ("pip| " + $_) }
+    if ($LASTEXITCODE -ne 0) { Fail "离线安装后端依赖失败（见上方 pip| 行）" }
     Set-Content -Path $depsMarker -Value "ok" -Encoding ascii
     Log "venv 就绪：$venvDir"
 }

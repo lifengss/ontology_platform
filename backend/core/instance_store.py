@@ -28,6 +28,43 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# ---- GAP-14：文件级记录缓存（跨 store 实例共享）----
+# 背景：get_instance_store 每次调用都新建 JsonlInstanceStore，实例级缓存会失效，
+# 因此缓存挂在模块级、以文件绝对路径为键（path → ((mtime_ns, size), records)）。
+# 失效策略：mtime_ns/size 任一变化即不命中（外部/他进程写入同样安全）；
+# 写侧（_append_file/_write_file）成功后主动失效兜底。
+# 读侧返回外层记录浅拷贝：调用方 update() 的 rec.update 只改拷贝，不污染缓存。
+# 内存权衡：单条记录 ~数百字节，5 万实例文件约数十 MB 量级，换取读路径免磁盘解析。
+_FILE_CACHE: dict[str, tuple[tuple[int, int], list[dict[str, Any]]]] = {}
+_FILE_CACHE_LOCK = threading.Lock()
+
+
+def _invalidate_file_cache(path: pathlib.Path) -> None:
+    with _FILE_CACHE_LOCK:
+        _FILE_CACHE.pop(str(path), None)
+
+
+def _copy_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """缓存读出副本：外层记录＋嵌套 instance 各浅拷贝一层，调用方就地修改不污染缓存。"""
+    out: list[dict[str, Any]] = []
+    for r in records:
+        c = dict(r)
+        inst = c.get("instance")
+        if isinstance(inst, dict):
+            c["instance"] = dict(inst)
+        out.append(c)
+    return out
+
+
+# ---- GAP-17 容量基准发现：列表/统计/图谱等读路径每请求全量物化（copy 5 万条 ~百 ms 级），
+# 高并发下 GIL 排队把 P50 拖到秒级。增加全量只读快照缓存：按"各文件 (mtime_ns,size) 聚合签名"
+# 失效，签名未变的请求共享同一份只读列表（零拷贝）。调用方只读约定：不得修改快照内记录
+#（列表过滤/排序/分页均为只读操作；annotate_rows/mask_instance_content 返回新 dict 已核实）。
+_SNAPSHOT_CACHE: dict[str, list[dict[str, Any]]] = {}
+_SNAPSHOT_CACHE_LOCK = threading.Lock()
+_SNAPSHOT_CACHE_KEEP = 4  # 最多保留 4 个版本（写频场景新旧版本交替）
+
+
 class InstanceStore(ABC):
     """实例存储抽象接口。"""
 
@@ -183,6 +220,34 @@ class JsonlInstanceStore(InstanceStore):
             records.extend(self._read_file(path.stem))
         return records
 
+    def snapshot(self) -> tuple[str, list[dict[str, Any]]]:
+        """全量只读快照（GAP-17）：跨文件聚合＋按聚合签名缓存，免每请求物化。
+
+        返回 (version, records)。**只读约定**：records 不得被调用方修改（外层/嵌套均不得）；
+        需要可变副本时用 find()/all()（返回独立拷贝）。version 为各文件 (mtime_ns, size)
+        聚合签名——任何写入（含外部进程）都会改变签名从而失效。
+        """
+        sigs = []
+        for p in sorted(self._dir.glob("*.jsonl")):
+            try:
+                st = p.stat()
+                sigs.append((p.stem, st.st_mtime_ns, st.st_size))
+            except OSError:
+                continue
+        vkey = json.dumps(sigs, ensure_ascii=False, default=str)
+        with _SNAPSHOT_CACHE_LOCK:
+            hit = _SNAPSHOT_CACHE.get(vkey)
+        if hit is not None:
+            return vkey, hit
+        records: list[dict[str, Any]] = []
+        for stem, _mt, _sz in sigs:
+            records.extend(self._read_file(stem))  # _read_file 返回独立副本 → 快照自成一体
+        with _SNAPSHOT_CACHE_LOCK:
+            if len(_SNAPSHOT_CACHE) >= _SNAPSHOT_CACHE_KEEP:
+                _SNAPSHOT_CACHE.clear()
+            _SNAPSHOT_CACHE[vkey] = records
+        return vkey, records
+
     @staticmethod
     def _record_signature(rec: dict[str, Any]) -> str:
         """实例内容签名：tx_id + object_type + instance，用于跨文件去重。"""
@@ -202,6 +267,19 @@ class JsonlInstanceStore(InstanceStore):
         path = self._path_for(object_type)
         if not path.exists():
             return []
+        # GAP-14：文件级缓存命中判定（mtime_ns + size 任一变化即失效，外部/他进程写入同样安全）
+        key = str(path)
+        sig = None
+        try:
+            st = path.stat()
+            sig = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            pass
+        if sig is not None:
+            with _FILE_CACHE_LOCK:
+                hit = _FILE_CACHE.get(key)
+            if hit and hit[0] == sig:
+                return _copy_records(hit[1])
         records: list[dict[str, Any]] = []
         with self._lock, open(path, "r", encoding="utf-8") as f:
             for line in f:
@@ -212,7 +290,10 @@ class JsonlInstanceStore(InstanceStore):
                     records.append(json.loads(line))
                 except json.JSONDecodeError as e:
                     logger.warning("JSONL 解析跳过: %s line=%s", e, line[:200])
-        return records
+        if sig is not None:
+            with _FILE_CACHE_LOCK:
+                _FILE_CACHE[key] = (sig, records)
+        return _copy_records(records)
 
     def _append_file(self, object_type: str, records: list[dict[str, Any]]) -> None:
         path = self._path_for(object_type)
@@ -220,6 +301,7 @@ class JsonlInstanceStore(InstanceStore):
         with self._lock, open(path, "a", encoding="utf-8", newline="\n") as f:
             for rec in records:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        _invalidate_file_cache(path)  # GAP-14：写后主动失效（兜底＝mtime 变化）
 
     # HF-11：Windows 下 os.replace 会因瞬时文件锁抛 PermissionError(WinError 5)
     # 或 FileNotFoundError，重写为退避重试；一次性批量写回（供 update_many 消除 O(n²)）。
@@ -240,6 +322,7 @@ class JsonlInstanceStore(InstanceStore):
         for attempt in range(1, self._REPLACE_RETRIES + 1):
             try:
                 os.replace(tmp, path)
+                _invalidate_file_cache(path)  # GAP-14：写后主动失效
                 return
             except (PermissionError, FileNotFoundError) as e:
                 # 瞬时锁：重试前等待；末次失败上抛，由上层决定是否降级/重试。

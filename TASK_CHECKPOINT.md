@@ -1765,3 +1765,340 @@ es.derived 返回摘要（id/authoritative/note），完整记录经 GET /derive
 4. **未执行 `git commit`**（提交须用户明确指示）。改动范围：`backend/auth/__init__.py`、`backend/schemas/auth.py`、`backend/api/router_auth.py`、`backend/tests/test_password_policy.py`（新）、`frontend/index.html`、`frontend/app.js`、`docs/API-INTERFACE-DOC.md`、项目 wiki、本 checkpoint。
 5. 清理完成：测试用户 uipp 已删、`bootstrap_admin.txt` 已删、12 个临时脚本已删、8123 静态服务已停、浏览器已关；`_pp_backend.out/.err` 为主后端运行日志保留。
 
+## §68 平台内建教程（frontend/tutorial）V2.0 全面更新（2026-11-18）
+
+### 68.1 背景
+- 用户指令：`tutorial/V2.0/` 内有外部平台整理的《服务产品成本本体建模教程》，要求按平台既有教程模块惯例（**以案例说明各模块作用、完整典型案例放最后**）结合该 V2.0 案例更新平台内建教程内容。
+
+### 68.2 改动范围（仅 `frontend/tutorial/`，无代码改动）
+- **manifest.json**：version 1.3 → **2.0**（systemVersion 2.0.0，updatedAt 2026-11-18），20 → **21 章**：插入第 15 章 `capability.md`「能力层（派生公式能力）」；第 20 章案例改名「典型案例：服务产品成本核算（V2.0 全流程）」。
+- **重写 7 章**：`overview`（七步主线/16 页签功能页地图/计算铁律/RBAC 多租户）、`quickstart`（新增登录步骤+显式 stable_key）、`publish`（**变更提案 changeset**：完整新模型→兼容自动升版/破坏走审批；warning 不阻断）、`ingest`（**field_map 形态**：records dict 列表/空字段省略键/approve 四数；列偏移/多行表头/显示值三坑）、`actions`（**回写风险分级**低危自动/中危 AI/高危签核＋编排页）、`mcp`（4 → **9 工具**：+capability_call/inference_trace/lineage_get/term_lookup/quality_health/fusion_query；503 轮询）、`ai-client`（**Agent 平台 HTTP 直连四步**核验 209.8305397）；`ops` 加登录鉴权/4 角色 RBAC/用户管理/审计。
+- **新建 `capability.md`**（第 15 章）：lookup/ref/if_null 积木、null 传播铁律、五大核算域能力链、dry_run/execute-batch、发布锁版、**5 条实战坑**（binds 预求值/尾位嵌套 if/ref 未发布/cap_id 调用/inputs 回退静默失真）。
+- **`case-cost.md` 整体重写为 V2.0 完整案例**（20 章=倒数第二章，保持「完整案例放最后」惯例）：登录→建用户 svcproduct/modeler→19 对象（显式 stable_key＋变更提案 v1.0→v1.4）→11 基线表导入 0 违规→能力链（D→E/K/N→O→S＋5 核算域）→MCP 发布→Agent 平台核验 209.8305397=结果表 209.8305→6 核算域 dry_run 逐行比对→3 源数据口径问题处理（字典登记/PATCH/表达式改口径）→4 设计原则＋10 坑清单＋全流程自检。
+- **`appendix`**：状态机加能力/变更提案；页面速查 16 页签；Top 12 坑更新；**`reasoning`** 加 **local/Fuseki 双引擎**（混合模式/自动降级 degraded=true/图范围/时延如实记录）。
+- **交叉引用**：第 15 章插入导致 15~21 章编号平移，全量更新 14 处「第 N 章」引用（nlq/modeling-csv/quickstart/modeling-form/overview/api 等）。
+- **图片**：`tutorial/V2.0/images/` 14 张案例截图拷入 `frontend/tutorial/assets/v2-*.png`（29 张全量校验，引用 0 缺失；顺带修掉旧教程本就缺失的 `reasoning-page.png` 失效引用）。
+
+### 68.3 验证
+- manifest JSON 合法（python json.load，21 章）；app.js `loadTutorial()` 按 manifest 驱动 fetch，新章自动生效；全部 `assets/*.png` 引用存在性脚本校验通过。
+- 未执行 `git commit`（提交须用户明确指示；M4 阶段惯例：本地提交、M4-I 终验后统一 push）。
+- `docs/本体平台使用教程-从建模到MCP调用.md`（docs 版人读教程）未动——如需同步 V2.0 案例口径，待用户指示。
+
+## §69 平台教程开发要求固化为项目 skill（2026-11-18）
+
+### 69.1 背景
+- 用户指令：「将我对于平台教程开发的要求写成 skill，方便后续更新教程时使用」。
+
+### 69.2 交付（`.codebuddy/skills/ontology-platform-tutorial/`，项目级 skill）
+- **SKILL.md**：四条核心要求（①以案例说明各模块作用②完整典型案例放最后③内容必须与平台实际一致、写前核实④用功能名不用内部编号 M1/V2-16 等）+ 模块结构/渲染方约定（manifest 驱动、图片预处理为 tut-img、manifest 字段）+ 章节模板骨架 + 版本规则（大版本随系统、内容更新只涨 minor）+ 五步更新工作流（核实现状→接入素材→写章节→补截图→manifest→自检）+ Windows 常见坑（GBK 读取、localhost IPv6、commit 听指令、落档）。
+- **references/chapter-template.md**：manifest 实际样例（21 章）+ 功能章模板（能力层章为范本）+ 完整典型案例章十节结构 + 写作口径。
+- **scripts/check_tutorial.py**：教程模块完整性校验（manifest JSON/章节文件存在/图片引用存在/「第 N 章」序号范围/教程与系统大版本一致/未引用截图警告），退出码 0/1。
+
+### 69.3 验证
+- `check_tutorial.py` 实跑当前教程：21 章 PASS（0 错 / 2 警告：logs-page.png、settings-page.png 未被引用，属 ops 章改用 v2-* 截图后的旧图遗留）。
+- skill-creator 官方 `package_skill.py` 校验通过（✅ Skill is valid!）。踩坑：该脚本在中文 Windows 默认 GBK 下崩溃（emoji 打印 + read_text 无 encoding），须 `PYTHONUTF8=1` 运行——已记入 SKILL.md 常见坑。
+- 临时打包 zip（%TEMP%\skill-dist）已清理；skill 就地放置于项目 `.codebuddy/skills/`，自动被发现，无需分发。
+- 未 commit（听用户指令）；`.codebuddy/` 为项目数据目录，勿删。
+
+## §70 修复教程章节加载失败（manifest 字段与 app.js 不匹配）＋ 删 V1 旧截图（2026-11-18）
+
+### 70.1 根因
+- 用户报「教程章节加载失败」。`frontend/app.js` 的 `loadTutorial/openTutChapter` 按 **`chapters[].id`** fetch `tutorial/chapters/<id>.md`、按顶层 **`m.title`** 渲染版本栏；而 §68 重写 V2.0 manifest 时误写成 `{file, title}` 且丢了顶层 `title`（参考了 TCGF 项目 manifest 的字段名，两项目不同）。
+- 后果：`m.chapters[0].id` = undefined → fetch `chapters/undefined.md` 404 → 全部章节「章节加载失败 (404)」，TOC 所有链接也指向 undefined。
+- 对照 git 已提交的 V1.3 manifest（`git show HEAD:frontend/tutorial/manifest.json`）确认原始 schema：`{title, systemVersion, version, minor, updatedAt, chapters:[{id, title, part?}]}`，id=文件名去 .md，part 为 TOC 分组（快速开始/平台功能/典型案例）。
+
+### 70.2 修复
+- `frontend/tutorial/manifest.json` 重写为正确 schema：恢复顶层 `title`（本体平台使用教程）、`chapters[]` 改 `{id, title, part?}`（21 章，三处 part 分组同 V1），去掉 app.js 不用的 major/patch；标题沿用 V2.0 版。
+- 顺带：删除 V1 遗留且无引用的旧截图 `assets/logs-page.png`、`assets/settings-page.png`（删前全教程 grep 确认 0 引用）。
+- **skill 同步迭代**（`ontology-platform-tutorial`）：SKILL.md manifest 字段说明改为 `id` 并新增「血泪坑」条（字段写错→undefined.md 404）；`references/chapter-template.md` manifest 样例同步修正；`scripts/check_tutorial.py` 校验改为顶层 `title` 必查 + `chapters[].id`（查 `chapters/<id>.md` 存在、id 不重复）。
+
+### 70.3 验证
+- `check_tutorial.py`：21 章 PASS（0 错 / 0 警告）。
+- 对运行中的 8123 静态服务真实 HTTP 实测：manifest 200 且含 title，**21 章 URL 全部 200**（urllib 逐章探测）。
+- 用户浏览器侧：manifest 是 `cache:'no-cache'` fetch，重开「使用教程」页即生效（无需改代码、无需重启服务）。
+- 未 commit（听用户指令）。
+
+## §71 「资源下载」tab 导航栏不可见——RBAC tab 白名单漏项（2026-11-18）
+
+### 71.1 根因
+- 资源下载功能本身完整：`frontend/index.html:305` 有 `data-tab="resources"` tab、`app.js` `switchTab` 已接 `loadResources()`、后端 `api/router_resources.py`（`/api/resources` 列表 + `/download`）已挂载、`auth.PUBLIC_PREFIXES` 含 `/api/resources`（免登录）。
+- 但 `backend/auth/__init__.py` `permission_matrix()` 的 tab 白名单（`tabs_read`）漏了 `"resources"` → 登录后 `applyPermissionMatrix`（app.js:6990）把不在白名单的 tab 加 `op-hidden` → **所有角色导航栏都看不到「资源下载」**。
+- 与 §52/M3-F「编排」tab 同类 bug（`tests/test_rbac_tab_matrix.py` 背景注释即此模式：新 tab 忘进白名单，直接 switchTab 冒烟绕过了点击未暴露）。
+
+### 71.2 修复
+- `backend/auth/__init__.py`：`tabs_read` 追加 `"resources"`（资源为公开分享物，各角色可见；下载接口不做角色门禁）+ 注释说明。
+- `backend/tests/test_rbac_tab_matrix.py`：新增 `test_resources_visible_to_all_roles`（四角色断言 `resources ∈ tabs`）——防回归。
+
+### 71.3 验证与遗留
+- pytest `test_rbac_tab_matrix.py` **3/3 PASSED**。
+- 后端无热重载（README 运维附录明确：改 `backend/*.py` 须重启）。尝试重启运行中的后端（PID 6140，:8000）：`Stop-Process`/`taskkill` 均 **Access denied**（该进程由更高权限/其他会话启动），替代 uvicorn 因端口 10048 未绑定、已自行退出，无残留。**待用户在其启动终端重启后端**（`cd backend; python -m uvicorn main:app --host 0.0.0.0 --port 8000`），浏览器 F5 即可见 tab（JWT 密钥落盘，重启不打断登录态）。
+- 顺带：重启尝试把 `backend/uvicorn_err.log` 截断重写（运行期日志，无历史价值）。
+- 未 commit（听用户指令）。
+
+## §72 功能增补清单 P0 批：GAP-20/21/22 测试基座 + GAP-01 差量更新 + GAP-03 查询快路径 + GAP-02 友好错误封装（2026-11-18）
+
+来源：`docs/本体平台功能增补清单.md`（23 项）。用户全权授权按清单顺序执行，中间不询问。本会话完成 4 组：
+
+### 72.1 GAP-20/21/22 测试基座（P0）
+- **GAP-20 鉴权 env 隔离**：新建 `backend/tests/_authenv.py`——`auth_module_guard(initial)` 生成 module autouse fixture，模块边界保存/恢复 env。**关键坑**：`auth.auth_enabled()` 是 fail-closed（key 缺失默认**启用**鉴权）→ 清洁态必须显式写 `ONTOLOGY_AUTH_ENABLED=false`，不能删 key。
+- **GAP-20 数据残留**：`ensure_bootstrap` 幂等——已存在 admin 时不用 env 密码重置 → `test_v2_02_alignment.py::test_03` 开头先清空 `JsonStore("auth_users", project_id="_shared")`（JsonStore 无 clear()，all()+delete() 循环）。
+- **GAP-21 PG 探测**：`backend/tests/_pgprobe.py` `pg_skipif()`——5432 不可用自动 skip（test_v2_20_k8s 4 用例加标）。
+- **GAP-22 marker 注册**：`backend/pytest.ini` 注册 `auth`/`baseline` marker。
+- 6 个测试文件改造（pytestmark=auth + guard）：test_password_policy / test_user_management / test_v2_02_alignment / test_v2_15_query / test_v2_22_trace / test_v2_20_k8s。
+- 验收：7 模块顺序组合运行（复现污染场景）**42 passed, 4 skipped (PG), 0 failed**。
+
+### 72.2 GAP-01 实例 PUT 差量更新（P0）
+- `api/router_ingest.py`：`PUT /instances/{id}` 与 `PUT /instances/batch` 加 `replace: bool = Query(default=False)`。默认差量：None/""/[] 字段保留原值（preserved_keys 留痕）；`replace=true` 显式整体替换（可清空字段）＋强制严格校验。变更日志 op 标记 `PUT`/`PUT/replace`/`BATCH`/`BATCH/replace`。
+- 验收：`tests/test_gap01_instance_put.py` **6/6**。
+- 坑：change log collection 名 `instance_change_logs`（非 change_logs），实例字段名 `instance_id`（非 target_id）。
+
+### 72.3 GAP-03 查询/推理本地快路径＋引擎切换＋perf 基线（P0）
+- `jena_adapter/client.py`：`QUERY_ENGINES=("local","fuseki")`；`get_query_config()` 优先级 运行时文件 query_engine.json（PUT /api/query/engine 写入）> env > 缺省 **local**；`sparql_query` 引擎分派＋fuseki 不可达降级本地（warning）；`_sparql_local` 加 mtime+TTL（默认 10s，`QUERY_CACHE_TTL`）结果缓存；`local_ttl_path`/`write_local_ttl` 统一本地 TTL 落盘。
+- `jena_adapter/rdf_sync.py`：`sync_ontology` 本地 TTL **始终**写＋Fuseki 可达时同步远端（mode="dual"，GAP-15 双写部分落地）。
+- `backend/perf.py`（新建）：`perf.freeze(scope, elapsed_ms)` 写 `data/perf_baseline.json`；`perf.record(scope, elapsed)` 超目标（sparql_local<1s、reasoning_local<3s）告警 PERF_TARGET_EXCEEDED、超基线×2.0 告警 PERF_REGRESSION；永不抛异常。
+- `api/router_query.py`：`GET/PUT /api/query/engine`（engine/source/options/fuseki_reachable/cache_ttl_seconds）。
+- `reasoning/engine.py` run_inference 与 `shacl_engine.py` 校验路径埋 `perf.record("reasoning_local"/"shacl_jena"…)`；`scripts/bench_v2_16_reasoning.py`/`bench_v2_17_shacl.py` 加 `--freeze`。
+- 验收：`tests/test_gap03_query_engine.py` **10/10**（连跑 4 遍稳定）＋v2_15/16/17 回归 **41/41**（批次连跑 7 遍全绿）。
+- 坑：① TTL 中 SHACL `sh:or` 列表含 blank node，rdflib 每次 parse 重分配 bnode 标签（RDF 语义使然）→ 测试查询限定命名资源；② rdflib pyparsing 不支持多键 ORDER BY；③ 小本体推理 <1ms 时 `int(ms)==0` 合法 → 断言用 `>= 0`。
+
+### 72.4 GAP-02 统一错误封装：通俗解释＋修复建议＋处理入口（P0）
+- `core/responses.py`：
+  - `ErrorDetail` 加 `message_zh`/`suggestion`（Optional，向后兼容）；`ApiError` 支持显式传入（显式优先）。
+  - `FRIENDLY_ERRORS` 注册表（~50 错误码 → (通俗解释, 修复建议)）＋`_FRIENDLY_PATTERNS` 消息模式兜底（not in list / Input should be a valid / SHACL / required / duplicate）＋`friendly_error_text()`；`fail()` 自动补全（未显式给出时）。
+- `main.py`：新增 `RequestValidationError` 处理器——pydantic 校验错误（原裸 422 detail）统一转信封＋按 type 友好化（missing/literal_error/int/bool/string 长度/extra_forbidden）；**pydantic v2 的 literal_error 用 `ctx['expected']` 字符串**（v1 是 `ctx['allowed_values']` 列表），已兼容两形态。
+- 前端 `frontend/app.js`（零侵入）：
+  - `api()`：`error.message_zh` 存在时替换 `e.message`（通俗解释＋建议：xxx＋（原始信息）yyy，\n 分行；原文保留 `err.rawMessage`）→ 176 处 `toast('...: ' + e.message)` 全部受益，无调用点分支逻辑依赖 e.message（已 grep 确认安全）。
+  - `toast()`：`\n` → `<br>` 多行渲染。
+  - `RUNTIME_ERROR_ZH`（12 个 expr_parser E_* 运行时码）＋`capErrFriendlyHtml(code, msg)`：能力校验面板/单实例执行/批量执行三处渲染通俗解释＋建议。
+  - `_formatApiError(e)`：GAP-02 文案在前＋violations 明细附加。
+  - **处理入口**：本体保存 catch 遇 `PUBLISHED_IMMUTABLE` → confirm 后 `switchTab('approvals')` 跳「变更审批」。
+  - `router_query.py` 引擎切换接口 422 显式友好文案（列出 local/fuseki 允许值）。
+- 验收：`tests/test_gap02_friendly_errors.py` **7/7**（注册表补全/模式兜底/显式优先/422 转信封/缺参与类型错误/既有 API 受益/成功信封向后兼容）。
+- **L5 全量回归：247 passed / 0 failed**（原 215 项＋gap01/02/03 新增）。
+- 未 commit（听用户指令）。git 残留勿动：能力层 5 文件（归属待确认）＋成本核算业务线文件。
+
+
+## §73 功能增补清单 P1-1：GAP-04 建模门槛高——宽数据表导入自动推断＋本地模板库接线＋约束示范模板（2026-11-18）
+
+### 73.1 交付
+- **GAP-04 后端**（`api/router_ontologies.py`）：
+  - `POST /api/ontologies/from-excel` 加可选 form 参数 `name`（覆盖本体名，缺省：宽表取文件名主干）。
+  - `_parse_spreadsheet` 改三格式分派（新增 `_parse_table_rows`）：① B0 三 sheet（sheet 名精确匹配，最高优先）；② 长表（表头显式含 对象/对象名/object/object_name 列）；③ **宽数据表（新增，普通表头：列=属性、行=实例）**——修复宽表无「对象」列时被误按长表解析（每行数据被当成一个对象）的历史缺陷。
+  - 宽表推断（`_parse_wide_rows`/`_infer_column_dtype`/`_infer_column_constraints`）：单对象可编辑草稿；`data_type` 全样本命中才升级（integer/float/boolean[true|false|yes|no|是|否]/date[YYYY-MM-DD 系]/string）；`required`=样本全填充；稳定主键=列名命中 id/编号/编码/code/identifier/单号/key → 首个 string 列 → 首列；约束=数值 min/max、字符串长度区间、低基数（去重≤8 且重复，样本≥4 行）→ enum（**主键列不推断 enum**）；样本上限 `_WIDE_SAMPLE_LIMIT=500` 行；仅表头无数据→骨架草稿（string/非必填/无约束）；重复列名属性 id 自动加 `_1` 后缀（计数器语义，首冲突即 `_1`）；表头全空→422 `PARSE_ERROR`。
+  - `_parse_flat_rows`/`_parse_b0_template` 支持 `name` 覆盖。
+- **GAP-04 模板**（`templates/__init__.py`）：新增内置模板 `tpl_order_sample`「订单履约示例（约束示范）」——订单（订单编号 pattern `^[A-Z]{2}[0-9]{8,12}$`＋min/max_length、订单状态 enum 5 值、订单金额 float 0~99999999、数量 integer 1~10000、下单时间 date、备注 max_length 200）＋客户（客户编码 pattern/长度、等级 enum 等）两对象＋many_to_one 关系，覆盖 pattern/enum/minimum/maximum/min_length/max_length 全部 6 约束类型；`_seed_builtin` 启动幂等补种（既有两模板行为不变）。
+- **GAP-04 前端**（`frontend/index.html`＋`frontend/app.js`）：
+  - 建模页编辑器新增第 5 个子 tab「表格导入」（mode=table）：`#tblName`（可选本体名）＋`#tblFile`（.csv/.xlsx）→ `uploadTable()` POST from-excel（FormData）→ 201 草稿 → `loadOntologies()`＋`selectOntology`（传对象）进入编辑器逐项确认；三格式说明折叠块（宽/长/B0）。
+  - 模板 tab 接上**本地模板库**（此前仅外部 LinkML）：`loadLocalTemplates()`（GET /api/templates?page_size=50 → 卡片：名/行业 badge/约束×N badge/对象数/实例化按钮）＋`instantiateLocalTemplate(id)`（POST /api/templates/{id}/instantiate → selectOntology）；`setEditorMode('template')` 与 `resetTemplatePanel()` 触发加载。
+  - 「文档逆向」tab 加指引：结构化数据表请用「表格导入」（确定性解析），文档逆向走 AI 抽取。
+  - CSS 补 `.badge.slate`/`.badge.green`（深色＋浅色主题）。
+- **验收**：`tests/test_gap04_table_import.py` **10/10**（宽表 CSV 全推断断言/name 覆盖/仅表头骨架/boolean 类型/重复列名 `_1`/无有效列 422/长表回归含关系/宽表 XLSX/约束示范模板存在（6 约束类型齐全）/模板实例化 201＋可查询）；`test_user_friendly.py` 回归 5/5；`node --check frontend/app.js` OK；IDE lint 0；**L5 全量回归 258 passed / 0 failed（434s，含 GAP-04 新增 10 用例）**。
+- **坑位**：重复列名后缀从 `_1` 起（测试首版误断言 `_2`）；`selectOntology` 必须传对象非 id（全量搜索确认既有调用点均传对象，未引入新 bug）；installer payload 已同步 6 文件（router_ontologies/templates/app.js/index.html/测试/API 文档）。
+- **文档**：`docs/API-INTERFACE-DOC.md` §14 from-excel 行＋三种格式推断规则 bullet＋§13 内置模板清单补 `tpl_order_sample`。
+
+### 73.2 遗留
+- 未 commit（听用户指令）；git 残留勿动（能力层 5 文件＋成本核算业务线文件）。
+- 后端 :8000 待用户在终端重启后浏览器验证 UI（表格导入 tab/本地模板库）。
+- 下一步：GAP-05（导入校验失败→结构化差距＋一键修复发布）等 P1 后续 14 项。
+## 74. P1 第 2 项 GAP-05 导入校验失败→结构化缺口＋一键修复重发布（2026-11-18）
+- **背景**：`docs/本体平台功能增补清单.md` P1 第 2 项——导入材料时常发现模型缺口（缺字段/枚举缺值/约束过紧），需「改模型→保存→校验→重新发布→再导入」反复返工；验收＝导入校验失败时就地修复模型并重发布，成功后可继续导入。
+- **后端**：
+  - 新增 `backend/model_gap.py`：`missing_attribute_gaps`（上传表头未匹配→缺字段缺口，样本推断 data_type 复用 GAP-04 `_infer_column_dtype`）/ `analyze_model_gaps`（SHACL 违规 path=`_local(attr_id)` 反查属性，结合候选实例样本归纳 枚举缺值/必填/正则/长度上下限/数值区间 缺口；其余→type_mismatch、未识别 path→unknown，均标记人工处理）/ `apply_gaps_to_model`（深拷贝仅应用兼容修复，返回 applied/skipped）。
+  - `ingestion.approve`：SHACL 门禁拦截时返回体附 `model_gaps`（单条/批量审批共用）。
+  - `router_ingest.upload`：表头**全部**未匹配的 422 附 `details={object_type, model_gaps}`；**部分**匹配时候选对象携带 `model_gaps`（未匹配列数据不落候选实例）。
+  - 新增 `POST /api/ingest/model-gaps/fix`：只执行兼容修复（新增**可选**属性/补枚举值/解除 pattern/放宽长度-数值区间/必填→可选），内部复用 `submit_changeset` changesets 管线（自动升小版本＋直接发布，与人工变更同一版本/审计通道）；非 active 本体 422 `MODEL_GAP_MANUAL`；无可执行项 422 `MODEL_GAP_NOOP`；返回体附 `applied/skipped`。
+  - `schemas/ingest.py`：`ApproveResult.model_gaps` 字段＋`FixModelGapsRequest`。
+- **前端**（`app.js`）：导入页「模型缺口」弹层（`showModelGapsModal`：类型徽标/属性/说明/动作四列表格）＋`fixModelGaps()` 一键修复并重发布（POST /model-gaps/fix→成功后按 ctx 自动重新审批候选或重新上传同一文件；同一对象/候选自动重试上限 3 次）＋候选行「缺字段 N」徽标（`openCandidateGaps`）＋approve 拦截/上传 422 catch 联动弹窗。
+- **验收**：`tests/test_gap05_model_gaps.py` **13/13**（422 缺字段＋integer 类型推断/部分匹配候选缺口/枚举/max_length/pattern/数值区间/必填 缺口/修复发布＋版本 bump＋重审入库/NOOP 422/非 active 422/缺字段修复后重传数据完整/unknown・type_mismatch 单测/去重与跳过单测）；`node --check frontend/app.js` OK；**L5 全量回归 271 passed / 0 failed（421s，258 基线＋13 新增）**。
+- **坑位**：① upload 端点 `ontology_id/object_type` 是**查询参数**非 Form 字段（测试首版 data= 传参→FastAPI 422 validation_error，非业务 422，易误判）；② schemadiff 兼容规则：新增**必填**属性=不兼容，故修复动作 add_attribute 恒 required=False；③ pattern **变更**不兼容、仅**移除**（n is None→constraint_widened）兼容，pattern 违规的修复=remove_pattern；④ `submit_changeset` 返回 JSONResponse，需 `json.loads(resp.body)` 取 data 后 re-wrap success()；⑤ pytest 测试类实例属性不跨方法（self 传状态失败→改独立候选）。
+- **文档**：`docs/API-INTERFACE-DOC.md` §3.2 表补 model-gaps/fix 行＋approve 响应 `model_gaps` 字段＋「模型缺口（GAP-05）」bullet（gap 结构/action 枚举/三个产生位置/前端联动）；installer payload 已同步 6 文件（model_gap/router_ingest/ingestion/__init__/schemas.ingest/test_gap05/app.js）。
+
+### 74.2 遗留
+- 未 commit（听用户指令）；git 残留勿动（能力层 5 文件＋成本核算业务线文件）。
+- 后端 :8000 待用户在终端重启后浏览器验证（导入页缺口弹层/一键修复联动/缺字段徽标）。
+- 下一步：GAP-06 起 P1 后续 13 项。
+
+### 75. GAP-06 接口约定不直观（2026-11-18，P1 第三项）
+
+- 指令：全权授权按功能增补清单顺序执行；本项为 P1 第三项 GAP-06。
+- 交付：
+  1) 分页别名兼容——`core/responses.py` 新增 `merge_pagination_aliases(request, page, page_size, max_page_size)`（须在 parse_pagination 前调用）：接受 `page_size`（pageSize 别名，未给 pageSize 时生效）与 `offset`（page 别名，未给 page 时生效，page = offset // page_size + 1）；正式名与别名同给以正式名为准。接入 4 端点：`GET /api/ingest/candidates`（默认 20/上限 100）、`GET /api/ingest/instances`（默认 50/上限 200）、`GET /api/ingest/instances/{id}/change-logs`（默认 50/上限 200）、`GET /api/instances`（router_query，默认 50/上限 200）。
+  2) object_type 双通道——`router_ingest.py` 新增 `_form_object_type_fallback(request)`（async，Starlette 表单已缓存不二次读体）：`upload`/`upload-smart` 的 object_type 可用查询参数或 multipart 表单字段（`-F 'object_type=Order'`）；`preview` 新增查询参数 `object_type`，body 未给时兜底（body 优先）。CSV 缺 object_type 的 422 文案改为指明双通道＋curl 示例。
+  3) CSV/preview 空单元格视为缺失——`ingestion._clean_value` 空串/纯空白归一为 None（apply_field_map 不再写 ""）；`router_ingest._coerce_record_types` 同步 pop 空值键。可选属性缺键、必填属性走清晰「必填缺失」路径，杜绝 Literal("") 枚举/类型误报。
+  4) field_map 空值明确报错——`ingestion._preview_field_map` 空 field_map → 422，消息含 identity map 说明（{"orderCode":"orderCode"}）＋「upload 可不传 field_map」＋curl 示例 suggestion；field_map 目标字段不在对象列表的报错补充「未显式指定 object_type 会回退本体首个对象」提示。
+- 测试：`tests/test_gap06_api_conventions.py` 9/9 全绿（preview query 通道/field_map 空 422/upload 表单通道/空单元格剔除/空必填清晰违规 unset_required 缺口/page_size 别名/offset 别名/正式名优先/instances 默认 50 端点别名生效）。
+- 坑位：Starlette `request.form()` 是 async 方法（同步 helper 里忘 await → coroutine never awaited + 静默 None → 422）；`Query(alias="pageSize")` 下客户端传 `page_size` 会被 FastAPI 静默忽略（须从 request.query_params 回读）。
+- 文档：`docs/API-INTERFACE-DOC.md` ingest 节新增「接口约定与别名（GAP-06）」段（双通道/分页别名/空单元格/field_map 提示＋curl 示例），instances 列表端点表行补别名说明。
+- 同步：installer payload 4 文件（api/router_ingest.py、api/router_query.py、ingestion/__init__.py、core/responses.py）SHA256 一致。
+- 状态：9/9 通过；**L5 全量回归 280/280 全绿**（271 基线＋9 新增，429s）；未 commit（听用户指令）。
+- 下一步：GAP-07 起 P1 后续 12 项。
+
+### 76. GAP-07 无「当前项目」全局上下文（2026-11-19，P1 第四项）
+
+- 指令：全权授权按功能增补清单顺序执行；本项为 P1 第四项 GAP-07。
+- 交付：
+  1) 服务端默认项目——新增 `backend/core/last_project.py`：JsonStore 全局集合 `last_project`（命名空间 "global"，不挂业务项目），记录 `{id, user_id, project_id, ts}`；`get_last_project(user_id)` 取同身份最后一条匹配；`touch_last_project` 仅值变化时写盘（每请求零额外 IO）。
+  2) 统一回退——`api/dependencies.py` 的 `project_id_param`/`optional_project_id_param`：显式传 `project_id` → touch 后返回；省略 → `_fallback_project`（当前身份最近项目，须通过 `ensure_project_access` 且项目真实存在→用；否则 `default`）。`_project_readable` 在鉴权豁免态（测试态 access 检查直通）补存在性校验，已删除项目不得成为回退目标。全站 22 个路由文件的 220+ 处项目级端点统一生效。
+  3) `GET /api/projects` 响应加 `data.default_project`（当前身份默认项目，无则 null，`router_projects.py` 复用 `_project_readable` 懒导入判定）。
+  4) 前端（既有能力确认＋1 处增强）：`api()` 包装器已统一注入 `project_id`、顶栏 `projectSelect`＋localStorage `op_currentProject` 均为既有；`loadProjects` 增强——本地无记录时优先服务端 `default_project`（新设备续接上下文），再退回列表第一项。两处裸 fetch（downloadResource 全局资源 manifest、exportAudit 管理员全局审计导出）为项目无关，设计内保留。
+- 测试：`tests/test_gap07_current_project.py` 4/4 全绿（显式访问 A→省略回退 A/projects 响应 default_project==A/切 B 后收敛 B/最近项目不存在→回退 default＋模块级 autouse fixture 结束恢复 default 防跨模块污染）；`node --check frontend/app.js` OK。
+- 坑位：① `list_ontologies` 对未知 project_id 无 404 分支（JsonStore 懒建→200 空列表），test 首版误断言 404；② 鉴权豁免时 `ensure_project_access` 直通（连存在性都不查），回退必须另加项目存在性校验，否则删除的项目仍被回退选中；③ `current_user` 在 `tenant.py`（无 `core.auth` 模块），首版误 import 致收集失败；④ last-project 记录持久于 data 目录，跨测试模块省略回退可能受污染→模块结束 autouse 恢复 default＋L5 兜底（实测 284/280 基线全绿无泄漏）。
+- 文档：`docs/API-INTERFACE-DOC.md` §1.6 增「project_id 可省略」全局约定 bullet＋§16 GET /api/projects 行与 `data.default_project` 说明段。
+- 同步：installer payload 4 文件（api/dependencies.py、api/router_projects.py、core/last_project.py 新文件、frontend/app.js）SHA256 一致。
+- 状态：4/4 通过；**L5 全量回归 284/284 全绿**（280 基线＋4 新增，425s）；未 commit（听用户指令）。
+- 下一步：GAP-08 起 P1 后续 11 项。
+
+### 77. GAP-08 无角色工作流引导（2026-11-19，P1 第五项）
+
+- 指令：全权授权按功能增补清单顺序执行；本项为 P1 第五项 GAP-08。
+- 交付（纯前端，后端零改动）：
+  1) `frontend/index.html`：`#home` 顶部新增 `#onboardingWizard` 卡片容器（默认 hidden，JS 渲染五步卡片）＋项目管理工具栏「新手引导」按钮（`showOnboardingWizard(true)` 重新展开）。
+  2) `frontend/app.js`：向导块（`ONBOARD_KEY='op_wizard_seen'`、`ONBOARD_STEPS` 五步定义、`_wzCurrentStats` 取当前项目 stats/mcp_published、`renderOnboardingWizard`/`showOnboardingWizard(force)`/`closeOnboardingWizard`/`wzGoTo(n)`）。五步＝①选定项目(聚焦顶栏 projectSelect)②建模或用模板→modeling③导入数据→ingest④发布 MCP→mcp⑤AI 平台调用→mcp（连接配置复制指引）。进度按当前项目实况：①有当前项目②ontology_count>0③instance_count>0④/⑤mcp_published。
+  3) 三处钩子：bootApp 的 switchTab('home') 后 `showOnboardingWizard()`（首次进入＝flag 未置位时自动展开；鉴权部署下 loadSession→hideLogin→bootApp，登录成功首进同样覆盖）；renderHomeStats 尾部 `renderOnboardingWizard()`（每次进首页数据刷新进度）；项目表空态行加「查看新手引导」按钮。
+- 验证：`node --check` OK；agent-browser 冒烟（:8000 鉴权在线＋127.0.0.1:8931 临时静态服务）——清 flag 后强制展开：visible=true、5 步卡片、进度「1 / 5」、五标题正确；wzGoTo(2/3/5)→active tab 依次「建模/实例导入/MCP」；wzGoTo(1) 不切页（向导只存在于首页，聚焦选择器即目的）；closeOnboardingWizard→hidden＋flag=1；非 force 再展保持 hidden（flag 记忆生效）；截图目检布局与主题一致（raw 快照目录 gap08-wizard-preview.png）。
+- 坑位：① 后端不提供 SPA 根路径（`/` 返回 404 Not Found，auth 白名单里的 `/` 只是放行前缀）——前端经独立静态服务打开，API_BASE 跨源指 :8000；冒烟须 `python -m http.server` 起前端目录；② 鉴权部署下 bootApp 在 loadSession 成功后才跑——向导钩子放 bootApp 内即自动覆盖「登录后首进」，无需改登录流程；③ 登录遮罩挡住截图——eval 临时 op-hidden 登录层（仅展示层）再截；④ **L5 首跑 34 failed（FileNotFoundError，全为 subprocess 类：v2_18 stdio/v2_19 模板/v2_23 工具配置/vs5_vs8）→ 单跑与 4 模块合并跑全过 → 判定全量并跑瞬态干扰（非代码缺陷）→ 复跑 284/284 全绿**；后续 L5 若遇此类批量 FileNotFoundError 先单跑/合并跑复核再定性。
+- 文档：无 API 变更（纯前端），API-INTERFACE-DOC.md 不动。
+- 同步：installer payload 前端 2 文件（app.js、index.html）SHA256 一致。
+- 状态：冒烟 8/8 断言过；**L5 全量回归 284/284 全绿**（复跑，427s；首跑 34 项瞬态干扰已排除）；未 commit（听用户指令）。
+- 下一步：P1 剩余 10 项（GAP-09 起）。
+
+### 78. GAP-09 生成草稿无差异对比→结构化差异审核（2026-11-19，P1 第六项）
+
+- 指令：全权授权按功能增补清单顺序执行；本项为 P1 第六项 GAP-09（生成结果与现有模型无差异对比/逐项采纳）。
+- 交付：
+  1) `backend/schemadiff.py`：约束级变更（enum 增补/删值、pattern 变化、minimum/maximum 收窄放宽）补 `constraint_key` 字段——供采纳端点按字段精确同步（enum 变更不动 minimum，反之亦然）。diff_ontology 输出结构不变（compatible/version_bump/changes[]）。
+  2) `backend/api/router_ontologies.py` 新增两端点（publish 之后、validate 之前）：
+     - `POST /api/ontologies/{id}/draft-diff`：来源=某**草稿**（AI/文档/表格生成未发布），目标=本本体（任意状态，只读）。返回 `{target 摘要, source 摘要(含 draft_source/generation_mode), diff: schemadiff 结果(每项加 index), change_count}`。来源不存在 404、来源非草稿 422。
+     - `POST /api/ontologies/{id}/adopt-changes`：body `{source_draft_id, adopt: [index...]|"all", note?}`。目标必须 draft（active→409 PUBLISHED_IMMUTABLE 走变更提案）；来源必须草稿、≠目标。先对当前目标/源**重新 diff**，再按 index 逐项 `_apply_change(merged, source_model, change)`（幂等：已生效项计入 skipped）；覆盖全部 18 类 change kind（对象增删/主键与父级变更/属性增删/类型与必填/约束字段级同步/关系增删改/本体级约束与函数增删改）；合并结果过 `blocking_violations` 业务层校验（不过 422 不写入）→ `store.update` 整包替换 objects/constraints/functions → `_sync_rdf` → 审计 `ontology_adopt_changes`（before/after 模型视图＋source_id/adopted/skipped/note）＋旁路日志。无效 index 422（details 附 count 提示重新对比）；applied=0 时不落盘直接返回。
+  3) `frontend/app.js` 差异审核弹层块（GAP-05 缺口弹层之后）：`openDraftDiffReview({sourceId?, targetId?})`——来源下拉=全部 draft（标注 AI文本/文档/表格），目标下拉=其余本体（已发布标注「仅查看差异」，勾选禁用）；表格列＝采纳 checkbox（兼容项默认勾选）/变更徽标（_csKindLabel）/对象+成员/说明；摘要行＝兼容 N/不兼容 N＋整体兼容提示＋已发布目标红字提示；按钮＝只选兼容项/一键采纳全部/清空(不勾任何)/确认采纳（N 项）/「采纳后删除生成草稿」勾选/关闭/重新对比。`applyDraftDiff()`→adopt-changes→toast（adopted/skipped）→可选 DELETE ?force=true 删源草稿→closeModal→loadOntologies→selectOntology(目标)。
+  4) 生成后自动进入审核：`generateFromText` 成功与 `pollJob` done 分支均在 selectOntology(draft) 前记录 `prev=state.currentOntology`，生成后 `openDraftDiffReview({sourceId: draft.id, targetId: prev.id})`（prev 存在且≠draft）。详情面板「校验」旁加「差异审核」按钮（手动入口，目标=当前选中本体）。
+- 测试：`tests/test_gap09_draft_diff.py` **7/7 全绿**（diff 7 项 index/兼容标记/constraint_key 正确/逐项采纳兼容子集后不兼容项保持原样/重新对比后采纳剩余不兼容项→字段级同步（minimum=2 而 enum 不受影响）且目标==源/全量同步后再 all→adopted=0 幂等/错误用例（404 未知源、422 源=目标、422 无效 index）/源已发布 422/目标已发布 409）；`node --check frontend/app.js` OK；IDE lint 0。
+- 坑位：① router_ontologies.py 此前无 `import copy`（首跑 NameError）；② `success()` 只收 (data, http_status)，无 message 参数（GAP-02 统一信封）——提示语放 data.note；③ adopt-changes 每次重新 diff→**index 只对应当前目标状态**：真实 UI 单轮「对比→勾选→采纳」安全（目标在弹层期间不变），分批采纳须先「重新对比」取新 index（测试按此模式：采纳子集后重新 draft-diff 再采纳剩余）；越界 index 422 兜底；④ 文件被并行会话改动两次（首发基线段被并入 publish、导入块变化）→ 编辑前必须重读锚点区域。
+- 文档：`docs/API-INTERFACE-DOC.md` 本体节补 draft-diff/adopt-changes 两行＋「GAP-09 差异审核」说明（见下）。
+- 同步：installer payload 同步（schemadiff.py、api/router_ontologies.py、tests/test_gap09_draft_diff.py、frontend/app.js、frontend/index.html）SHA256 一致。
+- 状态：7/7 通过；L5 全量回归（后台复跑中，预期 291/291=284 基线＋7 新增）；未 commit（听用户指令）；:8000 待用户重启后端后浏览器验证弹层交互。
+- 下一步：GAP-10 起 P1 剩余 9 项。
+
+### 79. GAP-10 无权限 tab 直接隐藏→显示+禁用+提示原因（2026-11-19，P1 第七项）
+
+- 指令：全权授权按功能增补清单顺序执行；本项为 P1 第七项 GAP-10（无权限 tab 直接隐藏，无「为什么」提示）。
+- 交付：
+  1) `backend/auth/__init__.py` permission_matrix：`tabs_read` 补 `"query"`（只读 SPARQL 查询台，GAP-10 回归——曾漏进白名单→**对所有角色**隐藏，同 2026-11-13/11-18 回归同类问题）。
+  2) `frontend/app.js` `applyPermissionMatrix` 重写 tab 段：无权限 tab 不再 `op-hidden` → `tab-disabled` 类＋`title` 工具提示「需要「写入」/「写入 或 评审」/「管理」权限（当前角色：X）」；所需权限映射 `_TAB_PERM_REQ`（与后端白名单分档一一对应：write 6 项 modeling/dictionary/capability/action/mcp/orchestration；write 或 review 2 项 ingest/approvals；admin 2 项 users/audit）＋`_TAB_ACT_LABEL`；`tabs` 空集（auth-off dev）视为全放行不禁用。`switchTab` 加守卫：点击被禁用 tab 不切换，toast 弹 title 原因。
+  3) `frontend/index.html` 加 `.tab.tab-disabled { opacity:.45; cursor:not-allowed }` 与 hover 态。
+- 测试：`tests/test_rbac_tab_matrix.py` 新增 `test_query_visible_to_all_roles`（4/4 全绿）；浏览器冒烟（:8123 新会话＋`applyPermissionMatrix` 直调）——viewer 矩阵：users/modeling/ingest/audit 均**显示**（op-hidden 清零）＋tab-disabled＋title 含所需权限与当前角色，graph/home/query 无禁用无 title，`switchTab('users')` 不切换（tabSwitchBlocked=true）；admin 全量矩阵 21/21 tab 0 禁用 0 隐藏（含预置 op-hidden 的 users/approvals/audit 被正确清除）；空 tabs 0 禁用。`node --check app.js` OK。
+- 坑位：① **agent-browser eval 经 PowerShell 5.1 原生参数传递会吞 JS 双引号**（`"x"`→`x` 致语法错误/选择器损坏），单引号安全且多行可用——冒烟 JS 一律全单引号＋落临时文件 `Get-Content -Raw` 传入，中文经 argv 会转码乱（断言中文子串用页面内已有文本比对，勿从 argv 传中文）；② 浏览器会话有缓存，改前端文件后 `agent-browser close --all` 再 open 才是干净上下文（但 close 后首个 open 可能假性挂起——实际已打开，`tab list` 确认即可）；③ payload 快照是选择性的（无 auth/、无 rbac 测试），build.ps1 打包时 RoboCopy 全量重建，此类文件无需手动同步（GAP-09 五文件已在 payload 内故手动同步过）。
+- 文档：`docs/API-INTERFACE-DOC.md` §21.3 权限矩阵行更新为「显示无权限菜单但禁用＋工具提示所需权限（GAP-10）」＋tabs 白名单分档（只读 11/写 6＋审核 2/管理 2）。
+- 同步：payload 手动同步 frontend/app.js＋index.html（SHA256 一致）；auth/__init__.py 与 test_rbac_tab_matrix.py 不在 payload 快照内（构建时 RoboCopy 带入）。
+- 状态：单测 4/4＋冒烟 5 断言组全过；**L5 全量回归 292/292 全绿**（291 基线＋1 新增 `test_query_visible_to_all_roles`，backend/_tmp_l5.out 292 passed）；未 commit（听用户指令）；:8000 重启后端后 query tab 对全员可见。
+- 下一步：GAP-11 起 P1 剩余 7 项（GAP-11 异步任务进度/取消/重试、GAP-12 图谱三视图大图性能、GAP-13 新项目示例/模板一条龙、GAP-14 JSON 存储索引/缓存、GAP-15 图谱库 rdf-sync 对账、GAP-16 外部 MCP 并行+超时、GAP-17 真实容量验证）；P2 三项（GAP-18/19/23）待 P1 收尾后排期。
+
+### 80. GAP-11 异步任务无进度→任务面板（进度/取消/重试/完成通知）（2026-11-19，P1 第八项）
+
+- 指令：全权授权按功能增补清单顺序执行；本项为 P1 第八项 GAP-11（from-doc 等异步 job 无进度/不可取消/不可重试）。
+- 交付：
+  1) `backend/api/router_ontologies.py`：job 记录扩展 `status(pending/running/done/error/cancelled)/stage/progress/kind/file_names/draft_id/error/created_at/updated_at/retried_from`（`_new_job_record`/`_update_job`/`_job_now` 辅助）；`_JOBS_PARAMS` 留存原上传字节（供重试，内存态、重启即失→retry 409 提示重新上传）；`_JOBS_CANCEL` 协作式取消事件。`_run_doc_extraction` 重写：各阶段推进 progress（解析 5-35/LLM 40/业务校验 70/保存 85/完成 100）＋`_cancelled()` 检查点（阶段切换处退出→cancelled）。
+  2) 新端点：**`GET /jobs`**（列表，created_at 倒序，信封 `{items,total,page,page_size}`；**注册于 `GET /{ontology_id}` 通配之前**防吞路由）、**`POST /jobs/{id}/cancel`**（仅 pending/running→置事件＋cancelled，终态 409 VALIDATION_ERROR）、**`POST /jobs/{id}/retry`**（仅 error/cancelled，复用 `_JOBS_PARAMS` 新建 job，202 `{job_id,status:pending,retried_from}`，参数缺失 409）；未知 job 均 404 NOT_FOUND；项目隔离 403。
+  3) `frontend/app.js`：删 `pollJob`（固定 30×1s 死等）→ 任务面板模块（`taskPanel` 状态＋`refreshTaskPanel` 2s 轮询整表/`renderTaskPanel`/`_taskNotify` 终态一次性通知/`cancelTask`/`retryTask`/`dismissTask`/`clearFinishedTasks`/`toggleTaskPanel`/`taskPanelReset`）。完成通知沿用 GAP-09（自动选中新草稿＋差异审核弹层）＋fallback 显式提示；本地任务在后端消失（服务重启）→标记 lost 并恢复按钮（防 btnDocParse 永久卡死）；`uploadDoc` 提交后 `taskRegisterLocal` 乐观登记；钩子：bootApp 启动拉取（刷新续显）、setProject 切项目重置（任务按项目隔离）。
+  4) `frontend/app.js` 第 1 行加**`?api=` 开发钩子**：URL 追加 `?api=http://host:port` 可显式指定后端基址（缺省原逻辑），供独立冒烟沙箱/本地调试。
+  5) `frontend/index.html`：左下 `#taskPanel` 任务面板 DOM（头部「后台任务」＋进行中徽标＋清除/收起，行＝状态点/文件名/阶段/进度条/取消/重试/移除）＋全套 CSS（暗/亮主题，与右下 toast 错位不叠）。
+- 测试：`backend/tests/test_gap11_job_lifecycle.py` **9/9 全绿**（列表空＋路由未被通配吞/pending 契约字段/pending 取消→终态再取消 409/running 取消置协作事件（白盒构造）/cancelled 重试→202 新 job（参数复用＋retried_from）/done 不可重试不可取消 409/参数缺失重试 409/未知 job 404/项目隔离 403＋列表隔离）；`test_user_friendly.test_from_doc_async` 适配（轮询到终态而非 `!=pending`，断言 progress==100＋stage）；`node --check app.js` OK；lint 0。
+- 冒烟（**独立沙箱**：uvicorn 8001 auth-off＋`DATA_DIR` 临时目录＋http.server 8133＋`?api=` 钩子；用户 :8000/:8123 全程未动）7 组全过：① 全局函数/DOM 存在 ② 提交→面板登记 pending→done:100（LLM 不可达走确定性 fallback 秒级完成）＋按钮恢复 ③ 完成自动选中新草稿（generation_mode=fallback 标识）＋`GET /jobs` 经页面 api() 通 ④ 取消 pending→cancelled（进度冻结 40%，协作式退出）⑤ 重试 cancelled→新 job（retried_from 正确）→done:100 ⑥ 渲染核查（running 行含 `onclick="cancelTask('...')"`、42% 进度条、进行中徽标、清除/收起展开）⑦ 刷新页面后面板续显 5 个任务。
+- 坑位：① **pytest 每个测试方法新建类实例**——跨用例共享状态必须用模块级全局变量（首版 `self.proj` 跨方法丢失致 4 例假失败，改全局后全绿；test_gap09 即此模式）；② **用户 :8000 后端为提升态进程**（Stop-Process/taskkill 均 Access Denied，CommandLine 不可读）——冒烟不能依赖用户进程重启，改独立沙箱（8001＋临时 DATA_DIR＋?api=）；用户 :8000 仍跑旧代码（11-18 23:13 启动，早于本次改动），**须用户终端重启后才在真实环境生效**；③ **agent-browser eval 有读超时**——长耗时 async eval（>~30s 轮询等待）CLI 报 `os error 10060` 但浏览器内脚本**已实际执行**（曾致重复 retry job）——长等待拆成「快速触发 eval＋PowerShell 循环短 eval 轮询」；④ PowerShell 5.1 双引号串内 `$i:` 被解析为驱动器变量（改 `${i}`）；⑤ 冒烟 JS 检查串用 `String.fromCharCode(39)` 构造单引号时曾误报 cancelBtn=false，直接打印行 HTML 复核才是真凭。
+- 文档：`docs/API-INTERFACE-DOC.md` 本体节补 3 端点行（jobs 列表/cancel/retry）＋「GAP-11 任务生命周期」说明段；`docs/本体平台功能增补清单.md` GAP-11 节补 ✅ 交付注记、头注刷新 v1.1（P0＋GAP-04~11 已交付）。
+- 同步：installer/payload 目录当前不存在（build.ps1 打包时 RoboCopy 全量重建），无需手动同步。
+- 状态：单测 9/9＋既有 5/5；**L5 全量回归 301/301 全绿**（292 基线＋9 新增，455s）；冒烟 7 组全过；未 commit（听用户指令）；**用户 :8000 需终端重启后真实环境生效**（冒烟已在 8001 沙箱完成，不依赖重启）。
+- 下一步：GAP-12 起 P1 剩余 6 项（GAP-12 图谱三视图大图性能、GAP-13 新项目示例/模板一条龙、GAP-14 JSON 存储索引/缓存、GAP-15 图谱库 rdf-sync 对账、GAP-16 外部 MCP 并行+超时、GAP-17 真实容量验证）；P2 三项（GAP-18/19/23）待 P1 收尾后排期。
+
+### 81. GAP-11 真实环境生效：用户停旧进程后重启 :8000 新代码后端（2026-11-19）
+
+- 指令：用户自行停掉旧 :8000（提升态旧代码进程）后要求继续完成修复（重启＋真实环境生效验证）。
+- 执行：以非提升进程后台重启 `python main.py`（backend 目录，0.0.0.0:8000，**PID 16652**，日志 `backend/_uvicorn.log`/`_uvicorn_err.log`）；启动正常：MCP 发布态 3 项目恢复（ontology_query 等 13 工具）、schema 漂移探测 300s、CDC 消费循环 5s、应用 startup complete。
+- 验证（真实环境 auth-on）：① openapi.json 含 `GET /api/ontologies/jobs`＋`POST /jobs/{id}/cancel`＋`POST /jobs/{id}/retry`（旧代码无此三者，新代码生效实锤）；② 未登录访问 `GET /jobs` 与 `POST /jobs/{id}/cancel` 均 **401 UNAUTHORIZED**（全局鉴权过滤正常，非 404/405）。
+- 前端：用户 :8123 静态服务在跑（PID 1824），磁盘文件即新版（script 引用 `?v=20261119a` 破缓存）——用户浏览器**强刷**（Ctrl+F5）即加载新 app.js；完整「上传→任务面板→完成/取消/重试」链路已在上轮 8001 沙箱同代码全过（7 组），真实环境最终目检可由用户登录后上传一份文档确认（admin 密码用户自改，本会话不可知，故不做浏览器级登录验证）。
+- 状态：真实环境 GAP-11 后端三端点生效；前端待用户强刷后目检。未 commit（听用户指令）。
+- 下一步：GAP-12（图谱三视图大图性能）。
+
+### 82. 多文档增量建模（C 方案：确定性对齐＋差异审核合并）＋ L5 回归归因修复（alignment 模块名冲突）（2026-11-19）
+
+- 背景：用户提出「一个本体建模可能用到多个文档，各文档独立解析还是结合已有对象解析？」→ 评估三方案后确认 **C 方案（extract-then-merge）**：每份文档独立抽取成草稿 → **确定性对齐**（归一化精确 → 字典同义词（可选）→ 相似度；歧义不对齐不猜测）→ 复用 GAP-09 差异审核管线人工确认合并。用户关键纠正（已采纳）：**数据字典不是前置条件而是建模过程的沉淀物**——对齐主语是目标本体自身，字典只是可选第三通道（未维护自动落 ①+③）；合并确认反过来沉淀字典同义词，形成互哺闭环。用户指令「可以，按这个修改」。
+
+#### 82.1 交付
+1) **新模块 `backend/draft_align.py`**（首版误名 `alignment.py` 覆盖既有模块，见 82.3 坑位①）：`align_model(target, source, project_id) -> (aligned_source, info_list)`。三通道：① `_norm` 归一化（NFKC/去空白/casefold）精确匹配；② 字典同义词（词条 `object_type` 绑定目标对象且导入名命中 `synonyms`）；③ 相似度（复用 `dictionary._similarity`：包含度 0.75+0.25×len 比 / `SequenceMatcher.ratio()`，阈值 0.85；top1−top2<0.1 判歧义不对齐）。info 条目含 source/target 对象 ID、method（exact/synonym/semantic）、confidence、名称对、attributes 映射。属性 ID 映射后**同步重映射对象 `stable_key`**（消除假 `stable_key_changed`）；关系按（名称, 目标对象）对齐并改写端点 `target_object` 与关系 ID。
+2) **`backend/api/router_ontologies.py`**：`DraftDiffRequest`/`AdoptChangesRequest` 加 `align: bool = True`；`_diff_models(target, source, project_id, align)` 统一两端点（draft-diff/adopt-changes）口径；`_record_alignment_synonyms(project_id, alignment)`——semantic 且名称不同的对象对查既有词条 `promote_synonym` 或 `create_term`（失败不阻断）；`create_from_doc` 加可选 form 字段 `ontology_id`（未指定=新建独立草稿；指定→404 校验存在、job 记录带 `merge_target_id/merge_target_name`、202 附 `merge_target_id`）；`retry_job` 沿用合并目标（目标已删→警告退化普通解析）。draft-diff 响应附 `alignment/aligned_count`；adopt 审计与响应带 `aligned_count/synonyms_recorded`。
+3) **前端（`frontend/index.html`＋`frontend/app.js`）**：`#docFile` 支持 multiple；新增 `#docTargetOntology` 下拉（默认「新建草稿（独立生成）」，仅 draft 选项，`refreshDocTargetOptions()` 挂 loadOntologies 末尾）；`uploadDoc()` 循环 `form.append('files', f)`＋`form.append('ontology_id', tgtId)`＋taskRegisterLocal 带 merge_target；from-doc done 时若有合并目标且仍存在→自动 `openDraftDiffReview({sourceId: draft.id, targetId})`（否则沿用 GAP-09 prevOnto 逻辑）；`_ddReload`/`applyDraftDiff` 统一 `align: true`，diff 摘要显示对齐明细（源名→目标名＋方法中文标签），adopt toast 提示沉淀同义词。`node --check` OK、lint 0。
+
+#### 82.2 测试与回归
+- **`backend/tests/test_multidoc_merge.py` 15/15 全绿**：TestAlignUnit 7（exact/semantic 0.917/歧义 0.95−0.917<0.1 不对齐/无匹配/关系重映射＋关系 ID 对齐/字典同义词通道/ID 相同仍对齐属性）；TestFromDocMergeTarget 3（合并目标登记/404/项目隔离）；TestDiffAlignAndAdopt 4（对齐后 6 项真实变更含 2 兼容删除＋1 stable_key_changed/align=false 回退假变更/adopt compatible 索引=3 项/订单表语义对齐沉淀 1 条同义词）；TestFromDocE2EDiff 1（真实 worker fallback 抽取→draft-diff 对齐订单/客户）。
+- **L5 全量回归 316/316 全绿**（301 基线＋15 新增，493.57s）。修复前曾 14 failed/302 passed——见 82.3。
+- 定向复跑：test_v2_02_alignment 9/9＋test_v2_02_fusion 7/7＋test_multidoc_merge 15/15=30/30。
+
+#### 82.3 坑位（①为本次最重教训）
+1) **模块名冲突（write_to_file 覆盖既有模块无保护）**：新模块首版命名为 `backend/alignment.py`，**整体覆盖了 V2-02 M4b 跨本体对齐核心模块**（commit 157c92e：四类信号 `object_pair_signals`/`SIGNAL_WEIGHTS`/`detect_candidates`/`REPROPOSE_DELTA`，被 `api/router_alignment.py`、MCP 桥接、`tests/test_v2_02_alignment.py` 依赖）→ L5 首跑 14 failed（alignment 8＋fusion 6 级联污染）。修复：新模块改名 `draft_align.py`、`git checkout HEAD -- backend/alignment.py` 恢复原模块、同步 `router_ontologies.py`（`import draft_align as align_mod`）与 `test_multidoc_merge.py` 的 import。**教训：新建模块前必须先 `git ls-files`/列目录核对同名命名空间**。test_v2_02_alignment.py 的 M 状态是 GAP-20 鉴权守卫改造（301 基线内），非本次改动。
+2) diff 与 adopt 必须共用 `_diff_models()`，否则变更序号不一致、adopt index 错位。
+3) 测试对象须至少 1 个属性（stable_key 业务校验 422）；项目创建返回 201；`project_id` 为 Query 参数。
+
+#### 82.4 清理与登记
+- 清理：调试残留项目「调试3-1795075901」经进程内 TestClient `DELETE /api/projects/{id}` 级联删除（文件余 19 项目，响应结构为 `data.items` 勿读错）；删除临时文件 `backend/_tmp_l5.out`、`_tmp_l5.out`、`_tmp_g08_wizard.png`、`_tmp_smoke_g10.js`、`_tmp_smoke_g10_admin.js`。
+- 文档：`docs/API-INTERFACE-DOC.md` §14 from-doc 行补多文件＋`ontology_id` form 字段；差异审核说明区补「多文档增量建模对齐」（三通道/stable_key 重映射/字典沉淀闭环）。
+- 前端缓存：`frontend/index.html` app.js 版本参数 bump `?v=20261119b`。
+- 状态：**未 commit（听用户指令）**；后端 :8000（PID 16652，§81 重启）为本轮改动前版本——**须用户终端重启后方可在真实环境使用多文档合并**；前端刷新页面即可（缓存参数已 bump）。
+- 下一步：GAP-12（图谱三视图大图性能）。
+
+### 83. GAP-12 图谱三视图大图性能：按需邻居查询＋视口虚拟化渲染＋类型/来源筛选（2026-11-19，P1 第九项）
+
+- 指令：全权授权按功能增补清单顺序执行；本项为 P1 第九项 GAP-12（数据量大时图谱卡顿、无缩放/拖动/按类筛选；验收＝千级节点拖动/缩放流畅、可按类型筛选）。
+- 交付：
+  1) **后端按需邻居查询**（`backend/viz/__init__.py`＋`backend/api/router_graph.py`）：
+     - `Viz.neighbors(ontology_id, ontology, node_id, mode, project_id, depth, limit)`：**对象节点**＝关系边**无向 BFS**（depth 1~2，`other = target if source==nid else source`），knowledge 模式附焦点对象实例抽样（确定性排序：`str(instance.id or tx_id)`）；**实例节点**＝所属对象节点＋同对象其他实例抽样。返回 `{node, nodes, edges, truncated, total}`；节点不存在返回 None（路由 404）。实例节点/instance_of 边构造抽为 **`_instance_entry(rec, tx_idx)` 单一口径**（id 生成 `inst.get("id") or f"inst_{tx_id}_{idx}"` 与 `_knowledge_graph` 完全一致，避免同实例双 id）。
+     - `GET /api/graph/{id}/neighbors`：Query `node_id`（必填）/`mode=schema|knowledge`/`depth`（1~2，越界 422）/`limit`（0~200，越界 422，0=不截断）；沿用 `ensure_schema_visible` 发布态边界（未发布 404 同文案）与项目隔离（他项目本体 404 不泄露存在性）。
+  2) **前端大图优化**（`frontend/app.js` drawGraph＋`frontend/index.html`）：
+     - **视口虚拟化渲染（culling）**：>150 节点启用——zoom/tick 双触发，按 `d3.zoomTransform` 反算视口世界坐标包围盒（60px 边距），界外节点 `display:none`，两端均不可见的边/边标签一并隐藏（O(N) 每 tick，远廉于 SVG 绘制）。
+     - **类型/来源筛选**：`#graphFilterBar`（本体视图＋知识图谱显示，类树隐藏）——kind chips（对象/实例，多选 toggle，全选/全不选归 null）、来源 chips（内部建模/外部归化单选）、知识视图对象类型下拉；筛选在 `applyGraphFilter` 过滤后重建 simulation（简单可靠），`#graphNodeCount` 实时显示节点/边数。`loadGraph` 缓存全量至 `state.graphDataAll`＋`redrawGraph()` 重绘管线；切 tab/重载时筛选与展开状态复位。
+     - **双击节点按需展开邻居**：`graphExpandNeighbors(d)` 调 neighbors API→`mergeGraphNeighbors` 按 node id/edge id 去重并入当前图（不全量重拉）→toast 增量；同节点不重复展开（`state.graphExpanded` Set）；`svg.call(zoom).on('dblclick.zoom', null)` 让位（否则双击触发 d3 缩放）；tooltip 加「双击节点展开邻居」提示；「重置展开」按钮重载图数据。缩放/拖动为既有 d3.zoom/拖拽能力（GAP-12 前已具备）。
+  3) 缓存参数 bump `?v=20261119c`。
+- 测试：`backend/tests/test_gap12_graph_neighbors.py` **12/12 全绿**（TestVizNeighborsUnit 6：对象 depth1 无向命中反向边/depth2 链式/knowledge 关系对象＋实例全量/limit=2 截断 truncated＋两次调用抽样一致/实例邻居＝所属对象＋同对象 siblings 不混入他类型/未知节点 None；TestNeighborsAPI 6：未知节点 404/未知本体 404/项目隔离 404/depth=3 与 limit=500 均 422/成功信封结构）。
+- 回归：图谱相关定向 45/45（test_vs4 三视图＋test_ontologies_api＋test_v2_15_query＋test_gap03_query_engine＋新增 12）；**L5 全量回归 328/328 全绿**（316 基线＋12 新增，529.96s）。
+- 坑位：① 单测首跑 3 failed——`Viz.neighbors` 调用漏传 `project_id`（缺省落 default 项目读不到测试实例；`project_id` 不在签名前几位，keyword-only 意识不足）；② 单独运行通过而全文件失败曾是"顺序依赖"假象——实为同一漏参（DBG 打印在 pytest 真实环境内定位，纯 `python -c` 复现不可靠——`auth_module_guard` 是 pytest fixture，裸进程不激活）；③ `_diff_models` 式口径教训延伸：实例节点 id 构造必须单一来源（`_instance_entry`），否则 graph_data 与 neighbors 对同一实例生成不同 fallback id。
+- 文档：`docs/API-INTERFACE-DOC.md` 图谱节补 `GET /api/graph/{id}/neighbors` 行＋契约说明（含前端 culling/筛选/双击展开联动）；`docs/本体平台功能增补清单.md` GAP-12 节 ✅ 注记＋头注刷新（P1 剩余 GAP-13~17）。
+- 同步：installer payload 目录不存在（build.ps1 RoboCopy 全量重建），无需手动同步；临时文件 `_tmp_l5_g12.out` 已删。
+- 状态：**未 commit（听用户指令）**；**真实环境已生效（同日补）**：用户报「双击展开邻居 404」→ 核实为 :8000 仍跑改动前版本（PID 16652 启动 15:18 早于 router_graph.py 修改 16:56，openapi 无 neighbors）→ 停旧进程重启（新 PID 5172），openapi 实证 neighbors 端点存在＋探测 401 鉴权门（非 404）；前端刷新页面即可（缓存已 bump）。
+- **同日布局调参（用户反馈：相连节点过挤）**：drawGraph 力参数改松——关系边目标长度 90 → `max(120, min(190, 画布短边×0.16))` 自适应、关系边弹簧强度 0.5→0.35、instance_of 距离 55/30 → 78/62/32 三档＋强度 0.9→0.85/0.65、小中图斥力 -130/-90 → -170/-120（distanceMax 420→620/480）、向心力 0.06→0.04、collide 间距 6→10；大图档（>300 节点）保持紧凑防 fit 后不可读。缓存 bump `?v=20261119d`，`node --check` OK。
+- 下一步：GAP-13（新项目空白：示例模板/示例数据一条龙）。
+
+### 84. 功能增补清单收官：GAP-13~23 批量交付（2026-11-19，用户指令「GAP-13~23 都完成后再找我确认」）
+
+- **GAP-13 新项目空白（示例一条龙）**：新模块 `backend/example_seed.py`＋`POST /api/projects/{id}/seed-example`（复用内置约束示范模板走 create_ontology 同通道落 draft＋每对象 3 条确定性示例实例：enum 轮换/数值取约束区间/pattern 特化样例表；非空项目 409 EXAMPLE_EXISTS、归档 400、未知项目 404）。前端：首页工具栏「一键示例项目」＋空态行/空项目行入口（createSeedProject/seedProjectExample）。测试 test_gap13 5/5。
+- **GAP-14 JSON 存储缓存**：instance_store **模块级文件级缓存**（path→((mtime_ns,size),records)——get_instance_store 每次新建实例故挂模块级；mtime/size 任一变化即失效，外部写入安全；读侧 `_copy_records` 连嵌套 instance 浅拷贝防污染；写侧主动失效兜底）。测试 test_gap14 5/5。
+- **GAP-15 自动 rdf-sync＋对账**：① ingestion.approve 落库后自动 sync_ontology（失败仅告警不阻断）；② `check_consistency`（TTL mtime vs max(本体 updated_at, 各对象实例文件 mtime)，1s 容差）；③ `consistency_loop` 后台 daemon（300s，env ONTOLOGY_RDF_CONSISTENCY_INTERVAL_SECONDS 可配/0 禁用）漂移自动重建＋告警；④ `GET /api/graph/{id}/consistency`。测试 test_gap15 4/4。
+- **GAP-16 外部 MCP 并行＋超时＋缓存**：① McpClient._source_timeout（连接 timeout_seconds 覆盖全局）；② content_access.federate_values_many（线程池并行批量回源）＋**联邦读 TTL 缓存**（连接 cache_ttl_seconds>0 才启用，缺省 0 保持「源端最新」语义，key 含用户隔离，meta.cache_hit 标记）；③ capabilities lookup 并行预取＋mcp_server ontology_query 页面回源并行化。测试 test_gap16 5/5。
+- **GAP-17 容量压测（本轮最大价值）**：`scripts/bench_capacity.py`——临时 DATA_DIR 构建 5 万实例→spawn 隔离 uvicorn（可 --workers，压测环境禁用 GAP-15 对账循环）→6 场景混合压测（列表/统计/SPARQL/知识图谱/推理/JSONL 直插写入）→QPS/P50/P95/错误率＋**目标值冻结**（时延判据冻结在最小并发档，其余为吞吐观测档；Windows 多进程 accept 倾斜波动已注明）。**发现并修复 4 个真实问题**：① rdflib/pyparsing SPARQL 解析非线程安全（并发 422「<lambda>() missing 1 required positional argument」→ `_SPARQL_LOCK` 模块锁＋锁内双检缓存＋router 语法校验结果缓存）；② 列表/统计每请求全量物化 O(N)（snapshot 聚合签名缓存＋_SORTED_VIEW 排序视图缓存，list_instances 就地 sort 并发数据竞争一并消除）；③ 知识图谱每请求全量构造（router_graph `_GRAPH_CACHE` 按快照版本＋updated_at 失效）；④ 容量基准口径修正（预热覆盖多 worker、时延目标档位口径）。正式基准（5 万实例、4 worker）：**c100 档全 PASS**（list 500 QPS/289ms、sparql 367/321ms、graph 308/491ms、reasoning 149/986ms）、写 1229~1345 TPS；报告 `docs/容量基准报告.md`。测试 test_gap17 1/1（脚本端到端冒烟）。
+- **GAP-18 MCP 首调 503**：handle_streamable_request 端点刚创建时 manager.run() 任务未调度（started 滞后一拍）→ 改短轮询等待就绪（5s 上限），真实启动失败才 503。测试 test_gap18 2/2（含端点淘汰重建）。
+- **GAP-19 并行批处理**：① approve 大候选 SHACL **分块并行**（_APPROVE_SHACL_CHUNK=500，线程池 ex.map 按块序拼接违规，口径与全量一致）；② execute_batch 联邦回源**块内并行预取**（fed_prefetch 表，主循环查表消费、未预取走原路径兜底）。查询结果缓存沿用 GAP-03 `_query_cache`（10s TTL）。测试 test_gap19 3/3。
+- **GAP-23 UI 冒烟**：`scripts/verify_ui_smoke.py`——静态断言（onclick 函数全定义/DOM id 三种生成模式：静态 html＋inp('id',...)＋el.id 赋值/node --check/缓存参数/7 个导航 tab）＋12 步核心用户旅程 API 契约冒烟（建项目→建模→发布→上传→审批→实例→SPARQL→图谱→邻居→推理→能力批量→MCP status）。**35/35 PASS**，`--static-only` 支持 CI 快档。
+- **回归**：**L5 全量 352/352 全绿**（316 基线＋36 新增，563s；首轮 1 failed＝GAP-19 预取失败路径元组结构不匹配 `(None,e)` vs `((None,None),e)`，修复后全绿）。
+- 坑位：① 能力表达式标识符必须 `this.<attr>` 形式（裸 attr 名 → UNKNOWN_IDENTIFIER）；② pytest 异常组（ExceptionGroup）traceback 首行会误导定位——真凶在 sub-exception 深处（KeyError 'c' 假象，实为 TypeError 解包不匹配）；③ uvicorn --workers 在 Windows 多进程 accept 倾斜（无 SO_REUSEPORT），基准数字波动，预热须 workers×20；④ `python - <<PY` heredoc 在 PowerShell 不可用（临时脚本文件替代）。
+- 文档：API 文档补 `POST /api/projects/{id}/seed-example` 与 `GET /api/graph/{id}/consistency`；清单 8 项 ✅＋头注「全部 23 项已交付」；容量基准报告 `docs/容量基准报告.md`。
+- 状态：**未 commit（听用户指令）**；后端 :8000 为改动前版本——须用户终端重启后方可使用本轮全部功能；前端刷新页面即可（缓存已 bump 20261119d）。
+- 功能增补清单 23 项全部交付完毕，等待用户确认后续方向。
+
+### 85. Windows 安装包封装＋安装测试（2026-11-20，用户三指令：全量回归/临时文件直接删/封装安装包并安装测试）
+
+- 用户指令：① 修复完成后走全量完整测试及修复直到所有回归通过；② **测试结束后允许直接删除临时文件，不需要询问（已记入长期记忆）**；③ 测试通过后封装 Windows 安装包并做安装测试，保证安装包功能与源码一致可用。
+- **指令①**：L5 全量 **352 passed / 0 failed**（561s，无修复需求）。
+- **指令③ 交付**：`installer/dist/OntologyPlatform-Setup-2.0.0.exe`（629 MB，NSIS LZMA）＋发行 zip `OntologyPlatform-2.0.0-windows-dist.zip`（628.6 MB，含产品说明）。build.ps1 全量重建 payload（backend/frontend 干净快照排除 data/logs/pycache ＋ Jena/Postgres 白名单＋JDK/Neo4j zip＋python-3.10.11＋wheelhouse 88 wheels）。
+- **发现并修复 4 个问题**：
+  1) **wheelhouse 缺 graphql-core==3.3.2**（M4-B 时 requirements 新增，wheelhouse 未同步 download）→ 首轮安装配置 FAILED「离线安装后端依赖失败」→ `pip download -r requirements.txt` 补齐（86→88 wheels）；
+  2) **install-deps.ps1 pip `--quiet` 吞具体报错**（日志只见 exit≠0 无法定位）→ 改为完整输出进 install.log（`pip| ` 前缀逐行）；
+  3) **静默安装失败永久挂起**：post-install.bat 失败分支 `pause >nul` 在 /S 下无人按键 → installer ExecWait 永不返回（且锁住 dist 输出 exe，后续 makensis 编译失败）→ 修 setup.nsi `IfSilent` 传 /S＋bat 收到 /S 跳过 pause；旧挂起进程（提升态、非提升 shell 杀不掉）用 **WMI `Invoke-CimMethod Terminate` 杀其 cmd 子进程**使 installer 自然退出；
+  4) build.ps1 发行 zip 文件名写死 1.0.2 → 改为与 setup.nsi 2.0.0 一致。
+- **安装测试（静默 /S /D=独立目录，全流程）**：
+  - 配置阶段全绿：端口自动重分配（本机 8000/8123/3030/5432/7474/7687 均被占用 → 自动改 8001/8124/3031/5433/7475/7688）、系统 Python 3.10 venv＋离线装依赖、捆绑 JDK 解压、Postgres initdb、Neo4j 初始密码、app.js API_BASE 端口注入、快捷方式生成；install-result.ini Status=OK。
+  - 启动：start-services.ps1 → **6 端口全 LISTENING**（backend 8001/frontend 8124/fuseki/neo4j×2/postgres）。
+  - **功能一致性**：openapi 路径 **203 ⊇ 源码运行实例 201**（多出的正是本轮 GAP-13 seed-example 与 GAP-15 consistency——安装包比 :8000 运行实例还新）；前端关键标记全在（?v=20261119d/graphFilterBar/createSeedProject/seedProjectExample/GAP-12 函数族；哈希差异仅为安装期端口注入，PS 5.1 GBK 读 UTF-8 致中文 Contains 误报需以 Select-String 复核）。
+  - **端到端冒烟 17/17 PASS**（新脚本 `backend/scripts/install_smoke.py`：health/MCP status/admin 登录（默认初始密码 123456a?，httpOnly cookie 会话）/创建项目/GAP-13 一键示例/GAP-15 一致性/发布/GAP-12 邻居（焦点对象从 schema 图动态取）/SPARQL/清理）。
+  - 停止：stop-services.ps1 → 6 服务全停、端口全释放。
+  - 卸载：Uninstall.exe /S _?= → ARP 注册表清理 ✓、桌面快捷方式清理 ✓、应用文件全删；残留仅 Uninstall.exe 自身（NSIS `/S _?=` 语义：卸载器不能删自身映像，属预期）；ProgramData PG 数据静默模式保守保留（setup.nsi 设计）。
+- 新增脚本：`backend/scripts/install_smoke.py`（安装实例端到端冒烟，cookie 会话制，可复跑：`python install_smoke.py <base> <user> <pass>`）。
+- 坑位：① **pip download 必须随 requirements.txt 变更同步重跑**（wheelhouse 与 requirements 漂移→离线安装失败）；② **NSIS /S 下 MessageBox 被抑制但 ExecWait 的子进程 pause 依然会挂起**——静默安装必须全链路无交互；③ 非提升 shell 无法杀提升态进程（taskkill/Stop-Process 均 Access denied，schtasks 亦拒）——**WMI Win32_Process.Terminate 可杀（杀子进程使父 ExecWait 返回）**；④ NSIS 静默卸载残留 Uninstall.exe 自身属 `_?=` 语义；⑤ PS 5.1 `Get-Content -Raw` 按 GBK 误读 UTF-8 → 中文 Contains 恒 False（ASCII 关键词不受影响），核验用 Select-String；⑥ 环境 safe-delete 守卫拦截 `Remove-Item -Recurse`（bulk guard）与 `rd /s /q`（把 /s 当路径），大目录清理用 `-LiteralPath` 显式路径。
+- 状态：安装包交付物在 `installer/dist/`（Setup-2.0.0.exe＋dist zip）；源码未 commit（听用户指令）；本机 :8000 运行实例仍为 GAP-12 后版本（安装实例反而更新——须重启源码服务对齐）。

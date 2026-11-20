@@ -38,4 +38,13 @@ class ApproveResult(BaseModel):
     imported: int
     rejected: int
     violations: list[dict[str, Any]] = Field(default_factory=list)
+    model_gaps: list[dict[str, Any]] = Field(default_factory=list)  # GAP-05：结构化模型缺口
     neo_tx_id: Optional[str] = None
+
+
+class FixModelGapsRequest(BaseModel):
+    """GAP-05：一键修复模型缺口（内部走 changesets 兼容变更管线发布）。"""
+    ontology_id: str
+    object_type: str
+    gaps: list[dict[str, Any]] = Field(default_factory=list)
+    note: Optional[str] = None

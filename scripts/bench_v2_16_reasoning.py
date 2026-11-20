@@ -4,8 +4,12 @@
     python scripts/bench_v2_16_reasoning.py [--base-url http://localhost:3030]
         [--dataset ontology] [--ttl data/datasets/v2/benchmark_graph.ttl]
         [--rounds 3] [--out data/datasets/v2/reasoning_benchmark_baseline.json]
+        [--freeze]
 
 口径（TC-04-09 模式）：每路径 rounds 次取中位数；目标值不冻结，仅记录基线。
+--freeze（GAP-03）：把本次 local/fuseki 中位数分别冻结为 perf 基线
+（reasoning_local / reasoning_remote → data/perf_baseline.json），
+运行期推理超目标或超基线×回归系数时告警。
 诚实口径：混合模式下远程路径 = 闭包计算（平台核心）＋ HTTP 推送/写回/验证往返，
 时延不低于纯本地属预期结构（Jena 5.1.0 无 Fuseki 物化推理器，
 依赖事实见 backend/fuseki-config.ttl 头部）——基准不做"远程优于本地"断言。
@@ -23,6 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
+import perf  # noqa: E402
 from reasoning.benchmark import DEFAULT_TTL, bench  # noqa: E402
 
 
@@ -47,6 +52,8 @@ def main() -> None:
     ap.add_argument("--ttl", default=str(DEFAULT_TTL))
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--out", default=str(ROOT / "data" / "datasets" / "v2" / "reasoning_benchmark_baseline.json"))
+    ap.add_argument("--freeze", action="store_true",
+                    help="把本次中位数冻结为 perf 基线（reasoning_local / reasoning_remote，GAP-03）")
     args = ap.parse_args()
 
     result = bench(ttl_path=args.ttl, base_url=args.base_url, dataset=args.dataset,
@@ -70,6 +77,13 @@ def main() -> None:
     print(f"  各轮 local ms : {result['local']['ms']}")
     print(f"  各轮 fuseki ms: {fk['ms']}")
     print("=" * 64)
+
+    if args.freeze:
+        for scope, ms in (("reasoning_local", result["local"]["median_ms"]),
+                          ("reasoning_remote", result["fuseki"]["median_ms"])):
+            entry = perf.freeze(scope, ms)
+            print(f"perf 基线已冻结 {scope}: {entry['baseline_ms']} ms "
+                  f"(target {entry['target_ms']} ms)")
 
     _drop_graph(args.base_url, args.dataset, args.graph_uri)
 

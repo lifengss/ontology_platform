@@ -88,17 +88,17 @@ def _diff_constraints(old_a: dict[str, Any], new_a: dict[str, Any], object_id: s
             if sn - so:
                 changes.append(_ch("constraint_widened", True,
                                    f"枚举增补 {sorted(sn - so)}", object_id=object_id,
-                                   attribute_id=attribute_id))
+                                   attribute_id=attribute_id, constraint_key="enum"))
             if so - sn:
                 changes.append(_ch("constraint_narrowed", False,
                                    f"枚举删值 {sorted(so - sn)}", object_id=object_id,
-                                   attribute_id=attribute_id))
+                                   attribute_id=attribute_id, constraint_key="enum"))
             continue
         if direction == "pattern":
             # 正则无法安全判定收窄方向：保守视为不兼容
             changes.append(_ch("constraint_narrowed", False,
                                f"pattern 变化 {o!r} → {n!r}", object_id=object_id,
-                               attribute_id=attribute_id))
+                               attribute_id=attribute_id, constraint_key="pattern"))
             continue
         # lower / upper
         if n is None:
@@ -114,7 +114,8 @@ def _diff_constraints(old_a: dict[str, Any], new_a: dict[str, Any], object_id: s
                 compat = n >= o
             kind = "constraint_widened" if compat else "constraint_narrowed"
             detail = f"{key}: {o} → {n}"
-        changes.append(_ch(kind, compat, detail, object_id=object_id, attribute_id=attribute_id))
+        changes.append(_ch(kind, compat, detail, object_id=object_id, attribute_id=attribute_id,
+                           constraint_key=key))
     return changes
 
 

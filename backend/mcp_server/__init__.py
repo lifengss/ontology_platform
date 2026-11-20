@@ -620,8 +620,16 @@ class McpServer:
             return
         ep = self._ensure_endpoint(project_id)
         if not ep.started:
-            await _asgi_json(scope, send, 503, {"error": "MCP 端点启动中，请稍后重试"})
-            return
+            # GAP-18：端点刚创建时 manager.run() 任务尚未被事件循环调度（started 滞后一拍），
+            # 首调 503 属假故障。改为短轮询等待就绪（5s 上限），就绪即正常处理；
+            # 超时仍未就绪（真启动失败）才回 503。
+            for _ in range(100):
+                if ep.started:
+                    break
+                await asyncio.sleep(0.05)
+            if not ep.started:
+                await _asgi_json(scope, send, 503, {"error": "MCP 端点启动中，请稍后重试"})
+                return
         try:
             await ep.manager.handle_request(scope, receive, send)
         except Exception as e:  # noqa: BLE001
@@ -920,12 +928,18 @@ def _register_tools(owner: "McpServer", project_id: str, m) -> None:
         page = records[off: off + lim]
         # V2-02（M4-A①）：源连接型实例内容值按需回源（治理身份——MCP token 为项目级无用户映射；
         # 回退底/不可用语义见 content_access.federate_values，来源标记在 content_resolution）
+        # GAP-16：页面内多行回源改线程池并行（保持行序，总时延≈最慢单源）
         import content_access
-        page = [
-            content_access.merge_record_content(project_id, r, user_id=None)
-            if content_access.is_federated(project_id, r) else r
-            for r in page
-        ]
+        if any(content_access.is_federated(project_id, r) for r in page):
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _merge_row(r):
+                return content_access.merge_record_content(project_id, r, user_id=None)
+
+            with ThreadPoolExecutor(max_workers=min(8, max(1, len(page)))) as ex:
+                page = list(ex.map(
+                    lambda r: _merge_row(r) if content_access.is_federated(project_id, r) else r,
+                    page))
         if field_list:
             page = [dict(r) for r in page]
             for r in page:

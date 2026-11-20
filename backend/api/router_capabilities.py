@@ -4,21 +4,24 @@
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi import status as http_status
 
 import audit as audit_svc
+from ai_helper import generate_capabilities_from_text
 from api.dependencies import project_id_param
 from capabilities import CapabilityApiError, CapabilityService
 from core.responses import ApiError, list_payload, success
+from core.storage import JsonStore
 from core.trace import make_capability_steps, record_trace  # V2-22 过程链 trace（M4-J）
 from logging_setup import get_logger
 from schemas.capability import (
     CapabilityCreate,
     CapabilityExecute,
     CapabilityExecuteBatch,
+    CapabilityGenerateRequest,
     CapabilityUpdate,
     FederatedPreview,
 )
@@ -249,3 +252,44 @@ def api_list_derived(
     except CapabilityApiError as e:
         _raise_api(e)
     return success(list_payload(items, len(items), 1, len(items)))
+
+
+@router.post("/generate", status_code=201)
+def api_generate_capabilities(
+    payload: CapabilityGenerateRequest,
+    request: Request,
+    project_id: str = Depends(project_id_param),
+):
+    """LLM 生成能力：结合业务描述 + 已有本体对象模型，生成可执行能力并逐条校验落盘。
+
+    本体不存在 → 404；LLM 不可用/无产出 → 返回空成功列表（gen_mode="fallback"）；
+    某条能力生成非法（name/object_type/expression 校验失败）→ 跳过并收集失败原因，不阻断其余能力。
+    返回 {gen_mode, created, skipped, items}，items 为已落盘的能力记录。
+    """
+    ont = JsonStore("ontologies", project_id=project_id).get(payload.ontology_id)
+    if not ont:
+        raise ApiError("NOT_FOUND", "本体不存在", http_status.HTTP_404_NOT_FOUND)
+
+    caps, gen_mode = generate_capabilities_from_text(
+        payload.text, ont,
+        endpoint=payload.llm_endpoint, model=payload.model, max_tokens=payload.max_tokens,
+    )
+    svc = _svc(project_id)
+    items: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for cap in caps:
+        if not isinstance(cap, dict):
+            skipped.append({"error": "非对象能力定义"})
+            continue
+        try:
+            rec = svc.create_capability(cap)
+            items.append(rec)
+        except CapabilityApiError as e:
+            skipped.append({"name": cap.get("name"), "code": e.code, "message": e.message})
+
+    return success({
+        "gen_mode": gen_mode,
+        "created": len(items),
+        "skipped": skipped,
+        "items": items,
+    })

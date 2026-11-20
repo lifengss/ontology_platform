@@ -11,10 +11,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+import time
 import urllib.parse
 import urllib.request
 
 from rdflib import Graph, RDF, URIRef
+
+import perf
 
 from config import get_settings
 from logging_setup import get_logger
@@ -24,6 +28,76 @@ logger = get_logger("jena_adapter")
 # 数据结构校验失败时本地降级标记
 FILE_MODE = "file"
 REMOTE_MODE = "remote"
+
+# ---------------------------------------------------------------- GAP-03：查询引擎配置
+# 默认走本地快路径（local TTL + rdflib，约 0.3s 级）；Fuseki 为显式可切换选项。
+# 优先级：运行时配置文件（PUT /api/query/engine 写入）> 环境变量 > 缺省 local。
+QUERY_ENGINES = ("local", "fuseki")
+_QUERY_CONFIG_FILE = "query_engine.json"
+
+# 本地 SPARQL 结果缓存（GAP-03/GAP-19）：按「TTL 文件 mtime + 查询文本」失效
+_query_cache: dict[str, tuple[float, float, list[dict]]] = {}
+QUERY_CACHE_TTL = float(os.environ.get("ONTOLOGY_QUERY_CACHE_TTL", "10") or 10)
+
+# GAP-17 压测发现：rdflib/pyparsing 的 SPARQL 解析（parseQuery / Graph.query）非线程安全，
+# 高并发下偶发 "<lambda>() missing 1 required positional argument: 'x'" → 422 QUERY_SYNTAX_ERROR。
+# 解析/执行加模块级锁串行化（解析毫秒级，且 local 分支有 mtime+TTL 结果缓存兜吞吐）；
+# router_query._validate_sparql 的 parseQuery 共用同一把锁。
+_SPARQL_LOCK = threading.Lock()
+
+# TTL 解析图缓存（path → (mtime, ts, Graph)）：GAP-17，避免并发下每请求重复 turtle parse；
+# Graph 仅在 _SPARQL_LOCK 内 query，无并发读风险；条目超 64 整体清空防泄漏
+_TTL_GRAPH_CACHE: dict[str, tuple[float, float, "Graph"]] = {}
+
+
+def local_ttl_path(ontology_id: str, project_id: str | None = None) -> str:
+    """本地 TTL 文件路径（与 _sparql_local 读取路径一致）。"""
+    settings = get_settings()
+    base = os.path.join(settings.data_dir, "projects", project_id) if project_id else settings.data_dir
+    return os.path.join(base, f"ontology_{ontology_id}.ttl")
+
+
+def write_local_ttl(ontology_id: str, ttl: str, project_id: str | None = None) -> str:
+    """写本地 TTL 文件（GAP-03 双写：本地快路径的数据源，与 Fuseki 可达性无关）。"""
+    path = local_ttl_path(ontology_id, project_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(ttl)
+    _query_cache.clear()  # 数据变化，查询缓存全部失效
+    return path
+
+
+def get_query_config() -> tuple[str, str]:
+    """查询引擎配置。返回 (engine, source)；缺省 local（本地快路径）。"""
+    try:
+        settings = get_settings()
+        cfg_path = os.path.join(settings.data_dir, _QUERY_CONFIG_FILE)
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                eng = str(json.load(f).get("engine", "")).strip().lower()
+            if eng in QUERY_ENGINES:
+                return eng, "runtime"
+    except Exception as e:  # noqa: BLE001
+        logger.warning("读取查询引擎配置失败，回退缺省 local: %s", e)
+    env = os.environ.get("ONTOLOGY_QUERY_ENGINE", "").strip().lower()
+    if env in QUERY_ENGINES:
+        return env, "env"
+    return "local", "default"
+
+
+def set_query_engine(engine: str) -> dict:
+    """持久化查询引擎选择（PUT /api/query/engine）。"""
+    engine = str(engine).strip().lower()
+    if engine not in QUERY_ENGINES:
+        raise ValueError(f"engine 必须是 {QUERY_ENGINES} 之一")
+    settings = get_settings()
+    os.makedirs(settings.data_dir, exist_ok=True)
+    payload = {"engine": engine}
+    with open(os.path.join(settings.data_dir, _QUERY_CONFIG_FILE), "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    _query_cache.clear()
+    logger.info("查询引擎切换为 %s（GAP-03）", engine)
+    return payload
 
 
 def _is_reachable() -> bool:
@@ -97,20 +171,26 @@ def shacl_validate(data_graph: Graph, shapes_graph: Graph) -> dict | None:
     engine, _source = shacl_engine.get_configured_engine()
     if engine == "jena":
         from jena_adapter import shacl_jena
+        t0 = time.perf_counter()
         try:
             r = shacl_jena.jena_shacl_validate(data_graph, shapes_graph)
         except Exception:  # noqa: BLE001 - 任何异常回退本地，入库门不得悬空
             r = None
         if r is not None:
+            perf.record("shacl_jena", time.perf_counter() - t0)
             r.update(engine="jena", requested_engine="jena", degraded=False, degrade_reason=None)
             return r
         reason = shacl_jena.last_error() or "jena_shacl_failed"
         logger.warning("Jena SHACL 执行失败，回退本地 pyshacl：%s", reason)
+        t1 = time.perf_counter()
         local = _local_shacl_validate(data_graph, shapes_graph)
+        perf.record("shacl_local", time.perf_counter() - t1)  # 回退段单独计量
         if local is not None:
             local.update(engine="local", requested_engine="jena", degraded=True, degrade_reason=reason)
         return local
+    t1 = time.perf_counter()
     local = _local_shacl_validate(data_graph, shapes_graph)
+    perf.record("shacl_local", time.perf_counter() - t1)
     if local is not None:
         local.update(engine="local", requested_engine="local", degraded=False, degrade_reason=None)
     return local
@@ -219,14 +299,25 @@ def _ensure_prefixes(query: str) -> str:
 
 
 def sparql_query(query: str, project_id: str | None = None, ontology_id: str | None = None) -> list[dict]:
-    """SPARQL 查询；Fuseki 不可达时降级到本地 TTL 文件执行。
-
-    远端分支按 ontology_id 限定命名图（多本体共存于同一数据集）。
-    """
+    """GAP-03：默认本地快路径（local TTL + rdflib，约 0.3s 级）；Fuseki 为显式可切换选项
+    （PUT /api/query/engine 或环境变量 ONTOLOGY_QUERY_ENGINE）。远端分支按 ontology_id
+    限定命名图（多本体共存于同一数据集）；fuseki 不可达时降级本地并告警。"""
     query = _ensure_prefixes(query)
-    if _is_reachable():
-        return _sparql_remote(query, ontology_id=ontology_id)
-    return _sparql_local(query, project_id=project_id, ontology_id=ontology_id)
+    engine, _source = get_query_config()
+    t0 = time.perf_counter()
+    try:
+        if engine == "fuseki" and _is_reachable():
+            rows = _sparql_remote(query, ontology_id=ontology_id)
+            perf.record("sparql_remote", time.perf_counter() - t0)
+            return rows
+        if engine == "fuseki":
+            logger.warning("查询引擎=fuseki 但 Fuseki 不可达，降级本地快路径（GAP-03）")
+        rows = _sparql_local(query, project_id=project_id, ontology_id=ontology_id)
+        perf.record("sparql_local", time.perf_counter() - t0)
+        return rows
+    except Exception:
+        perf.record(f"sparql_{engine}_error", time.perf_counter() - t0)
+        raise
 
 
 def _sparql_remote(query: str, ontology_id: str | None = None) -> list[dict]:
@@ -253,7 +344,7 @@ def _sparql_remote(query: str, ontology_id: str | None = None) -> list[dict]:
 def _sparql_local(query: str, project_id: str | None, ontology_id: str | None) -> list[dict]:
     settings = get_settings()
     if project_id and ontology_id:
-        path = os.path.join(settings.data_dir, "projects", project_id, f"ontology_{ontology_id}.ttl")
+        path = local_ttl_path(ontology_id, project_id)
     elif project_id:
         # 取该项目下第一个 TTL
         base = os.path.join(settings.data_dir, "projects", project_id)
@@ -262,14 +353,41 @@ def _sparql_local(query: str, project_id: str | None, ontology_id: str | None) -
     else:
         path = None
     if not path or not os.path.exists(path):
-        logger.info("本地 TTL 不存在，SPARQL 返回空 path=%s", path)
+        logger.info("本地 TTL 不存在，SPARQL 返回空 path=%s（GAP-03 双写后本地应始终有数据；"
+                    "若缺失请检查发布/同步链路）", path)
         return []
-    g = Graph()
-    g.parse(path, format="turtle")
-    results = g.query(query)
-    out = []
-    for row in results:
-        out.append({str(k): str(v) for k, v in zip(results.vars, row)})
+    # GAP-03/GAP-19：结果缓存（TTL 文件 mtime 变化或超时即失效）
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+    now = time.monotonic()
+    key = f"{path}|{query}"
+    hit = _query_cache.get(key)
+    if hit and hit[0] == mtime and (now - hit[1]) < QUERY_CACHE_TTL:
+        logger.info("本地 SPARQL 缓存命中 path=%s rows=%d", path, len(hit[2]))
+        return hit[2]
+    with _SPARQL_LOCK:  # GAP-17：pyparsing 并发解析 bug 规避（见 _SPARQL_LOCK 注释）
+        # 双检缓存：并发同查询全部冷缓存时，锁内只有首个请求真正 parse/执行，
+        # 其余直接复用其结果（避免 N 倍重复解析推高 P95）
+        hit2 = _query_cache.get(key)
+        if hit2 and hit2[0] == mtime and (now - hit2[1]) < QUERY_CACHE_TTL:
+            return hit2[2]
+        # TTL 图缓存：避免并发下每个请求重复 Graph.parse（turtle 解析毫秒~百毫秒级）
+        ghit = _TTL_GRAPH_CACHE.get(path)
+        if ghit and ghit[0] == mtime and (now - ghit[1]) < QUERY_CACHE_TTL:
+            g = ghit[2]
+        else:
+            g = Graph()
+            g.parse(path, format="turtle")
+            if len(_TTL_GRAPH_CACHE) > 64:
+                _TTL_GRAPH_CACHE.clear()
+            _TTL_GRAPH_CACHE[path] = (mtime, now, g)
+        results = g.query(query)
+        out = []
+        for row in results:
+            out.append({str(k): str(v) for k, v in zip(results.vars, row)})
+    _query_cache[key] = (mtime, now, out)
     logger.info("本地 TTL SPARQL 执行 path=%s rows=%d", path, len(out))
     return out
 

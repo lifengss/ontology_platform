@@ -14,6 +14,7 @@ import re
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -24,6 +25,9 @@ from logging_setup import get_logger
 from modeling_translator import build_instance_graph, translate_to_shacl
 
 logger = get_logger("ingestion")
+
+# GAP-19：approve SHACL 并行分块大小（每块实例数）；>该值走线程池分块校验
+_APPROVE_SHACL_CHUNK = 500
 
 
 def _existing_records_for_composite(candidate: dict[str, Any],
@@ -178,6 +182,11 @@ def _preview_llm(payload, ontology: dict[str, Any]) -> dict[str, Any]:
 def _clean_value(v: Any) -> Any:
     if v is None:
         return None
+    # GAP-06：空串/纯空白视为「缺失」——CSV/Excel 空单元格不再以 "" 落入实例，
+    # 避免触发枚举 Literal("") 不符、必填误报等 SHACL 报错；可选属性直接缺键，
+    # 必填属性走清晰的「必填缺失」路径。
+    if isinstance(v, str) and v.strip() == "":
+        return None
     if isinstance(v, float) and math.isnan(v):
         return None
     return v
@@ -256,7 +265,20 @@ def _preview_field_map(payload, ontology: dict[str, Any]) -> dict[str, Any]:
     mapping = payload.mapping or {}
     field_map: dict[str, str] = mapping.get("field_map") or {}
     if not field_map:
-        raise ApiError("VALIDATION_ERROR", "field_map 来源必须提供 mapping.field_map", http_status=422)
+        raise ApiError(
+            "VALIDATION_ERROR",
+            "mapping.field_map 不能为空：请提供 {源表头: 属性id}；源表头与属性 id 相同时可用 identity map"
+            '（如 {"orderCode": "orderCode"}）。注意 preview 端点必须显式传 field_map；'
+            "若走 upload 端点可不传（按表头自动匹配）",
+            http_status=422,
+            message_zh="预览接口需要告诉系统「源数据的每一列对应模型哪个属性」，本次请求没有提供这份对应关系",
+            suggestion=(
+                "curl -X POST '/api/ingest/preview?project_id=<项目>' -H 'Content-Type: application/json' -d "
+                '\'{"ontology_id":"<本体id>","object_type":"<对象id>",'
+                '"source":{"kind":"field_map","records":[{"orderCode":"O-1"}]},'
+                '"mapping":{"field_map":{"orderCode":"orderCode"}}}\''
+            ),
+        )
     records = payload.source.records
     if not records:
         raise ApiError("VALIDATION_ERROR", "field_map 来源必须提供 source.records", http_status=422)
@@ -268,7 +290,13 @@ def _preview_field_map(payload, ontology: dict[str, Any]) -> dict[str, Any]:
     valid_attrs = {a["id"] for a in obj.get("attributes", [])} | {r["id"] for r in obj.get("relations", [])}
     for target in field_map.values():
         if target not in valid_attrs:
-            raise ApiError("VALIDATION_ERROR", f"field_map 目标字段 {target} 不在对象 {object_type} 的属性/关系字段列表中", http_status=422)
+            raise ApiError(
+                "VALIDATION_ERROR",
+                f"field_map 目标字段 {target} 不在对象 {object_type} 的属性/关系字段列表中"
+                "（若未显式指定 object_type，系统会回退到本体首个对象，可能并非你的目标对象）",
+                http_status=422,
+                suggestion="在请求 body 加 \"object_type\":\"<对象id>\"，或对 preview 端点用查询参数 ?object_type=<对象id> 显式指定",
+            )
 
     preview_violations: list[str] = []
     for i, rec in enumerate(records):
@@ -303,17 +331,48 @@ def approve(candidate: dict[str, Any], ontology: dict[str, Any], project_id: str
         raise ApiError("VALIDATION_ERROR", "候选缺少 object_type", http_status=422)
 
     shapes = translate_to_shacl(ontology)
-    data = build_instance_graph(ontology, instances)
-    shacl_result = shacl_validate(data, shapes)
+    # GAP-19：大候选 SHACL 校验并行分块——pyshacl 对全部实例×形状单次校验是 CPU 长尾
+    #（数千实例候选可达分钟级）；按 _APPROVE_SHACL_CHUNK 分块后线程池并行，
+    # 违规按块序拼接（与全量校验同口径）。小候选走原单次路径。
+    _CHUNK = _APPROVE_SHACL_CHUNK
+    if len(instances) > _CHUNK:
+        chunks = [instances[i:i + _CHUNK] for i in range(0, len(instances), _CHUNK)]
+
+        def _validate_chunk(chunk):
+            return shacl_validate(build_instance_graph(ontology, chunk), shapes)
+
+        with ThreadPoolExecutor(max_workers=min(4, len(chunks))) as ex:
+            chunk_results = list(ex.map(_validate_chunk, chunks))
+        if any(r is None for r in chunk_results):
+            raise ApiError("INTERNAL_ERROR", "SHACL 校验引擎不可用", http_status=500)
+        merged_violations: list[dict[str, Any]] = []
+        for r in chunk_results:
+            merged_violations.extend(r.get("violations") or [])
+        shacl_result = {
+            "valid": all(r.get("valid") for r in chunk_results),
+            "violations": merged_violations,
+            "engine": chunk_results[0].get("engine"),
+            "degraded": any(r.get("degraded") for r in chunk_results),
+            "degrade_reason": next((r.get("degrade_reason") for r in chunk_results
+                                    if r.get("degrade_reason")), None),
+            "chunked": True,
+            "chunks": len(chunks),
+        }
+    else:
+        data = build_instance_graph(ontology, instances)
+        shacl_result = shacl_validate(data, shapes)
 
     if shacl_result is None:
         raise ApiError("INTERNAL_ERROR", "SHACL 校验引擎不可用", http_status=500)
 
     if not shacl_result["valid"]:
+        from model_gap import analyze_model_gaps  # GAP-05：违规→结构化模型缺口
         return {
             "imported": 0,
             "rejected": 0,
             "violations": shacl_result["violations"],
+            "model_gaps": analyze_model_gaps(ontology, object_type,
+                                             shacl_result["violations"], instances),
             "neo_tx_id": None,
         }
 
@@ -360,6 +419,14 @@ def approve(candidate: dict[str, Any], ontology: dict[str, Any], project_id: str
         ontology_id=candidate.get("ontology_id"),
         project_id=project_id or candidate.get("project_id"),
     )
+    # GAP-15：落库后自动 RDF 同步（本地 TTL 始终写＋Fuseki 可达时双写），
+    # 导入审批后图谱即时反映最新数据，无需手动 POST /rdf-sync；失败仅告警不阻断审批结果
+    try:
+        from jena_adapter import rdf_sync as _rdf_sync
+
+        _rdf_sync.sync_ontology(project_id or candidate.get("project_id"), candidate.get("ontology_id"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("approve 后 RDF 同步失败 ontology_id=%s: %s", candidate.get("ontology_id"), e)
     return {
         "imported": len(instances),
         "rejected": 0,

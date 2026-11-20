@@ -1,18 +1,23 @@
 """本体建模路由（UC1 / VS1 + VS5/逆向）。完整闭环：创建→翻译落 Jena(降级文件)→读取→导出→校验→快照。"""
 from __future__ import annotations
 
+import copy
 import io
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
+from pydantic import BaseModel
 from rdflib import Graph
 
 from ai_helper import call_llm, extract_json, generate_ontology_from_document, generate_ontology_from_text
 from api.dependencies import namespace_param, project_id_param
+import draft_align as align_mod
 import audit as audit_svc
+import dictionary as dict_svc
 import sidecar_log as sidecar_svc  # V2-10 旁路操作日志（M4-G）
 from core.instance_store import get_instance_store
 from core.project_store import ProjectStore
@@ -34,6 +39,7 @@ from modeling_translator import (
     translate_to_turtle,
     validate_business_layer,
 )
+import schemadiff as sd
 from schemas.ontology import (
     ExportRequest,
     Ontology,
@@ -61,6 +67,39 @@ from tenant import (
 )
 
 JOBS: dict[str, dict[str, Any]] = {}
+# GAP-11：任务进度/取消/重试——重试参数（含文件字节）与取消标志不序列化进响应，单独存放
+_JOBS_PARAMS: dict[str, dict[str, Any]] = {}
+_JOBS_CANCEL: dict[str, threading.Event] = {}
+
+
+def _job_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _update_job(job_id: str, **fields: Any) -> None:
+    """就地更新 job 状态/进度（单 dict update 原子，跨线程安全）。"""
+    job = JOBS.get(job_id)
+    if job is None:
+        return
+    job.update(fields)
+    job["updated_at"] = _job_now()
+
+
+def _new_job_record(job_id: str, project_id: str, file_infos: list[tuple[str, bytes]]) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "status": "pending",
+        "stage": "排队中",
+        "progress": 0,
+        "kind": "from-doc",
+        "file_names": [f[0] for f in file_infos],
+        "draft_id": None,
+        "error": None,
+        "project_id": project_id,
+        "created_at": _job_now(),
+        "updated_at": _job_now(),
+    }
+
 
 router = APIRouter(prefix="/api/ontologies", tags=["ontologies"])
 logger = get_logger("api.ontologies")
@@ -196,6 +235,17 @@ def list_ontologies(
     total = len(items)
     start = (page - 1) * page_size
     return success(list_payload(items[start: start + page_size], total, page, page_size))
+
+
+@router.get("/jobs")
+def list_jobs(project_id: str = Depends(project_id_param)):
+    """当前项目全部异步任务（created_at 倒序，GAP-11 任务面板）。
+
+    注意：本路由必须先注册于 GET /{ontology_id} 之前——单段路径 /jobs 会被其通配吞掉。
+    """
+    items = [j for j in JOBS.values() if j.get("project_id") == project_id]
+    items.sort(key=lambda j: j.get("created_at") or "", reverse=True)
+    return success(list_payload(items, total=len(items), page=1, page_size=len(items) or 1))
 
 
 @router.get("/{ontology_id}")
@@ -745,6 +795,338 @@ def publish_ontology(ontology_id: str, request: Request, project_id: str = Depen
     return success(updated)
 
 
+# ---- GAP-09：生成草稿 vs 当前模型 差异审核（逐项采纳/拒绝、一键采纳全部） ----
+
+class DraftDiffRequest(BaseModel):
+    source_draft_id: str
+    # 多文档增量建模：按名称/字典同义词/相似度把源草稿对象 ID 对齐到目标（默认开；歧义不对齐）
+    align: bool = True
+
+
+class AdoptChangesRequest(BaseModel):
+    source_draft_id: str
+    adopt: list[int] | Literal["all"]
+    note: str | None = None
+    align: bool = True  # 与 draft-diff 同一对齐口径，保证变更序号一致
+
+
+def _model_core(rec: dict[str, Any]) -> dict[str, Any]:
+    """模型核心三字段（objects/constraints/functions）深拷贝视图，供 diff/合并互不污染。"""
+    return {k: copy.deepcopy(rec.get(k) or []) for k in ("objects", "constraints", "functions")}
+
+
+def _diff_models(target: dict[str, Any], source: dict[str, Any],
+                 project_id: str, align: bool) -> tuple[dict[str, Any], dict[str, Any], list[dict]]:
+    """draft-diff 与 adopt 共用的取模＋对齐入口：两端口径必须一致（变更序号同源）。"""
+    t, s = _model_core(target), _model_core(source)
+    if align:
+        s, alignment = align_mod.align_model(t, s, project_id)
+    else:
+        alignment = []
+    return t, s, alignment
+
+
+def _record_alignment_synonyms(project_id: str, alignment: list[dict]) -> int:
+    """采纳后沉淀字典：语义对齐（名称不同但判定同一对象）的对象名对 → 词条同义词。
+
+    人工确认合并即同义词晋升的输入来源（多文档建模与数据字典互哺闭环）；
+    失败不影响采纳主链路，返回成功沉淀条数。
+    """
+    recorded = 0
+    for e in alignment or []:
+        if e.get("method") != "semantic":
+            continue  # 精确/同义词通道无新增信息
+        src_name, tgt_name = e.get("source_name") or "", e.get("target_name") or ""
+        if not src_name or not tgt_name or dict_svc.normalize_text(src_name) == dict_svc.normalize_text(tgt_name):
+            continue
+        try:
+            existing = next((t for t in dict_svc.list_terms(project_id)
+                             if (t.get("object_type") or "") == (e.get("target_object_id") or "")
+                             and not (t.get("property_id") or "")
+                             and dict_svc.normalize_text(t.get("canonical")) == dict_svc.normalize_text(tgt_name)),
+                            None)
+            if existing:
+                if src_name not in (existing.get("synonyms") or []):
+                    dict_svc.promote_synonym(project_id, existing["id"], src_name)
+            else:
+                dict_svc.create_term(project_id, {
+                    "canonical": tgt_name, "object_type": e.get("target_object_id") or "",
+                    "synonyms": [src_name],
+                })
+            recorded += 1
+        except Exception as exc:  # noqa: BLE001  沉淀失败不阻断采纳
+            logger.warning("alignment synonym record failed (%s→%s): %s", tgt_name, src_name, exc)
+    return recorded
+
+
+def _find_obj(model: dict[str, Any], object_id: str | None) -> dict[str, Any] | None:
+    return next((o for o in model.get("objects") or [] if o.get("id") == object_id), None)
+
+
+def _fn_key(f: dict[str, Any]) -> str:
+    return str(f.get("function_id") or f.get("name") or "")
+
+
+def _apply_change(m: dict[str, Any], s: dict[str, Any], c: dict[str, Any]) -> bool:
+    """把一条 diff 变更应用到目标模型 m（值取自源模型 s）；幂等，生效返回 True。"""
+    kind = c.get("kind")
+    oid, aid, rid = c.get("object_id"), c.get("attribute_id"), c.get("relation_id")
+    if kind == "object_added":
+        so = _find_obj(s, oid)
+        if so and _find_obj(m, oid) is None:
+            m.setdefault("objects", []).append(copy.deepcopy(so))
+            return True
+        return False
+    if kind == "object_removed":
+        m["objects"] = [o for o in m.get("objects") or [] if o.get("id") != oid]
+        return True
+    if kind in ("stable_key_changed", "parent_changed"):
+        field = "stable_key" if kind == "stable_key_changed" else "parent"
+        to, so = _find_obj(m, oid), _find_obj(s, oid)
+        if to is None or so is None:
+            return False
+        if field in so:
+            to[field] = copy.deepcopy(so[field])
+        else:
+            to.pop(field, None)
+        return True
+    if kind == "attribute_added":
+        to, so = _find_obj(m, oid), _find_obj(s, oid)
+        sa = next((a for a in (so or {}).get("attributes") or [] if a.get("id") == aid), None)
+        if to is None or sa is None:
+            return False
+        if not any(a.get("id") == aid for a in to.get("attributes") or []):
+            to.setdefault("attributes", []).append(copy.deepcopy(sa))
+            return True
+        return False
+    if kind == "attribute_removed":
+        to = _find_obj(m, oid)
+        if to is None:
+            return False
+        to["attributes"] = [a for a in to.get("attributes") or [] if a.get("id") != aid]
+        return True
+    if kind in ("attribute_type_changed", "attribute_required_changed",
+                "constraint_widened", "constraint_narrowed"):
+        to, so = _find_obj(m, oid), _find_obj(s, oid)
+        ta = next((a for a in (to or {}).get("attributes") or [] if a.get("id") == aid), None)
+        sa = next((a for a in (so or {}).get("attributes") or [] if a.get("id") == aid), None)
+        if ta is None or sa is None:
+            return False
+        if kind == "attribute_type_changed":
+            ta["data_type"] = sa.get("data_type")
+            return True
+        if kind == "attribute_required_changed":
+            ta["required"] = bool(sa.get("required"))
+            return True
+        key = c.get("constraint_key")
+        if not key:
+            return False
+        tcons = ta.setdefault("constraints", {})
+        if key in (sa.get("constraints") or {}):
+            tcons[key] = copy.deepcopy(sa["constraints"][key])
+        else:
+            tcons.pop(key, None)
+        return True
+    if kind == "relation_added":
+        to, so = _find_obj(m, oid), _find_obj(s, oid)
+        sr = next((r for r in (so or {}).get("relations") or [] if r.get("id") == rid), None)
+        if to is None or sr is None:
+            return False
+        if not any(r.get("id") == rid for r in to.get("relations") or []):
+            to.setdefault("relations", []).append(copy.deepcopy(sr))
+            return True
+        return False
+    if kind == "relation_removed":
+        to = _find_obj(m, oid)
+        if to is None:
+            return False
+        to["relations"] = [r for r in to.get("relations") or [] if r.get("id") != rid]
+        return True
+    if kind == "relation_changed":
+        to, so = _find_obj(m, oid), _find_obj(s, oid)
+        sr = next((r for r in (so or {}).get("relations") or [] if r.get("id") == rid), None)
+        if to is None or sr is None:
+            return False
+        for i, r in enumerate(to.get("relations") or []):
+            if r.get("id") == rid:
+                to["relations"][i] = copy.deepcopy(sr)
+                return True
+        return False
+    if kind in ("constraint_added", "constraint_modified", "constraint_removed"):
+        cid = c.get("constraint_id")
+        if kind == "constraint_removed":
+            m["constraints"] = [x for x in m.get("constraints") or [] if x.get("id") != cid]
+            return True
+        sc = next((x for x in s.get("constraints") or [] if x.get("id") == cid), None)
+        if sc is None:
+            return False
+        cons = m.setdefault("constraints", [])
+        if kind == "constraint_added":
+            if not any(x.get("id") == cid for x in cons):
+                cons.append(copy.deepcopy(sc))
+                return True
+            return False
+        for i, x in enumerate(cons):
+            if x.get("id") == cid:
+                cons[i] = copy.deepcopy(sc)
+                return True
+        cons.append(copy.deepcopy(sc))
+        return True
+    if kind in ("function_added", "function_modified", "function_removed"):
+        fid = c.get("function_id")
+        if kind == "function_removed":
+            m["functions"] = [f for f in m.get("functions") or [] if _fn_key(f) != fid]
+            return True
+        sf = next((f for f in s.get("functions") or [] if _fn_key(f) == fid), None)
+        if sf is None:
+            return False
+        fns = m.setdefault("functions", [])
+        if kind == "function_added":
+            if not any(_fn_key(f) == fid for f in fns):
+                fns.append(copy.deepcopy(sf))
+                return True
+            return False
+        for i, f in enumerate(fns):
+            if _fn_key(f) == fid:
+                fns[i] = copy.deepcopy(sf)
+                return True
+        fns.append(copy.deepcopy(sf))
+        return True
+    return False
+
+
+@router.post("/{ontology_id}/draft-diff")
+def draft_diff(
+    ontology_id: str,
+    payload: DraftDiffRequest,
+    request: Request,
+    project_id: str = Depends(project_id_param),
+):
+    """GAP-09：生成结果（来源草稿）vs 当前模型（本本体）的结构化差异。
+
+    返回 schemadiff 变更列表（每项带 index，供逐项采纳）＋双方摘要；只读，不做任何修改。
+    """
+    store = _store_for(project_id)
+    target = store.get(ontology_id)
+    if not target:
+        raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    ensure_schema_visible(request, project_id, target)
+    source = store.get(payload.source_draft_id)
+    if not source:
+        raise ApiError("NOT_FOUND", "来源草稿不存在", http_status=404)
+    ensure_schema_visible(request, project_id, source)
+    if source.get("status") != "draft":
+        raise ApiError("VALIDATION_ERROR", "来源必须是草稿（AI/文档/表格生成未发布）", http_status=422)
+    t, s, alignment = _diff_models(target, source, project_id, payload.align)
+    diff = sd.diff_ontology(t, s)
+    for i, ch in enumerate(diff["changes"]):
+        ch["index"] = i
+    return success({
+        "target": {
+            "id": target["id"], "name": target.get("name"), "status": target.get("status"),
+            "version": target.get("version"), "object_count": len(target.get("objects") or []),
+        },
+        "source": {
+            "id": source["id"], "name": source.get("name"), "status": source.get("status"),
+            "draft_source": source.get("draft_source"), "generation_mode": source.get("generation_mode"),
+            "object_count": len(source.get("objects") or []),
+        },
+        "diff": diff,
+        "change_count": len(diff["changes"]),
+        "alignment": alignment,
+        "aligned_count": len(alignment),
+    })
+
+
+@router.post("/{ontology_id}/adopt-changes")
+def adopt_changes(
+    ontology_id: str,
+    payload: AdoptChangesRequest,
+    request: Request,
+    project_id: str = Depends(project_id_param),
+):
+    """GAP-09：把差异审核中勾选的变更合并进当前模型（目标必须是 draft）。
+
+    adopt：变更 index 列表或 "all"。先重新 diff 再按 index 逐项应用（幂等，已生效的计入 skipped）；
+    合并结果与 PUT 编辑一样过 blocking_violations 业务层校验。active 目标不可直接采纳（409，走变更提案）。
+    """
+    store = _store_for(project_id)
+    target = store.get(ontology_id)
+    if not target:
+        raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    ensure_schema_visible(request, project_id, target)
+    ensure_schema_write(request, project_id, target)
+    _ensure_editable(target)
+    source = store.get(payload.source_draft_id)
+    if not source:
+        raise ApiError("NOT_FOUND", "来源草稿不存在", http_status=404)
+    ensure_schema_visible(request, project_id, source)
+    if source.get("status") != "draft":
+        raise ApiError("VALIDATION_ERROR", "来源必须是草稿（AI/文档/表格生成未发布）", http_status=422)
+    if source["id"] == target["id"]:
+        raise ApiError("VALIDATION_ERROR", "来源草稿不能是目标本体自身", http_status=422)
+
+    t, source_model, alignment = _diff_models(target, source, project_id, payload.align)
+    diff = sd.diff_ontology(t, source_model)
+    changes = diff["changes"]
+    if payload.adopt == "all":
+        chosen = list(range(len(changes)))
+    else:
+        bad = [i for i in payload.adopt if not isinstance(i, int) or i < 0 or i >= len(changes)]
+        if bad:
+            raise ApiError("VALIDATION_ERROR", "包含无效的变更序号（请先重新对比）", http_status=422,
+                           details={"invalid_indexes": bad, "count": len(changes)})
+        chosen = sorted(set(payload.adopt))
+
+    merged = copy.deepcopy(t)
+    applied = skipped = 0
+    for i in chosen:
+        if _apply_change(merged, source_model, changes[i]):
+            applied += 1
+        else:
+            skipped += 1
+    if applied == 0:
+        return success({**target, "adopted": 0, "skipped": skipped, "source_id": source["id"],
+                        "note": "所选变更均无实际变化"})
+
+    patch = {
+        "objects": merged["objects"],
+        "constraints": merged["constraints"],
+        "functions": merged["functions"],
+        "updated_at": _now(),
+    }
+    merged_rec = dict(target)
+    merged_rec.update(patch)
+    biz_errors = blocking_violations(merged_rec)
+    if biz_errors:
+        raise ApiError("VALIDATION_ERROR", "采纳后的模型未通过业务层校验（未写入）", http_status=422,
+                       details={"violations": biz_errors})
+    updated = store.update(ontology_id, patch)
+    _sync_rdf(project_id, ontology_id)
+    synonyms_recorded = _record_alignment_synonyms(project_id, alignment)
+    audit_svc.record_from_request(request, "ontology_adopt_changes", project_id=project_id,
+                                  target_type="ontology", target_id=ontology_id,
+                                  target_name=target.get("name", ""),
+                                  before=_model_view(target), after=_model_view(updated),
+                                  detail={"source_id": source["id"], "adopted": applied,
+                                          "skipped": skipped, "note": payload.note or "",
+                                          "aligned_objects": len(alignment),
+                                          "synonyms_recorded": synonyms_recorded})
+    sidecar_svc.record_from_request(request, sidecar_svc.TYPE_ONTOLOGY_CHANGE, project_id=project_id,
+                                    target_type="ontology", target_id=ontology_id,
+                                    payload={"action": "adopt_changes", "name": target.get("name", ""),
+                                             "source_id": source["id"], "adopted": applied})
+    logger.info("adopt_changes target=%s source=%s applied=%d skipped=%d aligned=%d synonyms=%d project=%s",
+                ontology_id, source["id"], applied, skipped, len(alignment), synonyms_recorded, project_id)
+    note = f"已采纳 {applied} 项变更" + (f"（{skipped} 项无变化跳过）" if skipped else "")
+    if len(alignment):
+        note += f"；自动对齐 {len(alignment)} 个同名对象"
+    if synonyms_recorded:
+        note += f"；沉淀字典同义词 {synonyms_recorded} 条"
+    return success({**updated, "adopted": applied, "skipped": skipped, "source_id": source["id"],
+                    "aligned_count": len(alignment), "synonyms_recorded": synonyms_recorded, "note": note})
+
+
 @router.post("/{ontology_id}/validate")
 def validate_ontology(ontology_id: str, req: ValidateRequest | None = None, project_id: str = Depends(project_id_param)):
     rec = _store_for(project_id).get(ontology_id)
@@ -866,6 +1248,9 @@ def _normalize_generated(generated: dict[str, Any]) -> dict[str, Any]:
         "description": generated.get("description") or generated.get("ontology", {}).get("description", ""),
         "objects": objects,
         "constraints": generated.get("constraints", []),
+        # O-02/V2-19: 透传 LLM 生成的 functions（能力/计算函数），供本体函数元模型存储；
+        # blocking_violations 不校验 functions，故此处不会引入拦截。
+        "functions": generated.get("functions", []),
         "version": "1",
     }
 
@@ -952,14 +1337,23 @@ def create_from_text(payload: OntologyFromTextRequest, project_id: str = Depends
 
 
 @router.post("/from-excel", status_code=201)
-def create_from_excel(file: UploadFile = File(...), project_id: str = Depends(project_id_param)):
-    """上传 CSV/Excel（对象、属性、关系表）→ 生成本体草稿。"""
+def create_from_excel(file: UploadFile = File(...), name: str | None = Form(default=None), project_id: str = Depends(project_id_param)):
+    """上传 CSV/Excel 数据表 → 生成可编辑本体草稿（GAP-04）。
+
+    支持三种格式（自动识别）：
+    1) 宽数据表（最常用）：首行列名（列=属性）、其余为数据行——单对象草稿，
+       类型/必填/业务主键/约束（min/max、长度、枚举）由样本自动推断；
+    2) 长表（属性清单）：列含 对象/属性/类型/必填/关系目标/基数，可选约束列
+       （最小长度/最大长度/正则/最小值/最大值/枚举）；
+    3) B0 三 sheet 模板（1-类层次/2-对象属性(关系)/3-数据属性）。
+    `name` 可覆盖本体名（缺省：宽表取文件名主干）。
+    """
     filename = (file.filename or "").lower()
     content = file.file.read()
     if not content:
         raise ApiError("VALIDATION_ERROR", "文件为空", http_status=422)
     try:
-        generated = _parse_spreadsheet(filename, io.BytesIO(content))
+        generated = _parse_spreadsheet(filename, io.BytesIO(content), name=name)
         record = _normalize_generated(generated)
     except Exception as e:  # noqa: BLE001
         logger.warning("from-excel 解析失败: %s", e)
@@ -979,9 +1373,15 @@ async def create_from_doc(
     file: UploadFile | None = File(default=None),
     llm_endpoint: str | None = Form(default=None),
     model: str | None = Form(default=None),
+    ontology_id: str | None = Form(default=None),
     project_id: str = Depends(project_id_param),
 ):
-    """上传 PRD/Word/Excel 文档 → 后台解析为文本 → LLM 抽取本体草稿（异步任务，返回 job_id）。支持多文件。"""
+    """上传 PRD/Word/Excel 文档 → 后台解析为文本 → LLM 抽取本体草稿（异步任务，返回 job_id）。支持多文件。
+
+    多文档增量建模：可选 ontology_id 指定已有本体作为合并目标——文档仍独立抽取成新草稿，
+    完成后前端自动进入「草稿→目标」差异审核；diff/采纳侧按名称/字典同义词/相似度
+    确定性对齐同名对象（歧义不对齐、不猜测），逐项人工确认后合并进目标。
+    """
     all_files: list[UploadFile] = list(files) if files else []
     if file:
         all_files.append(file)
@@ -995,12 +1395,28 @@ async def create_from_doc(
             raise ApiError("VALIDATION_ERROR", f"文件 {filename} 为空", http_status=422)
         file_infos.append((filename, content))
 
+    merge_target: dict[str, Any] | None = None
+    if ontology_id:
+        merge_target = _store_for(project_id).get(ontology_id)
+        if not merge_target:
+            raise ApiError("NOT_FOUND", "合并目标本体不存在", http_status=404)
+
     job_id = uuid.uuid4().hex
-    JOBS[job_id] = {"status": "pending", "draft_id": None, "error": None, "project_id": project_id}
+    job = _new_job_record(job_id, project_id, file_infos)
+    if merge_target:
+        job["merge_target_id"] = merge_target["id"]
+        job["merge_target_name"] = merge_target.get("name") or ""
+    JOBS[job_id] = job
+    _JOBS_PARAMS[job_id] = {"file_infos": file_infos, "llm_endpoint": llm_endpoint, "model": model,
+                            "ontology_id": merge_target["id"] if merge_target else None}
+    _JOBS_CANCEL[job_id] = threading.Event()
 
     background_tasks.add_task(_run_doc_extraction, job_id, file_infos, llm_endpoint, model, project_id)
-    logger.info("from-doc job=%s project_id=%s files=%s", job_id, project_id, [f[0] for f in file_infos])
-    return success({"job_id": job_id, "status": "pending", "project_id": project_id}, http_status=202)
+    logger.info("from-doc job=%s project_id=%s files=%s merge_target=%s",
+                job_id, project_id, [f[0] for f in file_infos],
+                merge_target.get("id") if merge_target else None)
+    return success({"job_id": job_id, "status": "pending", "project_id": project_id,
+                    "merge_target_id": merge_target.get("id") if merge_target else None}, http_status=202)
 
 
 def _run_doc_extraction(
@@ -1010,36 +1426,118 @@ def _run_doc_extraction(
     model: str | None,
     project_id: str,
 ) -> None:
-    """from-doc 后台任务：解析文档、调用 LLM、保存草稿并更新 JOBS。"""
+    """from-doc 后台任务：解析文档、调用 LLM、保存草稿并更新 JOBS（GAP-11：进度上报＋协作式取消）。"""
+    cancel_evt = _JOBS_CANCEL.get(job_id)
+    total = max(len(file_infos), 1)
+
+    def _cancelled() -> bool:
+        if cancel_evt is not None and cancel_evt.is_set():
+            _update_job(job_id, status="cancelled", stage="已取消")
+            logger.info("from-doc job=%s cancelled", job_id)
+            return True
+        return False
+
     try:
+        _update_job(job_id, status="running", stage="解析文档", progress=1)
         texts: list[str] = []
-        for filename, content in file_infos:
+        for idx, (filename, content) in enumerate(file_infos):
+            if _cancelled():
+                return
+            _update_job(job_id, stage=f"解析文档 {idx + 1}/{total}：{filename}",
+                        progress=5 + int((idx / total) * 30))
             texts.append(f"--- 文档: {filename} ---\n" + _extract_document_text(filename, io.BytesIO(content)))
+        if _cancelled():
+            return
         combined_text = "\n\n".join(texts)
+        _update_job(job_id, stage="LLM 抽取本体", progress=40)
         generated, gen_mode = generate_ontology_from_document(combined_text, llm_endpoint, model)
+        if _cancelled():
+            return
+        _update_job(job_id, stage="业务层校验", progress=70)
         record = _normalize_generated(generated)
         biz_errors = blocking_violations(record)
         if biz_errors:
-            JOBS[job_id] = {"status": "error", "draft_id": None, "error": f"业务层校验未通过: {biz_errors}"}
+            _update_job(job_id, status="error", stage="业务层校验未通过",
+                        error=f"业务层校验未通过: {biz_errors}")
             logger.warning("from-doc job=%s 业务层校验未通过: %s", job_id, biz_errors)
             return
+        _update_job(job_id, stage="保存草稿", progress=85)
         draft = _save_draft(record, "document", project_id, gen_mode)
-        JOBS[job_id] = {"status": "done", "draft_id": draft["id"], "error": None}
+        _update_job(job_id, status="done", stage="完成", progress=100, draft_id=draft["id"])
         logger.info("from-doc job=%s done draft_id=%s generation_mode=%s", job_id, draft["id"], gen_mode)
     except Exception as e:  # noqa: BLE001
         logger.warning("from-doc job=%s 失败: %s", job_id, e)
-        JOBS[job_id] = {"status": "error", "draft_id": None, "error": f"{type(e).__name__}: {e}"}
+        _update_job(job_id, status="error", stage="执行失败", error=f"{type(e).__name__}: {e}")
 
 
-@router.get("/jobs/{job_id}")
-def get_job(job_id: str, project_id: str = Depends(project_id_param)):
+def _get_job_or_404(job_id: str, project_id: str) -> dict:
     job = JOBS.get(job_id)
     if not job:
         raise ApiError("NOT_FOUND", "任务不存在", http_status=404)
     # 简单项目归属校验
     if job.get("project_id") and job.get("project_id") != project_id:
         raise ApiError("FORBIDDEN", "任务不属于当前项目", http_status=403)
+    return job
+
+
+@router.get("/jobs/{job_id}")
+def get_job(job_id: str, project_id: str = Depends(project_id_param)):
+    return success(_get_job_or_404(job_id, project_id))
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, project_id: str = Depends(project_id_param)):
+    """取消进行中的异步任务（GAP-11：协作式，在下一个检查点生效；进行中的 LLM 调用不会被强制中断）。"""
+    job = _get_job_or_404(job_id, project_id)
+    if job.get("status") not in ("pending", "running"):
+        raise ApiError("VALIDATION_ERROR", f"任务处于 {job.get('status')} 状态，无法取消", http_status=409)
+    evt = _JOBS_CANCEL.get(job_id)
+    if evt is not None:
+        evt.set()
+    _update_job(job_id, status="cancelled", stage="已取消")
+    logger.info("from-doc job=%s cancelled by user", job_id)
     return success(job)
+
+
+@router.post("/jobs/{job_id}/retry", status_code=202)
+def retry_job(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    project_id: str = Depends(project_id_param),
+):
+    """重试失败/已取消的异步任务（GAP-11：复用原上传参数，新建 job 并返回新 job_id）。"""
+    job = _get_job_or_404(job_id, project_id)
+    if job.get("status") not in ("error", "cancelled"):
+        raise ApiError("VALIDATION_ERROR",
+                       f"仅失败/已取消任务可重试，当前状态 {job.get('status')}", http_status=409)
+    params = _JOBS_PARAMS.get(job_id)
+    if params is None:
+        raise ApiError("VALIDATION_ERROR",
+                       "原任务参数已不可用（服务可能已重启），请重新上传文档", http_status=409)
+
+    new_id = uuid.uuid4().hex
+    file_infos = params["file_infos"]
+    record = _new_job_record(new_id, project_id, file_infos)
+    record["retried_from"] = job_id
+    # 多文档增量建模：重试沿用原合并目标（目标已被删除则退化为普通 from-doc，不阻断重试）
+    if params.get("ontology_id"):
+        mt = _store_for(project_id).get(params["ontology_id"])
+        if mt:
+            record["merge_target_id"] = mt["id"]
+            record["merge_target_name"] = mt.get("name") or ""
+        else:
+            logger.warning("from-doc retry job=%s: merge target %s 不存在，退化为普通解析",
+                           new_id, params.get("ontology_id"))
+    JOBS[new_id] = record
+    _JOBS_PARAMS[new_id] = params
+    _JOBS_CANCEL[new_id] = threading.Event()
+
+    background_tasks.add_task(
+        _run_doc_extraction, new_id, file_infos,
+        params.get("llm_endpoint"), params.get("model"), project_id,
+    )
+    logger.info("from-doc job=%s retried as new job=%s project_id=%s", job_id, new_id, project_id)
+    return success({"job_id": new_id, "status": "pending", "retried_from": job_id}, http_status=202)
 
 
 def _extract_document_text(filename: str, stream: io.BytesIO) -> str:
@@ -1075,15 +1573,20 @@ def _extract_document_text(filename: str, stream: io.BytesIO) -> str:
     raise ApiError("VALIDATION_ERROR", f"不支持的文件类型: {filename}", http_status=415)
 
 
-def _parse_spreadsheet(filename: str, stream: io.BytesIO) -> dict[str, Any]:
+def _parse_spreadsheet(filename: str, stream: io.BytesIO, name: str | None = None) -> dict[str, Any]:
     """解析 CSV/Excel 为 {name, objects:[...]}。
-    优先识别 B0 三 sheet 模板；否则按单 sheet 约定列名解析。
+
+    GAP-04 格式分派（优先级）：
+    1) B0 三 sheet 模板（Excel sheet 名含 1-类层次/2-对象属性(关系)/3-数据属性）；
+    2) 长表（属性清单）：表头显式含 对象/对象名/object 列——一行一属性、可多对象；
+    3) 宽数据表（普通表头，列=属性、行=实例）：单对象草稿，
+       类型/必填/稳定主键/约束全部由样本行自动推断，生成后可编辑。
     """
     if filename.endswith(".csv"):
         import csv
         text = stream.read().decode("utf-8", errors="replace")
         rows = list(csv.reader(text.splitlines()))
-        return _parse_flat_rows(filename, rows)
+        return _parse_table_rows(filename, rows, name)
 
     try:
         import openpyxl
@@ -1094,11 +1597,151 @@ def _parse_spreadsheet(filename: str, stream: io.BytesIO) -> dict[str, Any]:
     sheet_names = set(wb.sheetnames)
     b0_sheets = {"1-类层次", "2-对象属性(关系)", "3-数据属性"}
     if b0_sheets.issubset(sheet_names):
-        return _parse_b0_template(wb)
+        return _parse_b0_template(wb, name)
 
     ws = wb.active
     rows = [[str(c) if c is not None else "" for c in row] for row in ws.iter_rows(values_only=True)]
-    return _parse_flat_rows(filename, rows)
+    return _parse_table_rows(filename, rows, name)
+
+
+# GAP-04 宽表推断：样本行数上限（防大表拖慢解析；推断只用样本，草稿可编辑）
+_WIDE_SAMPLE_LIMIT = 500
+# 稳定主键候选列名关键词（命中即优先作为业务主键）
+_KEY_HINTS = ("id", "编号", "编码", "code", "identifier", "单号", "key")
+_BOOL_WORDS = {"true", "false", "yes", "no", "是", "否"}
+_DATE_RE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?)?$")
+
+
+def _parse_table_rows(filename: str, rows: list[list[str]], name: str | None = None) -> dict[str, Any]:
+    """按表头分派长表（属性清单）与宽数据表。
+
+    仅当表头显式含「对象」式列（对象/对象名/object/object_name）才走长表；
+    普通表头走宽表——修复此前宽数据表无「对象」列时被按长表误解析
+    （每行数据被当成一个对象）的问题。
+    """
+    if rows and any(h.strip().lower() in ("对象", "对象名", "object", "object_name") for h in rows[0]):
+        return _parse_flat_rows(filename, rows, name)
+    return _parse_wide_rows(filename, rows, name)
+
+
+def _infer_column_dtype(values: list[str]) -> str:
+    """由样本值推断属性 data_type（全部样本命中才取更严格类型，否则 string）。"""
+    nonempty = [v.strip() for v in values if v.strip()]
+    if not nonempty:
+        return "string"
+    if all(re.fullmatch(r"-?\d+", v) for v in nonempty):
+        return "integer"
+    if all(re.fullmatch(r"-?\d+(\.\d+)?([eE][+-]?\d+)?", v) for v in nonempty):
+        return "float"
+    if all(v.lower() in _BOOL_WORDS for v in nonempty):
+        return "boolean"
+    if all(_DATE_RE.match(v) for v in nonempty):
+        return "date"
+    return "string"
+
+
+def _infer_column_constraints(values: list[str], dtype: str, is_key: bool) -> dict[str, Any]:
+    """从样本值抽取属性 constraints：数值 min/max、字符串长度区间、低基数 → enum。
+
+    稳定主键列不推断 enum（唯一键不应是枚举白名单）。
+    """
+    nonempty = [v.strip() for v in values if v.strip()]
+    c: dict[str, Any] = {}
+    if dtype in ("integer", "float") and nonempty:
+        nums = [float(v) for v in nonempty]
+        if dtype == "integer":
+            c["minimum"] = int(min(nums))
+            c["maximum"] = int(max(nums))
+        else:
+            c["minimum"] = min(nums)
+            c["maximum"] = max(nums)
+    elif dtype == "string" and nonempty:
+        c["min_length"] = min(len(v) for v in nonempty)
+        c["max_length"] = max(len(v) for v in nonempty)
+        if not is_key and len(nonempty) >= 4:
+            distinct = list(dict.fromkeys(nonempty))
+            if len(distinct) <= 8 and len(distinct) < len(nonempty):
+                c["enum"] = distinct[:8]
+    return c
+
+
+def _parse_wide_rows(filename: str, rows: list[list[str]], name: str | None = None) -> dict[str, Any]:
+    """GAP-04 宽数据表：表头=属性清单、数据行=实例 → 单对象草稿本体。
+
+    - 对象名：优先 `name` 参数，否则取文件名主干；
+    - 类型/必填/稳定主键/约束全部由样本行推断（最多 _WIDE_SAMPLE_LIMIT 行）；
+    - 仅表头无数据行时退化为骨架草稿（各列 string、非必填、无约束）；
+    - 重复列名自动加后缀保证属性 id 唯一；草稿可编辑，推断有误可在编辑器修正。
+    """
+    if not rows:
+        raise ValueError("空表格")
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    obj_name = (name or "").strip() or stem or "导入对象"
+    header = [h.strip() for h in rows[0]]
+    data_rows = [r for r in rows[1:] if any(str(x).strip() for x in r)]
+    sample = data_rows[:_WIDE_SAMPLE_LIMIT]
+
+    cols: list[tuple[int, str, list[str]]] = []
+    for i, h in enumerate(header):
+        if not h:
+            continue
+        vals = [str(r[i]).strip() if i < len(r) else "" for r in sample]
+        if data_rows and not any(vals):
+            continue  # 数据行存在但该列全空：不成属性
+        cols.append((i, h, vals))
+    if not cols:
+        raise ValueError("表格没有有效列（表头为空）")
+
+    used: dict[str, int] = {}
+    attributes: list[dict[str, Any]] = []
+    for _, h, vals in cols:
+        base = "attr_" + _slug(h)
+        if base in used:
+            used[base] += 1
+            aid = f"{base}_{used[base]}"
+        else:
+            used[base] = 0
+            aid = base
+        attributes.append({
+            "id": aid,
+            "name": h,
+            "data_type": _infer_column_dtype(vals),
+            "required": bool(sample) and all(v for v in vals),
+            "constraints": {},
+            "_vals": vals,
+        })
+
+    # 稳定主键：1) 列名命中 id 式关键词 2) 首个 string 列 3) 首列
+    def _hint_rank(a: dict[str, Any]) -> int:
+        low = a["name"].lower()
+        return next((idx for idx, kw in enumerate(_KEY_HINTS) if kw in low), 99)
+
+    hint_attrs = [a for a in attributes if _hint_rank(a) < 99]
+    if hint_attrs:
+        key_attr = min(hint_attrs, key=_hint_rank)
+    else:
+        str_attrs = [a for a in attributes if a["data_type"] == "string"]
+        key_attr = str_attrs[0] if str_attrs else attributes[0]
+    key_id = key_attr["id"]
+    for a in attributes:
+        vals = a.pop("_vals")
+        a["constraints"] = _infer_column_constraints(vals, a["data_type"], a["id"] == key_id)
+
+    sample_n = min(len(data_rows), _WIDE_SAMPLE_LIMIT)
+    return {
+        "name": obj_name,
+        "description": (
+            f"来自 {filename} 的宽表导入（样本 {sample_n} 行 × {len(attributes)} 列）；"
+            "类型/必填/主键/约束为自动推断，请在编辑器中确认"
+        ),
+        "objects": [{
+            "id": "obj_" + _slug(obj_name),
+            "name": obj_name,
+            "stable_key": key_id,
+            "attributes": attributes,
+            "relations": [],
+        }],
+    }
 
 
 def _enum_cell(s: str):
@@ -1150,7 +1793,7 @@ def _constraint_from_values(vals: dict[str, str | None]) -> dict[str, Any]:
     return c
 
 
-def _parse_flat_rows(filename: str, rows: list[list[str]]) -> dict[str, Any]:
+def _parse_flat_rows(filename: str, rows: list[list[str]], name: str | None = None) -> dict[str, Any]:
     if not rows:
         raise ValueError("空表格")
     header = [h.strip().lower() for h in rows[0]]
@@ -1218,10 +1861,14 @@ def _parse_flat_rows(filename: str, rows: list[list[str]]) -> dict[str, Any]:
                 cardinality = "many_to_one"
             obj["relations"].append({"id": rel_id, "name": f"{obj_name}-{target_name}", "target_object": objects[target_name]["id"], "cardinality": cardinality})
 
-    return {"name": "表格导入本体", "description": f"来自 {filename}", "objects": list(objects.values())}
+    return {
+        "name": (name or "").strip() or "表格导入本体",
+        "description": f"来自 {filename}",
+        "objects": list(objects.values()),
+    }
 
 
-def _parse_b0_template(wb: Any) -> dict[str, Any]:
+def _parse_b0_template(wb: Any, name: str | None = None) -> dict[str, Any]:
     """解析 B0 参考本体的三 sheet 模板（类层次、对象属性、数据属性）。"""
     def sheet_rows(name: str) -> list[list[str]]:
         ws = wb[name]
@@ -1310,7 +1957,11 @@ def _parse_b0_template(wb: Any) -> dict[str, Any]:
             )
         objects.append(obj)
 
-    return {"name": "B0参考本体导入", "description": "从 B0 三 sheet 模板导入", "objects": objects}
+    return {
+        "name": (name or "").strip() or "B0参考本体导入",
+        "description": "从 B0 三 sheet 模板导入",
+        "objects": objects,
+    }
 
 
 def _slug(text: str) -> str:

@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from api.dependencies import project_id_param
 import audit as audit_svc
 from core.instance_store import get_instance_store
-from core.responses import ApiError, list_payload, parse_pagination, success
+from core.responses import ApiError, list_payload, merge_pagination_aliases, parse_pagination, success
 from core.storage import JsonStore
 from ai_helper.client import call_llm
 from tenant import (
@@ -44,6 +44,23 @@ def _request_username(request: Request) -> str:
     return user.get("username") or "dev"
 
 
+async def _form_object_type_fallback(request: Request) -> str | None:
+    """GAP-06：object_type 双通道——multipart 表单字段 object_type 与查询参数等价。
+
+    curl -F 'file=@a.csv' 的用户习惯把 object_type 也放进表单；FastAPI 中本端点的
+    object_type 参数是查询参数，表单里的同名字段会被静默忽略。这里回读原始表单兜底
+    （Starlette 已缓存解析结果，不会二次读取请求体）。
+    """
+    try:
+        form = await request.form()
+        ft = form.get("object_type")
+        if isinstance(ft, str) and ft.strip():
+            return ft.strip()
+    except Exception:  # noqa: BLE001 表单不可读时不阻断主流程（query 通道仍有效）
+        pass
+    return None
+
+
 def _ensure_instance_write(request: Request, project_id: str, rec: dict) -> None:
     """V2-06：实例写权限 = 实例可见（同租户＋schema 可见）且 schema 写权限（共享只授读）。
 
@@ -68,10 +85,15 @@ from ingestion import validate_instance
 from jena_adapter import rdf_sync
 from logging_setup import get_logger
 from modeling_translator import blocking_violations
-from schemas.ingest import ApproveResult, IngestPreviewRequest
+from model_gap import missing_attribute_gaps  # GAP-05：缺字段结构化缺口
+from schemas.ingest import ApproveResult, FixModelGapsRequest, IngestPreviewRequest
 
 router = APIRouter(prefix="/api/ingest", tags=["ingest"])
 logger = get_logger("api.ingest")
+
+# GAP-17：列表排序视图缓存（(快照版本, 过滤维度) → 排序后的共享只读列表）。
+# 版本键＝store.snapshot() 的文件聚合签名，任何写入自动失效；>16 个组合整体清空。
+_SORTED_VIEW: dict[tuple, list] = {}
 
 
 def _store_for(project_id: str) -> JsonStore:
@@ -312,7 +334,8 @@ def _coerce_record_types(records: list[dict[str, Any]], field_map: dict[str, str
             if target not in attr_types or src not in new_rec:
                 continue
             val = new_rec[src]
-            if val is None or val == "":
+            if val is None or (isinstance(val, str) and val.strip() == ""):
+                new_rec.pop(src, None)  # GAP-06：空串/纯空白视为缺失，剔除键而非保留 ""
                 continue
             dt = attr_types[target]
             try:
@@ -404,6 +427,8 @@ async def upload_instances(
     """上传 Excel/CSV 生成候选实例。xlsx 支持按 sheet 名/文件名推断对象类型；
     未指定 object_type 时遍历所有 sheet，每个合法 sheet 生成一个候选。csv 必须指定 object_type。
     field_map 为 JSON 字符串，{源表头: 属性id}，显式覆盖自动匹配。"""
+    if not object_type:
+        object_type = await _form_object_type_fallback(request)  # GAP-06：object_type 双通道（query 或表单字段）
     ontology = _load_ontology(ontology_id, project_id)
     biz_errors = blocking_violations(ontology)
     if biz_errors:
@@ -460,12 +485,23 @@ async def upload_instances(
                 continue
             if not parsed_field_map:
                 headers = [str(cell.value or "").strip() for cell in next(wb[sheet_name].iter_rows(min_row=1, max_row=1))]
+                _rows = [dict(zip(headers, row)) for row in
+                         (row for row in wb[sheet_name].iter_rows(min_row=2, values_only=True)
+                          if any(v not in (None, "") for v in row))]
+                _gaps = missing_attribute_gaps(headers, _rows[:500], obj)  # GAP-05：缺字段→结构化缺口
                 raise ApiError("VALIDATION_ERROR",
                                f"sheet「{sheet_name}」的表头 {headers} 无法匹配对象「{obj.get('name') or matched_object_type}」的任何属性，"
-                               f"请检查表头（应使用属性 id 或名称）或显式传 field_map", http_status=422)
+                               f"请检查表头（应使用属性 id 或名称）或显式传 field_map，"
+                               f"或在前端一键将缺失字段补入模型后重新上传",
+                               http_status=422,
+                               details={"object_type": matched_object_type, "model_gaps": _gaps})
             candidate = _build_candidate_records(ontology_id, ontology, matched_object_type, filename, records, parsed_field_map, project_id)
             rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request),
                                   field_map=parsed_field_map)  # V2-08：血缘源字段要素
+            # GAP-05：部分匹配→候选携带缺字段缺口（未匹配列数据不会被导入）
+            _unmapped = [h for h in (records[0] or {}).keys() if h and h not in parsed_field_map]
+            if _unmapped:
+                rec["model_gaps"] = missing_attribute_gaps(_unmapped, records, obj)
             candidates.append(rec)
     elif ext == "csv":
         if not object_type:
@@ -474,7 +510,13 @@ async def upload_instances(
             if inferred:
                 object_type = inferred
         if not object_type:
-            raise ApiError("VALIDATION_ERROR", "CSV 上传必须指定 object_type 或文件名可推断对象类型", http_status=422)
+            raise ApiError(
+                "VALIDATION_ERROR",
+                "CSV 上传需指定 object_type（查询参数 ?object_type=<对象id> 或表单字段 object_type 均可），"
+                "或将文件名命名为对象 id/名称以便推断",
+                http_status=422,
+                suggestion="curl -F 'file=@orders.csv' -F 'object_type=Order' 'http://<host>/api/ingest/upload?project_id=<项目>&ontology_id=<本体id>'",
+            )
         if object_type not in obj_by_id:
             raise ApiError("VALIDATION_ERROR", f"对象类型 {object_type} 不在本体中", http_status=422)
         content = (await file.read()).decode("utf-8-sig")
@@ -487,12 +529,21 @@ async def upload_instances(
         if not records:
             raise ApiError("VALIDATION_ERROR", "CSV 无数据行", http_status=422)
         if not parsed_field_map:
+            _headers = [h for h in (records[0].keys() if records else []) if h]
+            _gaps = missing_attribute_gaps(_headers, records[:500], obj)  # GAP-05：缺字段→结构化缺口
             raise ApiError("VALIDATION_ERROR",
                            f"CSV 表头无法匹配对象「{obj.get('name') or object_type}」的任何属性，"
-                           f"请检查表头（应使用属性 id 或名称）或显式传 field_map", http_status=422)
+                           f"请检查表头（应使用属性 id 或名称）或显式传 field_map，"
+                           f"或在前端一键将缺失字段补入模型后重新上传",
+                           http_status=422,
+                           details={"object_type": object_type, "model_gaps": _gaps})
         candidate = _build_candidate_records(ontology_id, ontology, object_type, filename, records, parsed_field_map, project_id)
         rec = _save_candidate(candidate, project_id, filename, created_by=_request_username(request),
                               field_map=parsed_field_map)  # V2-08：血缘源字段要素
+        # GAP-05：部分匹配→候选携带缺字段缺口（未匹配列数据不会被导入）
+        _unmapped = [h for h in (records[0] or {}).keys() if h and h not in parsed_field_map]
+        if _unmapped:
+            rec["model_gaps"] = missing_attribute_gaps(_unmapped, records, obj)
         candidates.append(rec)
     else:
         raise ApiError("VALIDATION_ERROR", "仅支持 .xlsx 或 .csv 文件", http_status=422)
@@ -560,6 +611,8 @@ async def upload_instances_smart(
     - auto_apply=true 时直接生成 candidate 记录。
     """
     ensure_project_access(request, project_id)  # V2-06：租户隔离
+    if not object_type:
+        object_type = await _form_object_type_fallback(request)  # GAP-06：object_type 双通道（query 或表单字段）
     ontology = _load_ontology(ontology_id, project_id)
     biz_errors = blocking_violations(ontology)
     if biz_errors:
@@ -604,7 +657,13 @@ async def upload_instances_smart(
         if not object_type:
             object_type = _match_object_type(filename.rsplit(".", 1)[0], ontology)
         if not object_type or object_type not in obj_by_id:
-            raise ApiError("VALIDATION_ERROR", "CSV 上传必须指定 object_type 或文件名可推断对象类型", http_status=422)
+            raise ApiError(
+                "VALIDATION_ERROR",
+                "CSV 上传需指定 object_type（查询参数 ?object_type=<对象id> 或表单字段 object_type 均可），"
+                "或将文件名命名为对象 id/名称以便推断",
+                http_status=422,
+                suggestion="curl -F 'file=@orders.csv' -F 'object_type=Order' 'http://<host>/api/ingest/upload-smart?project_id=<项目>&ontology_id=<本体id>'",
+            )
         content = (await file.read()).decode("utf-8-sig")
         obj = obj_by_id[object_type]
         import csv
@@ -634,8 +693,11 @@ async def upload_instances_smart(
 
 
 @router.post("/preview")
-def preview(payload: IngestPreviewRequest, request: Request, project_id: str = Depends(project_id_param)):
+def preview(payload: IngestPreviewRequest, request: Request, project_id: str = Depends(project_id_param),
+            object_type: str | None = Query(default=None, description="GAP-06：object_type 双通道——body 未给时回退本查询参数")):
     ensure_project_access(request, project_id)  # V2-06：租户隔离
+    if not payload.object_type and object_type:
+        payload.object_type = object_type  # GAP-06：query 通道兜底（body 优先）
     ontology = _load_ontology(payload.ontology_id, project_id)
     ensure_schema_visible(request, project_id, ontology)
     biz_errors = blocking_violations(ontology)
@@ -669,6 +731,7 @@ def preview(payload: IngestPreviewRequest, request: Request, project_id: str = D
 
 @router.get("/candidates")
 def list_candidates(
+    request: Request,
     project_id: str = Depends(project_id_param),
     namespace: str | None = None,
     ontology_id: str | None = None,
@@ -676,6 +739,8 @@ def list_candidates(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100, alias="pageSize"),
 ):
+    # GAP-06：别名兼容——page_size（pageSize 别名）、offset（page 别名）
+    page, page_size = merge_pagination_aliases(request, page, page_size, max_page_size=100)
     page, page_size = parse_pagination(page, page_size)
     items = _store_for(project_id).all()
     if namespace:
@@ -895,6 +960,47 @@ def approve_candidate(request: Request, candidate_id: str, project_id: str = Dep
     return success(result)
 
 
+@router.post("/model-gaps/fix")
+def fix_model_gaps(payload: FixModelGapsRequest, request: Request, project_id: str = Depends(project_id_param)):
+    """GAP-05：一键修复模型缺口并重发布（内部复用 changesets 兼容变更管线）。
+
+    - 只执行兼容修复：新增可选属性 / 补枚举值 / 放宽约束（pattern、长度、数值区间、required）
+      → 经 submit_changeset 自动升小版本并直接发布（与人工变更同一版本/审计通道）；
+    - 不兼容项（如类型变更）不自动执行，在 skipped 中返回说明；
+    - 成功后前端可重新审批候选或重新上传，继续导入。
+    """
+    from api.router_changesets import _published_base, _require_ontology, submit_changeset
+    from model_gap import apply_gaps_to_model
+    from schemas.changesets import ChangesetCreate
+    from schemas.ontology import OntologyCreate
+
+    ensure_project_access(request, project_id)
+    rec = _require_ontology(project_id, payload.ontology_id)
+    ensure_schema_write(request, project_id, rec)
+    if rec.get("status") != "active":
+        raise ApiError("MODEL_GAP_MANUAL",
+                       f"本体未处于已发布（active）状态（当前 {rec.get('status')}），无法走兼容变更通道，"
+                       f"请在本体建模页直接编辑后重新导入",
+                       http_status=422, details={"reason": "not_active", "status": rec.get("status")})
+
+    base_model, _base_version = _published_base(rec)
+    new_model, applied, skipped = apply_gaps_to_model(base_model, payload.object_type, payload.gaps)
+    if not applied:
+        raise ApiError("MODEL_GAP_NOOP",
+                       "没有可自动执行的兼容修复（可能全部为需人工处理项，或修复已生效）",
+                       http_status=422, details={"skipped": skipped})
+
+    model_kwargs = {k: v for k, v in new_model.items() if k in OntologyCreate.model_fields}
+    cs_req = ChangesetCreate(model=OntologyCreate(**model_kwargs),
+                             note=payload.note or "一键修复模型缺口（自动导入）")
+    resp = submit_changeset(payload.ontology_id, cs_req, request, project_id=project_id)
+    body = json.loads(resp.body)
+    data = dict(body.get("data") or {})
+    data["applied"] = applied
+    data["skipped"] = skipped
+    return success(data, http_status=resp.status_code)
+
+
 @router.post("/candidates/{candidate_id}/reject")
 def reject_candidate(request: Request, candidate_id: str, project_id: str = Depends(project_id_param)):
     ensure_project_access(request, project_id)  # V2-06：租户隔离
@@ -1072,13 +1178,31 @@ def list_instances(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200, alias="pageSize"),
 ):
+    # GAP-06：别名兼容——page_size（pageSize 别名）、offset（page 别名）
+    page, page_size = merge_pagination_aliases(request, page, page_size, max_page_size=200)
     page, page_size = parse_pagination(page, page_size)
     # 过滤下推到存储层并在【全量】结果上统计 total：
     # 不再先 all()（历史 bug：截断到前 1000 条）再本地过滤——那样 object_type 命中的记录若不在
     # 截断快照里就恒为 0。object_type 走专用参数只读对应 jsonl 文件；ontology_id 走 filters 精确匹配。
     store = _instance_store_for(project_id)
-    filters = {"ontology_id": ontology_id} if ontology_id else None
-    items = store.find(object_type=object_type, filters=filters, limit=None)
+    # GAP-17：读路径改全量只读快照＋排序视图缓存（聚合签名缓存，免每请求物化/排序 5 万条）；
+    # 过滤/分页均为只读操作，annotate_rows/mask_instance_content 返回新 dict 不污染缓存
+    _ver, snap = store.snapshot()
+    skey = (_ver, ontology_id or "", object_type or "", namespace or "")
+    items = _SORTED_VIEW.get(skey)
+    if items is None:
+        if ontology_id or object_type or namespace:
+            allowed = set(_namespace_ontology_ids(project_id, namespace)) if namespace else None
+            items = [it for it in snap
+                     if (not ontology_id or it.get("ontology_id") == ontology_id)
+                     and (not object_type or it.get("object_type") == object_type)
+                     and (allowed is None or it.get("ontology_id") in allowed)]
+        else:
+            items = snap
+        items.sort(key=lambda x: x.get("imported_at") or "", reverse=True)
+        if len(_SORTED_VIEW) > 16:
+            _SORTED_VIEW.clear()
+        _SORTED_VIEW[skey] = items
     if namespace:
         allowed = set(_namespace_ontology_ids(project_id, namespace))
         items = [it for it in items if it.get("ontology_id") in allowed]
@@ -1101,12 +1225,13 @@ def list_instances(
                 it = mask_instance_content(it)
             visible_items.append(it)
         items = visible_items
-    items.sort(key=lambda x: x.get("imported_at") or "", reverse=True)
+    # 排序已由缓存视图完成（保序过滤）；这里不得再就地 sort——items 在 auth 关闭时
+    # 是共享缓存列表（并发 sort 会数据竞争，GAP-17 压测教训）
     total = len(items)
     start = (page - 1) * page_size
     # V2-02（M4-A①）：联邦渠道行加 content_mode 标记（不逐行回源，详情页按需取内容值）
     import content_access
-    page_items = content_access.annotate_rows(project_id, items[start: start + page_size])
+    page_items = content_access.annotate_rows(project_id, [dict(it) for it in items[start: start + page_size]])
     return success(list_payload(page_items, total, page, page_size))
 
 
@@ -1220,9 +1345,11 @@ def update_instances_batch(
     project_id: str = Depends(project_id_param),
     reason: str | None = Query(default=None),
     strict_fields: bool = Query(default=False),
+    replace: bool = Query(default=False, description="GAP-01：true=逐条显式整体替换（强制严格校验）；默认 false=差量更新（空值字段保留原值），与单条 PUT 语义一致"),
     defer_rdf_sync: bool = Query(default=False),
 ):
-    """HF-02：批量更新，末尾只做一次 RDF 同步；defer_rdf_sync=true 时交给
+    """HF-02 + GAP-01：批量更新（默认差量，replace=true 显式整体替换）；
+    末尾只做一次 RDF 同步；defer_rdf_sync=true 时交给
     `POST /api/graph/{ontology_id}/rdf-sync` 显式触发（该端点已存在）。"""
     items = payload.get("items")
     if not isinstance(items, list) or not items:
@@ -1234,6 +1361,7 @@ def update_instances_batch(
     touched: set[str] = set()
     stale_marked = 0
     stale_by_instance: dict[str, dict] = {}
+    preserved_total = 0
     for item in items:
         iid = item.get("id") if isinstance(item, dict) else None
         new_instance = item.get("instance") if isinstance(item, dict) else None
@@ -1244,18 +1372,37 @@ def update_instances_batch(
         if not rec:
             errors.append({"id": iid, "error": "实例不存在"})
             continue
+        before = copy.deepcopy(rec.get("instance") or {})
+        # GAP-01：与单条 PUT 一致的差量/整体替换语义
+        if replace:
+            merged = dict(new_instance)
+            preserved_keys: list[str] = []
+        else:
+            merged = dict(before)
+            preserved_keys = []
+            for k, v in new_instance.items():
+                if v is None or v == "" or v == []:
+                    if k in merged:
+                        preserved_keys.append(k)
+                    continue
+                merged[k] = v
         try:
             _ensure_instance_write(request, project_id, rec)
-            warnings = _validate_for_update(store, project_id, rec, new_instance, strict_fields)
+            warnings = list(_validate_for_update(
+                store, project_id, rec, merged, strict_fields or replace))
         except ApiError as e:
             errors.append({"id": iid, "error": e.message})
             continue
-        before = copy.deepcopy(rec.get("instance") or {})
-        rec["instance"] = new_instance
+        if preserved_keys:
+            warnings.append("GAP-01 差量模式：空值字段保留原值（未覆盖）: "
+                            + ", ".join(sorted(preserved_keys)))
+        rec["instance"] = merged
         rec["updated_at"] = _now()
         store.update(iid, rec)
-        _write_change_log(project_id, rec, before, new_instance,
-                          item.get("reason") or reason, operator, "BATCH", warnings)
+        _write_change_log(project_id, rec, before, merged,
+                          item.get("reason") or reason, operator,
+                          "BATCH/replace" if replace else "BATCH", warnings)
+        preserved_total += len(preserved_keys)
         stale_info = _invalidate_capability_results(project_id, iid)
         stale_marked += int(stale_info.get("marked") or 0)
         if stale_info.get("marked"):
@@ -1270,6 +1417,8 @@ def update_instances_batch(
         "updated": len(updated),
         "ids": updated,
         "errors": errors,
+        "replace_mode": bool(replace),
+        "preserved_fields_total": preserved_total,
         "rdf_sync_deferred": defer_rdf_sync,
         "ontologies_synced": [] if defer_rdf_sync else sorted(touched),
         "stale_marked": stale_marked,
@@ -1285,9 +1434,11 @@ def update_instance(
     project_id: str = Depends(project_id_param),
     reason: str | None = Query(default=None),
     strict_fields: bool = Query(default=False),
+    replace: bool = Query(default=False, description="GAP-01：true=显式整体替换（清空请求体未携带字段并强制严格校验）；默认 false=差量更新（仅覆盖本次非空字段，空值字段保留原值）"),
     defer_rdf_sync: bool = Query(default=False),
 ):
-    """HF-01/02：整体替换前走统一校验 + 字段审计；默认单实例增量 RDF 同步。"""
+    """HF-01/02 + GAP-01：默认差量更新（不清空未携带字段，避免「改一个字段清空其他字段」）；
+    replace=true 为显式整体替换（强制严格校验）。字段审计与单实例增量 RDF 同步同前。"""
     store = _instance_store_for(project_id)
     rec = store.get(instance_id)
     if not rec:
@@ -1297,21 +1448,43 @@ def update_instance(
     new_instance = payload.get("instance")
     if not isinstance(new_instance, dict):
         raise ApiError("VALIDATION_ERROR", "instance 必须是对象", http_status=422)
-    warnings = _validate_for_update(store, project_id, rec, new_instance, strict_fields)
 
     before = copy.deepcopy(rec.get("instance") or {})
-    rec["instance"] = new_instance
+    preserved_keys: list[str] = []
+    if replace:
+        merged = dict(new_instance)
+    else:
+        # GAP-01 差量模式：空值字段（None/空串/空数组）保留原值，仅覆盖非空字段
+        merged = dict(before)
+        for k, v in new_instance.items():
+            if v is None or v == "" or v == []:
+                if k in merged:
+                    preserved_keys.append(k)
+                continue
+            merged[k] = v
+    # replace 模式强制严格校验（显式整体替换属高风险操作）
+    warnings = list(_validate_for_update(store, project_id, rec, merged,
+                                         strict_fields or replace))
+    if preserved_keys:
+        warnings.append("GAP-01 差量模式：空值字段保留原值（未覆盖）: "
+                        + ", ".join(sorted(preserved_keys)))
+
+    rec["instance"] = merged
     rec["updated_at"] = _now()
     store.update(instance_id, rec)
     stale_info = _invalidate_capability_results(project_id, instance_id)
     if not defer_rdf_sync:
         _sync_rdf(project_id, rec.get("ontology_id"), instance_id=instance_id)
     operator = (getattr(request.state, "auth_user", None) or {}).get("username", "api")
-    _write_change_log(project_id, rec, before, new_instance, reason, operator, "PUT", warnings)
-    logger.info("update_instance id=%s project_id=%s", instance_id, project_id)
+    _write_change_log(project_id, rec, before, merged, reason, operator,
+                      "PUT/replace" if replace else "PUT", warnings)
+    logger.info("update_instance id=%s project_id=%s replace=%s preserved=%s",
+                instance_id, project_id, replace, preserved_keys or "-")
     return success({
         **rec,
         "warnings": warnings,
+        "replace_mode": bool(replace),
+        "preserved_keys": sorted(preserved_keys),
         "rdf_sync_deferred": defer_rdf_sync,
         "stale_marked": stale_info.get("marked", 0),
         "affected_capabilities": stale_info.get("capabilities", []),
@@ -1364,14 +1537,17 @@ def patch_instance(
 @router.get("/instances/{instance_id}/change-logs")
 def list_instance_change_logs(
     instance_id: str,
+    request: Request,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200, alias="pageSize"),
     project_id: str = Depends(project_id_param),
 ):
     """HF-01：查询某实例的字段级变更审计。"""
+    # GAP-06：别名兼容——page_size（pageSize 别名）、offset（page 别名）
+    page, page_size = merge_pagination_aliases(request, page, page_size, max_page_size=200)
+    page, page_size = parse_pagination(page, page_size)
     rows = [r for r in _change_log_store(project_id).all() if r.get("instance_id") == instance_id]
     rows.sort(key=lambda r: r.get("ts") or "", reverse=True)
-    page, page_size = parse_pagination(page, page_size)
     start = (page - 1) * page_size
     return success(list_payload(rows[start: start + page_size], len(rows), page, page_size))
 

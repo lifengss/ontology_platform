@@ -24,6 +24,16 @@ def _store_for(project_id: str) -> JsonStore:
     return JsonStore("ontologies", project_id=project_id)
 
 
+def _instance_store_for(project_id: str):
+    from core.instance_store import get_instance_store
+
+    return get_instance_store(project_id=project_id)
+
+
+# GAP-17/19：图谱响应缓存（见 graph_data 注释）
+_GRAPH_CACHE: dict[tuple, dict] = {}
+
+
 @router.get("/graph/{ontology_id}")
 def graph_data(
     ontology_id: str,
@@ -36,7 +46,51 @@ def graph_data(
     if not rec:
         raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
     ensure_schema_visible(request, project_id, rec)
-    return success(_viz.graph_data(ontology_id, rec, mode=mode, project_id=project_id, max_instances=max_instances))
+    # GAP-17/19：图谱响应缓存——实例数据版本（快照聚合签名）或本体 updated_at 变化即失效；
+    # 大图（5 万实例）graph_data 全量构造 ~秒级，缓存命中 O(1)（数据 dict 只读，序列化不改写）
+    _ver, _snap = _instance_store_for(project_id).snapshot()
+    gkey = (project_id, ontology_id, mode, max_instances, _ver, rec.get("updated_at"))
+    hit = _GRAPH_CACHE.get(gkey)
+    if hit is not None:
+        return success(hit)
+    data = _viz.graph_data(ontology_id, rec, mode=mode, project_id=project_id, max_instances=max_instances)
+    if len(_GRAPH_CACHE) > 8:
+        _GRAPH_CACHE.clear()
+    _GRAPH_CACHE[gkey] = data
+    return success(data)
+
+
+@router.get("/graph/{ontology_id}/neighbors")
+def graph_neighbors(
+    ontology_id: str,
+    request: Request,
+    node_id: str = Query(..., min_length=1, description="焦点节点 id（对象 id 或实例 id）"),
+    mode: str = Query(default="schema", pattern="^(schema|knowledge)$"),
+    depth: int = Query(default=1, ge=1, le=2, description="对象关系 BFS 层级（1~2）"),
+    limit: int = Query(default=50, ge=0, le=200, description="实例邻居抽样上限，0=不截断"),
+    project_id: str = Depends(project_id_param),
+):
+    """按需邻居查询（GAP-12）：大图不一次拉全图，前端双击节点增量展开。"""
+    rec = _store_for(project_id).get(ontology_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    ensure_schema_visible(request, project_id, rec)
+    data = _viz.neighbors(ontology_id, rec, node_id, mode=mode, project_id=project_id, depth=depth, limit=limit)
+    if data is None:
+        raise ApiError("NOT_FOUND", "节点不存在", http_status=404)
+    return success(data)
+
+
+@router.get("/graph/{ontology_id}/consistency")
+def graph_consistency(ontology_id: str, request: Request, project_id: str = Depends(project_id_param)):
+    """GAP-15：本地 TTL 与模型/实例数据一致性对账（轻量 mtime 对比；后台对账循环自动修复漂移）。"""
+    from jena_adapter import rdf_sync
+
+    rec = _store_for(project_id).get(ontology_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "本体不存在", http_status=404)
+    ensure_schema_visible(request, project_id, rec)
+    return success(rdf_sync.check_consistency(project_id, ontology_id))
 
 
 def _inference_trace_response(ontology_id: str, rec: dict[str, Any], focus: str | None = None,

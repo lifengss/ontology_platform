@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query, Request
 
+from core.last_project import get_last_project
 from core.project_store import ProjectStore
 from core.responses import ApiError, list_payload, parse_pagination, success
 from logging_setup import get_logger
@@ -58,7 +59,15 @@ def list_projects(
             st = _store.stats(rec["id"])
             rec["stats"] = st
             rec["mcp_published"] = mcp.server_active(rec["id"])
-    return success(list_payload(page_items, total, page, page_size))
+    data = list_payload(page_items, total, page, page_size)
+    # GAP-07：当前身份的默认项目（最近使用且可读 → 该 id；否则 null）
+    last = get_last_project((user or {}).get("id"))
+    if last:
+        from api.dependencies import _project_readable  # 懒导入：依赖层与路由层互不顶层耦合
+        if not _project_readable(request, last):
+            last = None
+    data["default_project"] = last
+    return success(data)
 
 
 @router.get("/{project_id}")
@@ -153,6 +162,47 @@ def promote_to_shared(project_id: str, ontology_id: str = Query(...)):
         "project_id": project_id,
         "ontology_id": ontology_id,
     })
+
+
+@router.post("/{project_id}/seed-example", status_code=201)
+def seed_example_project(request: Request, project_id: str):
+    """GAP-13 示例项目一条龙：为项目预置示例本体（内置约束示范模板）＋示例实例（每对象 3 条）。
+
+    - 本体经 create_ontology 走与人工建模相同通道（业务校验/审计/RDF 同步），落为 draft；
+    - 幂等保护：项目已有本体时 409（避免重复种导致用户数据混淆）；
+    - 实例经 InstanceStore 直插（与 CSV 入库记录同构，source=example_seed 便于溯源筛选）。
+    """
+    ensure_project_access(request, project_id)
+    rec = _store.get(project_id)
+    if not rec:
+        raise ApiError("NOT_FOUND", "项目不存在", http_status=404)
+    if rec.get("status") == "archived":
+        raise ApiError("BAD_REQUEST", "归档项目不能填充示例数据", http_status=400)
+    from api.router_ontologies import _store_for as _onto_store_for, create_ontology
+    from core.instance_store import get_instance_store
+    from example_seed import build_example_instances, find_builtin_template
+
+    tpl = find_builtin_template()
+    if not tpl:
+        raise ApiError("NOT_FOUND", "内置示例模板不存在", http_status=404)
+    if _onto_store_for(project_id).all():
+        raise ApiError("EXAMPLE_EXISTS", "该项目已存在本体，示例数据仅向空项目提供（新建空项目即可一键体验）", http_status=409)
+    from schemas.ontology import OntologyCreate
+    response = create_ontology(OntologyCreate(**tpl["model"]), request=request, project_id=project_id, namespace=None)
+    import json as _json
+    ontology = _json.loads(response.body.decode("utf-8")).get("data") or {}
+    records = build_example_instances(ontology)
+    store = get_instance_store(project_id)
+    for r in records:
+        store.insert(r)
+    logger.info("seed_example project_id=%s ontology_id=%s instances=%d", project_id, ontology.get("id"), len(records))
+    return success({
+        "ontology_id": ontology.get("id"),
+        "ontology_name": ontology.get("name"),
+        "objects": len(ontology.get("objects") or []),
+        "instances": len(records),
+        "template_id": tpl["id"],
+    }, http_status=201)
 
 
 def get_project_store() -> ProjectStore:

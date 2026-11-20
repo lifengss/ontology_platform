@@ -21,14 +21,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pytest  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
+from _authenv import auth_module_guard  # noqa: E402
 from core.instance_store import JsonlInstanceStore  # noqa: E402
 from core.storage import JsonStore  # noqa: E402
 from core.trace import (  # noqa: E402
     TraceBuilder, record_trace, _trace_store, TYPE_DATA_FETCH, TYPE_ACTION,
 )
 from main import app  # noqa: E402
+
+pytestmark = pytest.mark.auth
+_guard = auth_module_guard()  # GAP-20：模块边界隔离鉴权环境（本模块含 TC-22-05 鉴权用例）
 
 PID = "v222-trace"
 P = {"project_id": PID}

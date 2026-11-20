@@ -36,15 +36,17 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from api.dependencies import project_id_param
 import audit as audit_svc
 import content_access
 import tenant
 from core.instance_store import get_instance_store
-from core.responses import ApiError, list_payload, parse_pagination, success
+from core.responses import ApiError, list_payload, merge_pagination_aliases, parse_pagination, success
 from core.storage import JsonStore
 from jena_adapter.client import graph_uri_for, sparql_query
+import jena_adapter.client as jena_client
 from logging_setup import get_logger
 
 logger = get_logger("router_query")
@@ -56,7 +58,48 @@ SPARQL_DEFAULT_LIMIT = 1000
 SPARQL_MAX_LIMIT = 5000
 GRAPHQL_DEFAULT_LIMIT = 20
 GRAPHQL_MAX_LIMIT = 200
+
+# GAP-17：SPARQL 语法校验结果缓存（query_text → (ok, err_msg)）；同串免重复 parse。
+_SPARQL_VALIDATE_CACHE: dict[str, tuple[bool, str]] = {}
+_VALIDATE_CACHE_MAX = 1000
 GRAPHQL_MAX_OFFSET = 10000
+
+
+# ---------------------------------------------------------------- GAP-03：查询引擎配置
+class _QueryEngineIn(BaseModel):
+    engine: str
+
+
+def _query_engine_state() -> dict[str, Any]:
+    engine, source = jena_client.get_query_config()
+    return {
+        "engine": engine,
+        "source": source,
+        "options": list(jena_client.QUERY_ENGINES),
+        "default": "local",
+        "fuseki_reachable": jena_client._is_reachable(),
+        "cache_ttl_seconds": jena_client.QUERY_CACHE_TTL,
+    }
+
+
+@router.get("/engine")
+def get_query_engine(request: Request):
+    """GAP-03：当前查询引擎状态（运行时配置 > 环境变量 > 缺省 local 本地快路径）。"""
+    return success(_query_engine_state())
+
+
+@router.put("/engine")
+def set_query_engine(payload: _QueryEngineIn, request: Request):
+    """GAP-03：运行时切换查询引擎（local=本地快路径 / fuseki=远端图数据库）。"""
+    try:
+        jena_client.set_query_engine(payload.engine)
+    except ValueError as e:
+        raise ApiError(
+            "VALIDATION_ERROR", str(e), http_status=422,
+            message_zh="查询引擎取值无效",
+            suggestion=f"请从以下值中选择：{' / '.join(jena_client.QUERY_ENGINES)}",
+        )
+    return success(_query_engine_state())
 
 # ---- 数据边界文案（INV-5） ----
 BOUNDARY_HINT_FEDERATED = (
@@ -134,14 +177,24 @@ def _validate_sparql(query_text: str) -> None:
 
     from rdflib.plugins.sparql.parser import parseQuery  # 延迟导入，失败不拖累模块加载
 
+    # GAP-17：语法校验结果缓存（同一查询串重复校验不重复 parse——压测显示串行 parseQuery
+    # 是高并发下 P95 的主要来源；查询串有限集，>1000 条整体清空防泄漏）
+    cached = _SPARQL_VALIDATE_CACHE.get(query_text)
+    if cached:
+        if not cached[0]:
+            raise ApiError("QUERY_SYNTAX_ERROR", cached[1], http_status=422)
+        return
     try:
-        parsed = parseQuery(query_text)
+        # GAP-17：pyparsing 并发解析 bug 规避——与 jena_adapter.client 的查询执行共用同一把锁
+        with jena_client._SPARQL_LOCK:
+            parsed = parseQuery(query_text)
+        if len(_SPARQL_VALIDATE_CACHE) >= _VALIDATE_CACHE_MAX:
+            _SPARQL_VALIDATE_CACHE.clear()
+        _SPARQL_VALIDATE_CACHE[query_text] = (True, "")
     except Exception as e:  # pyparsing.exceptions.ParseException
-        raise ApiError(
-            "QUERY_SYNTAX_ERROR",
-            "SPARQL 语法错误: " + " ".join(str(e).split())[:300],
-            http_status=422,
-        )
+        msg = "SPARQL 语法错误: " + " ".join(str(e).split())[:300]
+        _SPARQL_VALIDATE_CACHE[query_text] = (False, msg)
+        raise ApiError("QUERY_SYNTAX_ERROR", msg, http_status=422)
     body = parsed[1] if len(parsed) > 1 else parsed
     name = getattr(body, "name", None) or ""  # CompValue.name: SelectQuery/AskQuery/...
     if name != "SelectQuery":
@@ -319,6 +372,8 @@ def query_instances(request: Request,
     conditions = _parse_filter(filter)
     recs = _iter_ontology_instances(project_id, ontology_id, object_type, conditions)
     rows = [_build_row(project_id, user, ont, rec) for rec in recs]
+    # GAP-06：别名兼容——page_size（pageSize 别名）、offset（page 别名）
+    page, pageSize = merge_pagination_aliases(request, page, pageSize, max_page_size=200)
     p, ps = parse_pagination(page, pageSize)
     total = len(rows)
     paged = rows[(p - 1) * ps: (p - 1) * ps + ps]

@@ -29,6 +29,8 @@ from datetime import datetime
 
 from rdflib import OWL, RDFS, RDF, Graph, URIRef
 
+import perf
+
 from config import get_settings
 from logging_setup import get_logger
 from modeling_translator import attr_uri, rel_uri, translate_to_turtle
@@ -358,6 +360,7 @@ def run_inference(ontology: dict, project_id: str, ontology_id: str,
             data = _fuseki_pipeline(ontology, project_id, ontology_id, focus,
                                     base_url, dataset, timeout)
             data["elapsed_ms"] = int((time.monotonic() - t0) * 1000)
+            perf.record("reasoning_remote", data["elapsed_ms"] / 1000)
             data.update({"engine": "fuseki", "requested_engine": "fuseki",
                          "degraded": False, "degrade_reason": None, "hint_zh": None})
             return data
@@ -368,6 +371,8 @@ def run_inference(ontology: dict, project_id: str, ontology_id: str,
 
     t0 = time.monotonic()
     steps = inference_trace(ontology, focus)
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    perf.record("reasoning_local", elapsed_ms / 1000)
     return {
         "engine": "local",
         "requested_engine": "fuseki" if requested == "fuseki" else "local",
@@ -375,7 +380,7 @@ def run_inference(ontology: dict, project_id: str, ontology_id: str,
         "degrade_reason": degrade_reason if requested == "fuseki" else None,
         "hint_zh": _DEGRADE_HINT_ZH if requested == "fuseki" else None,
         "steps": steps,
-        "elapsed_ms": int((time.monotonic() - t0) * 1000),
+        "elapsed_ms": elapsed_ms,
         "graph": None,
         "remote": None,
     }

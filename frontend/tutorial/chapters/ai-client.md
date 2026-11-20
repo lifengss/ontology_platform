@@ -1,61 +1,55 @@
 # 在 AI 平台调用
 
-> **学习目标**：把平台 MCP 接入 AI 客户端（以 WorkBuddy 为例），理解两种接入方式（HTTP / 本地 stdio bridge）与「防假连通」验证方法。
+> **学习目标**：把已发布的 MCP 接入真实 AI 客户端（WorkBuddy 本地 stdio / Agent 平台 HTTP 直连），让 AI 用**结构化事实**回答业务问题，而不是靠训练数据猜。
 
-## 1. 两种接入方式
+## 1. 两条接入路径
 
-| 方式 | 形态 | 适用 |
+| 路径 | 适用 | 说明 |
 |---|---|---|
-| **HTTP（streamableHttp）** | 端点 `http://localhost:8000/mcp/{项目id}` + `Authorization: Bearer <token>` | 通用 MCP 客户端 |
-| **本地 stdio bridge** | 本地 Python 进程 `backend/mcp_stdio_bridge_v2.py` 转接 | WorkBuddy 等**把 HTTP MCP 一律当 OAuth 型**的客户端 |
+| **本地 stdio bridge**（WorkBuddy） | 本地 AI 助手 | WorkBuddy 把 HTTP MCP 一律当 OAuth 型 → 用本地桥 `backend/mcp_stdio_bridge_v2.py --project <项目id>` 转 stdio |
+| **HTTP 直连**（Agent 平台） | 企业 Agent 平台 / 脚本验收 | 直接 JSON-RPC 调 `/mcp/{项目id}`，带 Bearer token |
 
-## 2. WorkBuddy 为什么用 stdio bridge
+## 2. WorkBuddy（本地 stdio）
 
-- WorkBuddy 的连接器 UI 会把远程/自定义 HTTP MCP 一律当作 **OAuth 型**（出现「连接/授权中…」按钮），而平台不提供 `.well-known/*` 授权发现 → 用连接器 UI 直连 HTTP 会卡在「需要认证/授权中」；
-- **正确做法**：本地 stdio bridge 绕开 OAuth 判定（官方推荐本机开发用）。
-
-在 WorkBuddy 的无点 `~/.workbuddy/mcp.json` 添加：
+- `~/.workbuddy/mcp.json` 配 stdio 连接器：
 
 ```json
-{"mcpServers": {"成本核算模型": {
-    "type": "stdio",
-    "command": "C:\\Users\\lif_lc\\AppData\\Local\\Programs\\Python\\Python310\\python.exe",
-    "args": ["-X", "utf8", "D:\\self_coding\\ontology_platform\\backend\\mcp_stdio_bridge_v2.py",
-             "--project", "<项目id>"],
-    "timeout": 180000,
-    "disabled": false
-}}}
+{
+  "mcpServers": {
+    "ontology": {
+      "command": "python",
+      "args": ["backend/mcp_stdio_bridge_v2.py", "--project", "<项目id>"]
+    }
+  }
+}
 ```
 
-- `--project` 传项目 ID，**换项目只改 args，脚本不用改**；
-- **不要写 `env`**：stdio 配置写 `env` 会整体替换 Node spawn 环境、丢 `SystemRoot`，Windows 下 Python 报 `WinError 10106`；
-- 服务器部署时，把 bridge 顶部的 `HOST, PORT` 指向服务器即可。
+- 重启 WorkBuddy → 问「项目里有哪些机型？」「某实例的 E/K/N/O/S 各是多少？」——答案来自 `ontology_query`/`instance_get`/`capability_call`，可追溯。
 
-## 3. 验证是否真正接入成功（防假连通）
+## 3. Agent 平台 HTTP 直连（V2.0 核验方式）
 
-用**模型不可能凭训练数据知道**的问题验证，返回真实数据即通。案例：「有多少种机型？按 U 数分组」：
+四步走通：
 
-```
-ontology_query() 空参          → 已发布清单（「维保服务产品成本模型」17 对象）
-ontology_query(query="machine_model") → 命中 obj_machine_model（3 属性）
-instance_get(object_type=obj_machine_model, limit=200) → total:53
-按 attr_u_height 分组          → 1U=14 / 2U=32 / 4U=7，合计 53
-```
+1. `initialize`（请求带 Bearer token）→ 响应头取 **`Mcp-Session-Id`**，后续请求都带回；
+2. `tools/list` → 应见 9 个工具（第 16 章清单）；
+3. `tools/call capability_call`：`{capability: "cap_total_o", instance_id: <record_id>, inputs: {...}, dry_run: true}`；
+4. 读返回：**value + 溯源四要素**（能力版本/输入维度/lookup 命中/计算值），`execution_channel = mcp`。
 
-结果与平台内图谱/自然语言查询一致，即确认接入成功。
+**V2.0 案例实测**：`cap_total_o` 返回 **`209.8305397`**，与《成本核算逻辑.xlsx》结果表 **209.8305 精确一致**——证明「从 Agent 平台取数 + 能力核算」全链路可用（完整过程见第 20 章）。
 
-## ⚠️ 常见坑（排障表）
+## ⚠️ 常见坑
 
-| 现象 | 原因 | 处理 |
-|---|---|---|
-| WorkBuddy 卡「授权中」 | 连接器把 HTTP 当 OAuth | 改 stdio bridge（本文 §2） |
-| `WinError 10106` | mcp.json 写了 `env` | 删掉 `env` 字段 |
-| `NOT_PUBLISHED` | `ontology_id` 传了名称 | 用 32 位 hex ID |
-| 401 | token 错/被轮换 | 重新生成 token 并更新配置 |
-| 改了配置不生效 | stdio 子进程长驻 | **完全退出并重启客户端**（停用→启用不够） |
+- **首次调用 503「MCP 端点启动中」**：轮询重试（每 2s，1~3 次）；
+- **token 轮换**：客户端要完全重启（WorkBuddy）/ 更新 Authorization 头（Agent 平台）；
+- **inputs 必须传全**：漏传键会回退实例已存值（第 15 章坑⑤），批量核验时静默失真；
+- 问数结果与平台页面查数对不上 → 先确认两边查的是**同一项目、同一本体版本**。
 
 ## ✅ 本章自检
 
-- [ ] 能配好 stdio bridge 并接入 WorkBuddy
-- [ ] 会用"训练数据不可能知道的问题"验证真实连通
-- [ ] 知道 token 轮换后必须完全重启客户端
+- [ ] 能配 WorkBuddy stdio 桥并让 AI 问出结构化事实
+- [ ] 能走完 Agent 平台四步（initialize→tools/list→tools/call→读溯源）
+- [ ] 能处理 503 启动中与 token 轮换
+
+## 下一步
+
+- 案例里怎么用它做全量核验（26 行逐行比对）→ 第 20 章

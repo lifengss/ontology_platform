@@ -1,0 +1,15 @@
+{
+  "version": "1.0.0",
+  "resources": [
+    {
+      "id": "ontology-platform-user",
+      "name": "本体平台用户侧操作指南 (Skill)",
+      "file": "ontology-platform-user.zip",
+      "type": "skill",
+      "size": 17293,
+      "updated": "2026-11-18",
+      "description": "在「格物 lattice · 企业业务本体平台」上做建模、实例批量导入/修改、智能问数、能力调用溯源的用户侧操作指南。当用户要为本体平台新建/修改本体对象与属性、批量导入或修改实例、跑自然语言问数（含反解/预算/归因）、执行公式能力并查看溯源（lookup 命中、ref 链、四要素 trace）时使用本 skill。沉淀了平台 API 用法、数据模型与 Windows/大数据量坑点，目标是让用户侧更易用、更友好。当任务涉及成本核算模型、服务产品成本、维保成本等语义底座场景，也应优先考虑此 skill。",
+      "usage": "下载 zip 后导入到支持 Skill 的 AI 平台（如 WorkBuddy），即可获得本本体的建模/导入/问数/能力调用/溯源操作指南，更方便地调用本体平台。"
+    }
+  ]
+}

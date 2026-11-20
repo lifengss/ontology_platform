@@ -111,6 +111,16 @@ class McpClient:
     def __init__(self) -> None:
         self.settings = get_settings()
 
+    def _source_timeout(self, config: dict[str, Any]) -> int:
+        """GAP-16：按源超时——连接可配 timeout_seconds 覆盖全局 mcp_timeout_seconds（缺省不变）。"""
+        try:
+            v = int(float(config.get("timeout_seconds") or 0))
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+        return self.settings.mcp_timeout_seconds
+
     def test_connection(self, config: dict[str, Any]) -> dict[str, Any]:
         """连通性测试（含鉴权握手）。"""
         transport = config.get("transport")
@@ -171,7 +181,7 @@ class McpClient:
 
         def call():
             try:
-                with urllib.request.urlopen(req, timeout=self.settings.mcp_timeout_seconds) as resp:  # noqa: S310
+                with urllib.request.urlopen(req, timeout=self._source_timeout(config)) as resp:  # noqa: S310
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
                 if e.code in (401, 403):

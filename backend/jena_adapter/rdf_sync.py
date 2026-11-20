@@ -6,19 +6,22 @@
 
 查询侧配套：client._sparql_remote 用 _wrap_graph_filter 把查询限定到对应命名图。
 触发点：本体创建/更新/对象编辑/LLM 补全（router_ontologies）、实例审批/修改/删除
-（router_ingest）、手动回填 POST /api/graph/{id}/rdf-sync、全量回填 scripts/sync_rdf_all.py。
+（router_ingest）、**导入审批落库（ingestion.approve，GAP-15 自动触发）**、
+手动回填 POST /api/graph/{id}/rdf-sync、全量回填 scripts/sync_rdf_all.py、
+**后台定期对账 consistency_loop（GAP-15：TTL 落后自动重建同步＋告警）**。
 """
 from __future__ import annotations
 
 import os
 import urllib.request
+from datetime import datetime
 
 from rdflib import Graph, Literal, RDF, RDFS, URIRef
 
 from config import get_settings
 from core.instance_store import JsonlInstanceStore
 from core.storage import JsonStore
-from jena_adapter.client import FILE_MODE, REMOTE_MODE, _is_reachable
+from jena_adapter.client import FILE_MODE, REMOTE_MODE, _is_reachable, local_ttl_path, write_local_ttl
 from logging_setup import get_logger
 from modeling_translator import attr_uri, class_uri, rel_uri, translate_to_turtle, typed_literal
 
@@ -113,7 +116,12 @@ def _replace_named_graph(graph_uri: str, nt_triples: str) -> None:
 
 
 def sync_ontology(project_id: str, ontology_id: str) -> dict:
-    """重建本体全量图并写入 RDF 存储。返回同步摘要。"""
+    """重建本体全量图并写入 RDF 存储。返回同步摘要。
+
+    GAP-03/GAP-15 双写：本地 TTL 文件**始终**写入（本地快路径＝默认查询/推理数据源，
+    不再出现「Fuseki 在跑时本地无图、图谱滞后需手动 rdf-sync」）；Fuseki 可达时
+    同步远端命名图。mode：dual（双写）/ file（仅本地，Fuseki 不可达）。
+    """
     store = JsonStore("ontologies", project_id=project_id)
     rec = store.get(ontology_id)
     if not rec:
@@ -122,22 +130,19 @@ def sync_ontology(project_id: str, ontology_id: str) -> dict:
         filters={"ontology_id": ontology_id}, limit=100000)
     g = build_full_graph(rec, instances)
 
+    # 本地 TTL 始终写入（GAP-03 双写）
+    local_path = write_local_ttl(ontology_id, g.serialize(format="turtle"),
+                                 project_id=project_id)
     if _is_reachable():
         _replace_named_graph(graph_uri_for(ontology_id), g.serialize(format="nt"))
-        result: dict = {"mode": REMOTE_MODE, "dataset": get_settings().jena_dataset,
-                        "graph": graph_uri_for(ontology_id)}
-        logger.info("rdf_sync remote ontology_id=%s project_id=%s triples=%d instances=%d",
+        result: dict = {"mode": "dual", "dataset": get_settings().jena_dataset,
+                        "graph": graph_uri_for(ontology_id), "local_path": local_path}
+        logger.info("rdf_sync dual ontology_id=%s project_id=%s triples=%d instances=%d",
                     ontology_id, project_id, len(g), len(instances))
     else:
-        settings = get_settings()
-        base = os.path.join(settings.data_dir, "projects", project_id) if project_id else settings.data_dir
-        os.makedirs(base, exist_ok=True)
-        path = os.path.join(base, f"ontology_{ontology_id}.ttl")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(g.serialize(format="turtle"))
-        result = {"mode": FILE_MODE, "path": path}
+        result = {"mode": FILE_MODE, "path": local_path}
         logger.info("rdf_sync file ontology_id=%s project_id=%s triples=%d instances=%d path=%s",
-                    ontology_id, project_id, len(g), len(instances), path)
+                    ontology_id, project_id, len(g), len(instances), local_path)
 
     result.update({
         "triples": len(g),
@@ -250,3 +255,98 @@ def sync_all_projects(project_id: str | None = None) -> list[dict]:
                                pid, rec.get("id"), e)
             results.append(item)
     return results
+
+
+# ---- GAP-15：一致性对账（本地 TTL 落后于模型/实例数据 → 自动重建同步＋告警） ----
+
+def _parse_iso_ts(value: str | None) -> float:
+    """ISO 时间串 → unix 时间戳；解析失败返回 0（不参与漂移判定）。"""
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def check_consistency(project_id: str, ontology_id: str) -> dict:
+    """本地 TTL 与模型/实例数据的轻量对账（mtime 对比，无图查询，O(对象数)）。
+
+    - data_mtime = max(本体 updated_at, 本体各对象实例文件 mtime)；
+    - stale = TTL 落后于数据超过 1s 容差（同秒内连续写入判稳）。
+    stale=True 时应触发 sync_ontology 重建（后台对账循环自动执行）。
+    """
+    rec = JsonStore("ontologies", project_id=project_id).get(ontology_id)
+    if not rec:
+        raise ValueError(f"本体不存在: {ontology_id}")
+    ttl = local_ttl_path(ontology_id, project_id)
+    ttl_mtime = os.path.getmtime(ttl) if os.path.exists(ttl) else 0.0
+    data_mtime = max(_parse_iso_ts(rec.get("updated_at")), ttl_mtime)
+    obj_ids = [o.get("id") for o in rec.get("objects", []) if isinstance(o, dict) and o.get("id")]
+    inst_dir = os.path.join(get_settings().data_dir, "projects", project_id, "instances")
+    for oid in obj_ids:
+        p = os.path.join(inst_dir, f"{oid}.jsonl")
+        if os.path.exists(p):
+            try:
+                data_mtime = max(data_mtime, os.path.getmtime(p))
+            except OSError:
+                pass
+    _TOL = 1.0
+    stale = ttl_mtime + _TOL < data_mtime
+    return {
+        "ontology_id": ontology_id,
+        "project_id": project_id,
+        "ttl_path": ttl,
+        "ttl_exists": ttl_mtime > 0,
+        "data_mtime": data_mtime,
+        "stale": stale,
+        "drift_seconds": round(max(0.0, data_mtime - ttl_mtime), 3),
+    }
+
+
+def _reconcile_once() -> list[dict]:
+    """对账一轮：全部 active 项目 × 本体，漂移即自动 sync（告警日志）。单条失败不中断。"""
+    from core.project_store import ProjectStore
+
+    results: list[dict] = []
+    try:
+        projects = ProjectStore().list()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("RDF 对账读取项目列表失败: %s", e)
+        return results
+    for proj in projects:
+        pid = proj.get("id")
+        if not pid or (proj.get("status") or "active") == "archived":
+            continue
+        try:
+            records = JsonStore("ontologies", project_id=pid).all()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("RDF 对账读取本体失败 project=%s: %s", pid, e)
+            continue
+        for rec in records:
+            oid = rec.get("id")
+            if not oid:
+                continue
+            try:
+                info = check_consistency(pid, oid)
+                if info.get("stale"):
+                    logger.warning("RDF 一致性漂移，自动重建同步 ontology_id=%s project=%s drift=%.1fs",
+                                   oid, pid, info["drift_seconds"])
+                    sync_ontology(pid, oid)
+                    info["repaired"] = True
+                results.append(info)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("RDF 对账失败 ontology_id=%s project=%s: %s", oid, pid, e)
+    return results
+
+
+def consistency_loop(interval: int = 300) -> None:
+    """GAP-15 后台对账循环（daemon 线程，interval<=0 时调用方不应启动）。"""
+    import time
+
+    while True:
+        time.sleep(max(1, interval))
+        try:
+            _reconcile_once()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("RDF 对账循环异常: %s", e)

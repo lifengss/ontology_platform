@@ -53,6 +53,8 @@
     [data-theme="light"] .badge { background:#eef2f7; }
     [data-theme="light"] .badge.draft { color:#92400e; border-color:#fde68a; background:#fef3c7; }
     [data-theme="light"] .badge.active { color:#065f46; border-color:#a7f3d0; background:#d1fae5; }
+    [data-theme="light"] .badge.slate { color:#475569; border-color:#cbd5e1; background:#e2e8f0; }
+    [data-theme="light"] .badge.green { color:#065f46; border-color:#a7f3d0; background:#d1fae5; }
     [data-theme="light"] .pk-badge { color:#b45309; }
     [data-theme="light"] .tab, [data-theme="light"] .subtab { color:var(--muted); }
     [data-theme="light"] .tab:hover, [data-theme="light"] .tab.active, [data-theme="light"] .tut-toc a:hover, [data-theme="light"] .tut-toc a.on { background:rgba(37,99,235,.08); }
@@ -149,6 +151,8 @@
     .tab { padding: 8px 14px; margin-bottom: 2px; border-left: 2px solid transparent; color: var(--muted); cursor: pointer; border-radius: 0 6px 6px 0; font-size: 13px; transition: all .15s ease; }
     .tab:hover { color: var(--text); background: rgba(79,140,255,.06); }
     .tab.active { color: var(--text); border-left-color: var(--accent); background: rgba(79,140,255,.10); font-weight: 500; }
+    .tab.tab-disabled { opacity: .45; cursor: not-allowed; }
+    .tab.tab-disabled:hover { background: transparent; color: var(--muted); }
     /* ---------- 使用教程 ---------- */
     .tut-toc-h { font-size: 11px; color: #64748b; margin: 10px 4px 2px; }
     .tut-part-h { font-size: 10.5px; color: var(--accent); font-weight: 600; letter-spacing: .5px; margin: 12px 4px 3px; }
@@ -181,9 +185,39 @@
     input, textarea, select { background: #0b1222; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
     label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
     .graph-tooltip { position: absolute; background: rgba(15,23,42,.95); border: 1px solid var(--border); padding: 6px 10px; border-radius: 6px; font-size: 12px; pointer-events: none; opacity: 0; transition: opacity .15s; }
+    /* GAP-12 图谱筛选 chips */
+    .gchip { padding: 2px 10px; border-radius: 9999px; border: 1px solid var(--border); font-size: 11px; color: var(--muted); cursor: pointer; user-select: none; }
+    .gchip.on { background: rgba(79,140,255,.18); border-color: #4f8cff; color: #7aa8ff; }
+    [data-theme="light"] .gchip.on { background: #dbeafe; color: #1d4ed8; border-color: #93c5fd; }
     .toast { position: fixed; bottom: 16px; right: 16px; min-width: 260px; max-width: 420px; padding: 12px 14px; border-radius: 10px; color: #fff; font-size: 13px; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,.35); animation: slideIn .25s ease; border: 1px solid var(--border); white-space: pre-line; }
     @keyframes slideIn { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
     .toast.info { background: #1e3a8a; } .toast.ok { background: #065f46; } .toast.err { background: #991b1b; }
+    /* GAP-11：后台任务面板（左下 fixed，与右下 toast 错开） */
+    .task-panel { position: fixed; left: 16px; bottom: 16px; width: 360px; max-width: calc(100vw - 32px); z-index: 49; background: #0f1627; border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.4); font-size: 13px; overflow: hidden; }
+    .task-head { display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+    .task-title { font-weight: 600; font-size: 13px; }
+    .task-badge { font-size: 11px; color: #93c5fd; background: rgba(79,140,255,.15); border-radius: 8px; padding: 1px 7px; margin-left: 6px; }
+    .task-head-actions { display: flex; gap: 6px; }
+    .task-btn { padding: 2px 8px; font-size: 12px; border-radius: 5px; background: rgba(148,163,184,.12); border: 1px solid var(--border); color: var(--muted); cursor: pointer; }
+    .task-btn:hover { background: rgba(79,140,255,.18); color: var(--text); border-color: var(--accent); }
+    .task-body { max-height: 44vh; overflow-y: auto; padding: 8px; }
+    .task-item { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: #0b1222; }
+    .task-item:last-child { margin-bottom: 0; }
+    .task-top { display: flex; align-items: center; gap: 8px; }
+    .task-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+    .task-x { border: none; background: none; color: #64748b; font-size: 14px; line-height: 1; cursor: pointer; padding: 0 2px; }
+    .task-x:hover { color: var(--bad); }
+    .task-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    .task-dot.run { background: #3b82f6; animation: taskPulse 1.2s infinite; }
+    .task-dot.ok { background: #10b981; }
+    .task-dot.bad { background: #ef4444; }
+    .task-dot.dim { background: #64748b; }
+    @keyframes taskPulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+    .task-meta { font-size: 11.5px; color: var(--muted); margin: 4px 0 0 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .task-bar { height: 4px; border-radius: 2px; background: rgba(148,163,184,.15); margin: 6px 0 0 16px; overflow: hidden; }
+    .task-bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; transition: width .4s ease; }
+    [data-theme="light"] .task-panel { background: #fff; }
+    [data-theme="light"] .task-item { background: #f8fafc; }
     .subtab { padding: 6px 12px; border-radius: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
     .subtab.active { background: var(--accent); color: #fff; }
     .object-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; background: #0f1627; }
@@ -197,6 +231,8 @@
     .badge { font-size: 10px; padding: 2px 6px; border-radius: 10px; background: #1e293b; border: 1px solid var(--border); }
     .badge.draft { color: #fbbf24; border-color: #78350f; background: #451a03; }
     .badge.active { color: #34d399; border-color: #065f46; background: #064e3b; }
+    .badge.slate { color: #94a3b8; border-color: #334155; background: #1e293b; }
+    .badge.green { color: #34d399; border-color: #065f46; background: #022c22; }
     /* 两行式下拉（业务友好）：主行=语义 label，次行小字=id。原生 select 的 option 不支持 HTML，故自绘 */
     .labeled-select { position: relative; }
     .ls-trigger { width: 100%; min-height: 22px; background: #0b1222; border: 1px solid var(--border); border-radius: 6px; padding: 6px 28px 6px 10px; cursor: pointer; position: relative; }
@@ -302,11 +338,24 @@
     <div id="tabAudit" data-tab="audit" class="tab op-hidden" onclick="switchTab('audit')">审计日志</div>
     <div class="border-t border-slate-700/50 mt-2 pt-2 mb-1"></div>
     <div class="tab" data-tab="tutorial" onclick="switchTab('tutorial')">使用教程</div>
+    <div class="tab" data-tab="resources" onclick="switchTab('resources')">资源下载</div>
   </nav>
 
   <main class="flex-1 p-4 overflow-auto">
     <!-- 首页：项目总览与项目管理 -->
     <section id="home" class="tab-content grid grid-cols-12 gap-4">
+      <div id="onboardingWizard" class="col-span-12 hidden">
+        <div class="card p-4">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="font-medium mb-0">刚接触平台？按 ITBP 五步向导完成第一个业务本体</h3>
+            <div class="flex items-center gap-2">
+              <span id="wzProgressText" class="text-xs text-slate-400"></span>
+              <button class="btn secondary" type="button" onclick="closeOnboardingWizard()">知道了，关闭</button>
+            </div>
+          </div>
+          <div id="wzSteps" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2"></div>
+        </div>
+      </div>
       <div class="col-span-12 grid grid-cols-2 lg:grid-cols-4 gap-3">
         <div class="card p-4">
           <div class="text-xs text-slate-400 mb-1">项目总数</div>
@@ -339,7 +388,9 @@
                 <option value="active">进行中</option>
                 <option value="archived">已归档</option>
               </select>
+              <button class="btn secondary" type="button" onclick="showOnboardingWizard(true)" title="重新展开 ITBP 五步向导">新手引导</button>
               <button class="btn" type="button" onclick="toggleProjectForm()">＋ 新建项目</button>
+              <button class="btn secondary" type="button" onclick="createSeedProject()" title="GAP-13：新建项目并预置示例本体＋示例实例，跑通建模→导入→发布全流程">一键示例项目</button>
             </div>
           </div>
           <div id="projectForm" class="hidden mb-3 p-3 rounded-lg border border-slate-700/60 bg-slate-900/40 grid grid-cols-12 gap-2">
@@ -404,6 +455,7 @@
             <button class="subtab active" id="subtabForm" onclick="setEditorMode('form')">表单建模</button>
             <button class="subtab" id="subtabAi" onclick="setEditorMode('ai')">AI 生成</button>
             <button class="subtab" id="subtabDoc" onclick="setEditorMode('doc')">文档逆向</button>
+            <button class="subtab" id="subtabTable" onclick="setEditorMode('table')">表格导入</button>
             <button class="subtab" id="subtabTemplate" onclick="setEditorMode('template')">模板库</button>
           </div>
 
@@ -436,15 +488,52 @@
           </div>
 
           <div id="modeDoc" class="hidden">
-            <label>上传 PRD / Word / Excel / PDF / 文本</label>
-            <input type="file" id="docFile" class="w-full" accept=".txt,.md,.docx,.xlsx,.pdf" />
+            <label>上传 PRD / Word / Excel / PDF / 文本（可多份，同一上下文一次解析）</label>
+            <input type="file" id="docFile" multiple class="w-full" accept=".txt,.md,.docx,.xlsx,.pdf" />
+            <div class="mt-3">
+              <label>解析后去向（多文档增量建模）</label>
+              <select id="docTargetOntology" class="w-full input" onchange="refreshDocTargetOptions()">
+                <option value="">新建草稿（独立生成）</option>
+              </select>
+              <div class="text-xs text-slate-500 mt-1">选择已有草稿：解析完成后自动进入差异审核——同名对象按名称/字典同义词/相似度自动对齐（歧义不对齐、不猜测），逐项确认后合并进该草稿。</div>
+            </div>
             <div class="flex gap-2 mt-3">
               <button class="btn" onclick="uploadDoc()" id="btnDocParse">开始解析</button>
-              <span class="text-xs text-slate-500 self-center">解析为异步任务，右下角提示状态</span>
+              <span class="text-xs text-slate-500 self-center">解析为异步任务，左下角「后台任务」面板可查进度/取消/重试</span>
             </div>
+            <div class="text-xs text-slate-500 mt-2">适合需求/设计文档（走 AI 抽取）；如果上传的是<b>结构化数据表</b>，请改用「表格导入」（确定性解析，自动推断类型/主键/约束）。</div>
+          </div>
+
+          <div id="modeTable" class="hidden">
+            <label>上传一张数据表（CSV / Excel 单 sheet），自动生成可编辑本体草稿</label>
+            <div class="grid grid-cols-2 gap-3 mt-2 mb-2">
+              <div>
+                <label>本体名称（可选，默认取文件名）</label>
+                <input id="tblName" class="w-full" placeholder="如：订单" />
+              </div>
+              <div>
+                <label>数据表文件</label>
+                <input type="file" id="tblFile" class="w-full" accept=".csv,.xlsx" />
+              </div>
+            </div>
+            <div class="flex gap-2">
+              <button class="btn" onclick="uploadTable()" id="btnTblImport">导入并生成草稿</button>
+              <span class="text-xs text-slate-500 self-center">类型/必填/主键/约束自动推断，生成后可逐项编辑</span>
+            </div>
+            <details class="mt-3 text-xs text-slate-500">
+              <summary class="cursor-pointer">支持格式说明（宽表 / 长表 / B0 模板）</summary>
+              <ul class="list-disc ml-4 mt-1 space-y-1">
+                <li><b>宽数据表（最常用）</b>：首行为列名（列=属性），其余为数据行；自动推断类型、必填、业务主键，并从样本抽取 min/max、长度区间、枚举等约束。</li>
+                <li><b>长表（属性清单）</b>：列含「对象 / 属性 / 类型 / 必填 / 关系目标 / 基数」，可选约束列：最小长度 / 最大长度 / 正则 / 最小值 / 最大值 / 枚举（逗号分隔）。</li>
+                <li><b>B0 三 sheet 模板</b>：Excel 含 sheet「1-类层次」「2-对象属性(关系)」「3-数据属性」。</li>
+              </ul>
+            </details>
           </div>
 
           <div id="modeTemplate" class="hidden">
+            <div class="form-section-title"><span>本地模板库</span><span class="text-xs text-slate-500">含内置示例（约束示范），一键实例化为可编辑本体</span></div>
+            <div id="localTplList" class="space-y-2 mb-4"><div class="text-xs text-slate-500">加载中…</div></div>
+            <div class="form-section-title"><span>外部 LinkML 模板</span></div>
             <label>输入外部 LinkML 模板地址（http/https），预览后可一键实例化</label>
             <div class="flex gap-2 mt-2 mb-3">
               <input id="tplUrl" class="w-full" placeholder="https://example.com/supply-chain.yaml" />
@@ -477,6 +566,7 @@
               <button class="btn secondary" onclick="editCurrentOntology()">编辑</button>
               <button class="btn success" id="btnPublish" onclick="publishCurrent()">发布</button>
               <button class="btn secondary" onclick="validateOntology()">校验</button>
+              <button class="btn secondary" onclick="openDraftDiffReview()">差异审核</button>
               <button class="btn secondary" onclick="exportOntology()">导出 TTL</button>
               <button class="btn secondary" onclick="viewGraph()">看图谱</button>
               <button class="btn danger" onclick="deleteCurrentOntology()">删除</button>
@@ -634,6 +724,16 @@
           <option value="0">全部实例（可能卡顿）</option>
         </select>
         <button class="btn text-xs" onclick="graphFitAll()">适应画布</button>
+        <button class="btn text-xs" onclick="graphResetExpand()" title="撤销双击展开的邻居节点">重置展开</button>
+      </div>
+      <!-- GAP-12 类型/来源筛选栏（本体视图与知识图谱视图显示；类树无实例不显示） -->
+      <div id="graphFilterBar" class="hidden flex items-center gap-2 text-xs flex-wrap px-1">
+        <span class="text-slate-500">类型</span>
+        <div id="graphKindChips" class="flex gap-1"></div>
+        <span class="text-slate-500 ml-2">来源</span>
+        <div id="graphOriginChips" class="flex gap-1"></div>
+        <select id="graphObjTypeFilter" class="text-xs hidden" onchange="onGraphFilterChange()"><option value="">全部对象类型</option></select>
+        <span id="graphNodeCount" class="text-slate-500 ml-auto"></span>
       </div>
       <div class="card p-4">
         <h3 class="font-medium mb-2">自然语言查询</h3>
@@ -1642,6 +1742,16 @@
         </div>
       </div>
     </section>
+    <section id="resources" class="tab-content hidden">
+      <div class="card p-5">
+        <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
+          <h2 class="text-base font-semibold">资源下载</h2>
+          <span class="text-xs text-slate-500">下载平台资源（如用户侧 Skill 包），导入到支持 Skill 的外部 AI 平台后，即可按指南更便捷地调用本体平台。</span>
+        </div>
+        <div id="resourcesList" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+        <div id="resourcesEmpty" class="hidden p-8 text-center text-sm text-slate-500">暂无可用资源</div>
+      </div>
+    </section>
   </main>
   </div>
 
@@ -1740,6 +1850,17 @@
     });
   })();
   </script>
-  <script src="app.js?v=20261029a"></script>
+  <!-- GAP-11：后台任务面板（from-doc 等异步 job 的进度/取消/重试/完成通知） -->
+  <div id="taskPanel" class="task-panel hidden">
+    <div class="task-head">
+      <span id="taskPanelTitle" class="task-title">后台任务</span>
+      <span class="task-head-actions">
+        <button type="button" class="task-btn" title="清除已完成/失败/取消的任务" onclick="clearFinishedTasks()">清除</button>
+        <button type="button" class="task-btn" title="收起面板" onclick="toggleTaskPanel()">—</button>
+      </span>
+    </div>
+    <div id="taskPanelBody" class="task-body"></div>
+  </div>
+  <script src="app.js?v=20261119d"></script>
 </body>
 </html>

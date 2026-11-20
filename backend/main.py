@@ -13,6 +13,7 @@ import time
 import uuid
 
 from fastapi import FastAPI, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -42,6 +43,7 @@ from api.router_reasoning import router as reasoning_router  # V2-16 推理引�
 from api.router_shacl import router as shacl_router  # V2-17 SHACL 执行路径配置（M4-D）
 from api.router_sidecar import router as sidecar_router  # V2-10 旁路操作日志（M4-G）
 from api.router_system import router as system_router
+from api.router_resources import router as resources_router  # 资源下载中心
 from api.router_templates import router as templates_router
 from api.router_trace import router as trace_router  # V2-22 过程链 trace（M4-J）
 from api.router_identity import router as identity_router  # V2-14i 身份联邦（M2-B）
@@ -98,6 +100,44 @@ async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
     return fail(exc)
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    # GAP-02：FastAPI/pydantic 校验错误（原样 422 detail 裸体）统一转信封，
+    # 并把技术性 msg（如 "Value Literal('') not in list"）翻译为通俗解释＋修复建议。
+    errs = exc.errors() or []
+    first = errs[0] if errs else {}
+    loc = [str(p) for p in first.get("loc", ()) if p not in ("body", "query", "path")]
+    field = ".".join(loc) or "参数"
+    ftype = str(first.get("type", ""))
+    msg = str(first.get("msg", "参数校验未通过"))
+    ctx = first.get("ctx") or {}
+    if ftype == "missing":
+        zh, sug = f"缺少必填参数 {field}", "请补全该参数后重新提交"
+    elif ftype == "literal_error":
+        # pydantic v1: ctx.allowed_values(list)；v2: ctx.expected("'a' or 'b'")
+        allowed = [str(v) for v in ctx["allowed_values"]] if isinstance(ctx.get("allowed_values"), list) else \
+            [s.strip().strip("'\"") for s in str(ctx.get("expected", "")).replace(",", " or ").split(" or ") if s.strip()]
+        zh = f"参数 {field} 的取值（{first.get('input')!r}）不在允许的枚举内"
+        sug = f"请从以下值中选择：{' / '.join(allowed)}" if allowed else "请按接口文档的字段允许值修正"
+    elif ftype in ("int_parsing", "float_parsing", "int_type", "float_type", "number_parsing"):
+        zh, sug = f"参数 {field} 必须是数值", "请传合法数字（不要带单位/千分位/引号）"
+    elif ftype in ("bool_parsing", "bool_type"):
+        zh, sug = f"参数 {field} 必须是布尔值", "请传 true 或 false"
+    elif ftype in ("string_too_short", "string_too_long"):
+        zh, sug = f"参数 {field} 的长度不符合要求", f"长度约束见错误明细（{msg}）"
+    elif ftype == "extra_forbidden":
+        zh, sug = f"包含不允许的额外参数：{field}", "请移除该参数后重新提交"
+    else:
+        zh, sug = f"参数 {field} 未通过校验", f"详见错误明细：{msg}"
+    more = f"（另有 {len(errs) - 1} 处类似问题）" if len(errs) > 1 else ""
+    log_event(logger, 20, "validation_error", path=request.url.path, count=len(errs))
+    return fail(ApiError(
+        "VALIDATION_ERROR", f"{field}: {msg}{more}", http_status=422,
+        message_zh=zh, suggestion=sug,
+        details={"field": field, "type": ftype, "count": len(errs)},
+    ))
+
+
 @app.exception_handler(Exception)
 async def unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
     log_event(logger, 50, "unhandled_exception", error=str(exc), path=request.url.path)
@@ -152,6 +192,7 @@ app.include_router(query_router)  # V2-15 开放查询接口（M4-B）
 app.include_router(reasoning_router)  # V2-16 推理引擎配置（M4-C）
 app.include_router(shacl_router)  # V2-17 SHACL 执行路径配置（M4-D）
 app.include_router(sidecar_router)  # V2-10 旁路操作日志（M4-G）
+app.include_router(resources_router)  # 资源下载中心
 
 
 # VS6: 由 mcp_server 模块按项目挂载 /mcp/{project_id}，双传输（2026-10-28 MCP 接入层修复）：
@@ -204,6 +245,21 @@ async def _start_cdc_consumer():
         from cdc import _cdc_loop
 
         threading.Thread(target=_cdc_loop, name="cdc-consumer", daemon=True).start()
+
+
+@app.on_event("startup")
+async def _start_rdf_consistency_loop():
+    # GAP-15：后台定期对账本地 TTL 与模型/实例数据一致性，漂移即自动重建同步＋告警日志；
+    # ONTOLOGY_RDF_CONSISTENCY_INTERVAL_SECONDS<=0 禁用（缺省 300s）。
+    import os
+    import threading
+
+    interval = int(os.getenv("ONTOLOGY_RDF_CONSISTENCY_INTERVAL_SECONDS", "300"))
+    if interval > 0:
+        from jena_adapter import rdf_sync
+
+        threading.Thread(target=rdf_sync.consistency_loop, args=(interval,),
+                         name="rdf-consistency-loop", daemon=True).start()
 
 
 @app.get("/mcp/status")

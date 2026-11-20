@@ -125,44 +125,150 @@ class Viz:
             "shown": len(instances),
         }
         for tx_idx, rec in enumerate(instances):
-            object_type = rec.get("object_type")
-            inst = rec.get("instance", {})
-            raw_source = rec.get("source") or inst.get("_source", {})
-            source_type = raw_source if isinstance(raw_source, str) else (raw_source.get("kind") or raw_source.get("source_type"))
-            origin = _origin_from_source(source_type)
-            tx_id = rec.get("tx_id", f"tx_{tx_idx}")
-
-            # 实例节点 id：优先使用实例自带的 id，否则按 tx 内索引生成
-            inst_id = inst.get("id") or f"inst_{tx_id}_{tx_idx}"
-            nodes.append({
-                "id": inst_id,
-                "label": self._instance_label(inst, object_type),
-                "kind": "instance",
-                "object_type": object_type,
-                "source": origin,
-                "tx_id": tx_id,
-            })
-            if object_type:
-                # 若实例所属对象未在 schema 中定义，补占位节点
-                if object_type not in node_ids:
-                    node_ids.add(object_type)
-                    nodes.append({
-                        "id": object_type,
-                        "label": object_type,
-                        "kind": "object",
-                        "source": _INTERNAL,
-                        "missing": True,
-                        "note": "该对象类型仅有实例数据，尚未在建模侧定义",
-                    })
-                edges.append({
-                    "id": f"instance_of_{inst_id}",
-                    "source": inst_id,
-                    "target": object_type,
-                    "label": "instance_of",
-                    "kind": "instance_of",
-                    "origin": origin,
+            inst_id, node, edge = self._instance_entry(rec, tx_idx)
+            object_type = node["object_type"]
+            if object_type and object_type not in node_ids:
+                node_ids.add(object_type)
+                nodes.append({
+                    "id": object_type,
+                    "label": object_type,
+                    "kind": "object",
+                    "source": _INTERNAL,
+                    "missing": True,
+                    "note": "该对象类型仅有实例数据，尚未在建模侧定义",
                 })
+            nodes.append(node)
+            if edge:
+                edges.append(edge)
         return nodes, edges, meta
+
+    def _instance_entry(self, rec: dict[str, Any], tx_idx: int) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+        """构造单个实例的节点与 instance_of 边（id 口径单一来源）。
+
+        返回 (inst_id, node, edge)；edge 为 None 表示实例缺少 object_type。
+        """
+        object_type = rec.get("object_type")
+        inst = rec.get("instance", {})
+        raw_source = rec.get("source") or inst.get("_source", {})
+        source_type = raw_source if isinstance(raw_source, str) else (raw_source.get("kind") or raw_source.get("source_type"))
+        origin = _origin_from_source(source_type)
+        tx_id = rec.get("tx_id", f"tx_{tx_idx}")
+
+        # 实例节点 id：优先使用实例自带的 id，否则按 tx 内索引生成
+        inst_id = inst.get("id") or f"inst_{tx_id}_{tx_idx}"
+        node = {
+            "id": inst_id,
+            "label": self._instance_label(inst, object_type),
+            "kind": "instance",
+            "object_type": object_type,
+            "source": origin,
+            "tx_id": tx_id,
+        }
+        edge = None
+        if object_type:
+            edge = {
+                "id": f"instance_of_{inst_id}",
+                "source": inst_id,
+                "target": object_type,
+                "label": "instance_of",
+                "kind": "instance_of",
+                "origin": origin,
+            }
+        return inst_id, node, edge
+
+    def neighbors(
+        self,
+        ontology_id: str,
+        ontology: dict[str, Any],
+        node_id: str,
+        mode: str = "schema",
+        project_id: str | None = None,
+        depth: int = 1,
+        limit: int = 50,
+    ) -> dict[str, Any] | None:
+        """按需邻居查询（GAP-12）：避免大图一次拉全图。
+
+        - 对象节点：沿关系边 BFS（depth 1~2，无向）；knowledge 视图附焦点对象的实例抽样。
+        - 实例节点：所属对象节点＋同对象其他实例抽样（limit 截断）。
+        返回 {node, nodes, edges, truncated, total}；节点不存在返回 None（路由层 404）。
+        """
+        schema_nodes, schema_edges = self._schema_graph(ontology)
+        schema_by_id = {n["id"]: n for n in schema_nodes}
+        depth = max(1, min(int(depth or 1), 2))
+        limit = max(0, int(limit or 0))
+
+        focus = schema_by_id.get(node_id)
+        if focus is not None:
+            # 对象节点：关系边无向 BFS
+            visited = {node_id}
+            frontier = [node_id]
+            edges_out: list[dict[str, Any]] = []
+            for _ in range(depth):
+                nxt: list[str] = []
+                for nid in frontier:
+                    for e in schema_edges:
+                        if e.get("kind") != "relation":
+                            continue
+                        other = e["target"] if e["source"] == nid else (e["source"] if e["target"] == nid else None)
+                        if other and other not in visited:
+                            visited.add(other)
+                            nxt.append(other)
+                            edges_out.append(e)
+                if not nxt:
+                    break
+                frontier = nxt
+            nodes_out = [dict(schema_by_id[i]) for i in visited if i != node_id]
+            truncated = False
+            total = len(nodes_out)
+            if mode == "knowledge":
+                records = self._load_instances(ontology_id, project_id)
+                entries = [(rec, *self._instance_entry(rec, idx)) for idx, rec in enumerate(records)]
+                entries = [t for t in entries if t[0].get("object_type") == node_id]
+                entries.sort(key=lambda t: str((t[0].get("instance") or {}).get("id") or t[0].get("tx_id") or ""))
+                total = len(entries)
+                if limit and total > limit:
+                    entries = entries[:limit]
+                    truncated = True
+                for _rec, _iid, inode, iedge in entries:
+                    nodes_out.append(inode)
+                    if iedge:
+                        edges_out.append(iedge)
+            return {"node": focus, "nodes": nodes_out, "edges": edges_out, "truncated": truncated, "total": total}
+
+        # 实例节点：所属对象＋同对象其他实例抽样
+        records = self._load_instances(ontology_id, project_id)
+        entries = [(rec, *self._instance_entry(rec, idx)) for idx, rec in enumerate(records)]
+        focus_t = next((t for t in entries if t[1] == node_id), None)
+        if focus_t is None:
+            return None
+        focus_rec, _fid, focus_node, focus_edge = focus_t
+        nodes_out: list[dict[str, Any]] = []
+        edges_out: list[dict[str, Any]] = [focus_edge] if focus_edge else []
+        object_type = focus_rec.get("object_type")
+        truncated = False
+        total = 0
+        if object_type:
+            if object_type in schema_by_id:
+                nodes_out.append(dict(schema_by_id[object_type]))
+            else:
+                nodes_out.append({
+                    "id": object_type, "label": object_type, "kind": "object",
+                    "source": _INTERNAL, "missing": True,
+                    "note": "该对象类型仅有实例数据，尚未在建模侧定义",
+                })
+            siblings = [t for t in entries if t[0].get("object_type") == object_type]
+            siblings.sort(key=lambda t: str((t[0].get("instance") or {}).get("id") or t[0].get("tx_id") or ""))
+            total = len(siblings)
+            if limit and total > limit:
+                siblings = siblings[:limit]
+                truncated = True
+            for _rec, sid, snode, sedge in siblings:
+                if sid == node_id:
+                    continue
+                nodes_out.append(snode)
+                if sedge:
+                    edges_out.append(sedge)
+        return {"node": focus_node, "nodes": nodes_out, "edges": edges_out, "truncated": truncated, "total": total}
 
     # knowledge 视图抽样：每对象最多 _PER_OBJECT_LIMIT 条，全局 max_total 条
     _PER_OBJECT_LIMIT = 50
@@ -213,10 +319,11 @@ class Viz:
         """读取实例：以新 InstanceStore 为权威（前端 list/get/edit/delete 皆用它），
         仅当权威为空时回退旧 Neo4j 降级产物（历史数据），避免同一实例被读成两套。
         按 ontology_id 过滤。"""
-        # 权威：按对象类型分文件的 JSONL
+        # 权威：按对象类型分文件的 JSONL（GAP-17：只读快照路径，免每请求全量物化拷贝；
+        # records 仅做过滤/构造图节点，不修改记录内容）
         records: list[dict[str, Any]] = []
         try:
-            for rec in get_instance_store(project_id).all():
+            for rec in get_instance_store(project_id).snapshot()[1]:
                 if rec.get("ontology_id") == ontology_id:
                     records.append(rec)
         except Exception as e:  # noqa: BLE001

@@ -26,3 +26,15 @@ def test_orchestration_only_for_write_roles():
     assert "orchestration" in _tabs("admin")
     assert "orchestration" not in _tabs("viewer")
     assert "orchestration" not in _tabs("reviewer")
+
+
+def test_resources_visible_to_all_roles():
+    """resources（资源下载）为公开分享物，各角色均可见（2026-11-18 回归：漏进白名单→全员不可见）。"""
+    for role in ("viewer", "reviewer", "modeler", "admin"):
+        assert "resources" in _tabs(role), role
+
+
+def test_query_visible_to_all_roles():
+    """query（只读 SPARQL 查询台）各角色均可见（GAP-10 回归：漏进白名单→全员不可见）。"""
+    for role in ("viewer", "reviewer", "modeler", "admin"):
+        assert "query" in _tabs(role), role

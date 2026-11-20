@@ -20,7 +20,10 @@ INV-1 负向断言口径（scripts/verify_inv1_source_channel.py）：
 """
 from __future__ import annotations
 
+import json as _json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 from config import get_settings
@@ -42,6 +45,53 @@ _ONTOLOGIES = "ontologies"
 def _now_iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---- GAP-16：联邦读 TTL 缓存与并行批量回源 ----
+# 缓存默认**关闭**（联邦读语义＝「源端最新」，默认缓存会改变行为并破坏既有回源计数断言）；
+# 按连接配置 cache_ttl_seconds > 0 显式开启，key 含 连接/用户/工具/参数（查看者身份按用户隔离）。
+_FED_READ_CACHE: dict[str, tuple[float, tuple[dict[str, Any], dict[str, Any]]]] = {}
+_FED_READ_CACHE_LOCK = threading.Lock()
+
+
+def _fed_cache_key(project_id: str, conn_id: Optional[str], user_id: Optional[str],
+                   read_tool: Optional[str], params: dict[str, Any]) -> str:
+    return "|".join([
+        project_id, conn_id or "-", user_id or "-", read_tool or "-",
+        _json.dumps(params, sort_keys=True, ensure_ascii=False, default=str),
+    ])
+
+
+def federate_values_many(
+    project_id: str,
+    recs: list[dict[str, Any]],
+    *,
+    user_id: Optional[str] = None,
+    attr_ids: Optional[list[str]] = None,
+    max_workers: int = 8,
+) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
+    """多实例批量联邦回源——线程池并行，总时延≈最慢单源（原逐条串行，GAP-16）。
+
+    返回 {record_id: (values, meta)}；单条失败不中断（返回 unavailable meta，与
+    federate_values 的降级语义一致）。查看者身份（user_id 非 None）时逐条 403 语义
+    仍由 federate_values 内部上抛保留。
+    """
+    results: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    valid = [r for r in (recs or []) if isinstance(r, dict) and r.get("id")]
+    if not valid:
+        return results
+    workers = max(1, min(int(max_workers), len(valid)))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {
+            ex.submit(federate_values, project_id, rec, user_id=user_id, attr_ids=attr_ids): rec["id"]
+            for rec in valid
+        }
+        for fut, rid in futs.items():
+            try:
+                results[rid] = fut.result()
+            except Exception as e:  # noqa: BLE001 —— 批量语义：单条异常不拖垮整批
+                results[rid] = ({}, {"mode": "unavailable", "error": f"并行回源异常: {e}"})
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +447,28 @@ def federate_values(
         except Exception:  # noqa: BLE001
             pass
 
+    # GAP-16：连接级读缓存（cache_ttl_seconds>0 才启用；缺省 0＝每次真实回源，
+    # 保持「源端最新」语义；命中时 meta.cache_hit=True，不再回源/记旁路日志）
+    fed_ttl = 0
+    try:
+        fed_ttl = int(conn.get("cache_ttl_seconds") or 0)
+    except (TypeError, ValueError):
+        fed_ttl = 0
+    fed_ckey = _fed_cache_key(project_id, conn_id, user_id if viewer_mode else None,
+                              read_tool, params)
+    if fed_ttl > 0:
+        with _FED_READ_CACHE_LOCK:
+            hit = _FED_READ_CACHE.get(fed_ckey)
+        if hit and hit[0] > time.time():
+            cvalues, cmeta = hit[1]
+            cmeta = dict(cmeta)
+            cmeta["cache_hit"] = True
+            return {a: cvalues.get(a) for a in attr_ids} if attr_ids else dict(cvalues), cmeta
+        with _FED_READ_CACHE_LOCK:
+            expired = [k for k, (exp, _v) in _FED_READ_CACHE.items() if exp <= time.time()]
+            for k in expired:
+                _FED_READ_CACHE.pop(k, None)
+
     started = time.monotonic()
     rows: list[dict[str, Any]] = []
     fetch_error: Optional[str] = None
@@ -433,11 +505,15 @@ def federate_values(
             for src_field, aid in fmap.items():
                 if src_field in row:
                     values[aid] = row[src_field]
+            full_values = dict(values)  # GAP-16：缓存未按 attr_ids 过滤的全量值（不同调用方子集不同）
             if attr_ids:
                 values = {a: values.get(a) for a in attr_ids}
             fetched = _now_iso()
             meta.update(mode="federated", stale=False, fetched_at=fetched, as_of=fetched,
                         elapsed_ms=int((time.monotonic() - started) * 1000))
+            if fed_ttl > 0:
+                with _FED_READ_CACHE_LOCK:
+                    _FED_READ_CACHE[fed_ckey] = (time.time() + fed_ttl, (full_values, dict(meta)))
             # V2-10 旁路操作日志（M4-G）：外部读取（联邦成功回源）事件，旁路不影响主流程。
             try:
                 import sidecar_log as sidecar_svc

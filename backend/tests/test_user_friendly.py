@@ -38,13 +38,18 @@ def test_from_doc_async():
     job_id = r.json()["data"]["job_id"]
 
     import time
-    for _ in range(20):
+    data = None
+    for _ in range(40):
         r2 = c.get(f"/api/ontologies/jobs/{job_id}")
-        if r2.json()["data"]["status"] != "pending":
+        data = r2.json()["data"]
+        if data["status"] in ("done", "error", "cancelled"):
             break
         time.sleep(0.5)
-    assert r2.json()["data"]["status"] == "done"
-    assert r2.json()["data"]["draft_id"]
+    assert data["status"] == "done"
+    assert data["draft_id"]
+    # GAP-11：进度/阶段字段，完成后 progress 达 100
+    assert data["progress"] == 100
+    assert data["stage"]
 
 
 def test_publish_draft():

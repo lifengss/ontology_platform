@@ -57,7 +57,7 @@ PUBLIC_EXACT_PATHS = {
     "/api/auth/login", "/api/auth/logout",
     "/api/auth/sso/config", "/api/auth/sso/start",
 }
-PUBLIC_PREFIXES = ("/mcp/", "/tutorial/", "/assets/", "/frontend/")
+PUBLIC_PREFIXES = ("/mcp/", "/tutorial/", "/assets/", "/frontend/", "/api/resources")
 
 # 登录与管理端点（/api/auth/* 除放行项外均要求 admin 或登录态）
 AUTH_ADMIN_PREFIXES = ("/api/auth/users", "/api/auth/roles", "/api/auth/audit", "/api/audit")
@@ -505,8 +505,10 @@ def permission_matrix(user: dict[str, Any]) -> dict[str, Any]:
     # （建/删仍受中间件 write 动作约束：viewer 只读，modeler+ 可操作）
     # quality（数据健康度，M3-C）为只读看板；alignment（跨本体对齐，M4-A②）以候选浏览为主
     # （viewer 可提交候选，声明/会签按 write/review 动作在 API 层与前端按钮层门禁）
-    tabs_read = ["home", "graph", "inference", "logs", "settings", "credentials", "tutorial",
-                 "quality", "alignment"]
+    # resources（资源下载）为公开分享物（Skill 包等），各角色均可见，下载接口本身不做角色门禁
+    # query（查询）为只读 SPARQL 查询台（GAP-10 回归：曾漏进白名单→对所有角色隐藏）
+    tabs_read = ["home", "graph", "query", "inference", "logs", "settings", "credentials",
+                 "tutorial", "quality", "alignment", "resources"]
     tabs = list(tabs_read)
     if "write" in actions:
         # orchestration（Action 编排，M3-F）与 action 同属写侧：建流/编辑/发布/运行

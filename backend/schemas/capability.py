@@ -61,3 +61,12 @@ class FederatedPreview(BaseModel):
     limit: int = Field(default=1000, ge=1, le=10000)
     offset: int = Field(default=0, ge=0)
     instance_ids: Optional[list[str]] = Field(default=None, max_length=5000)
+
+
+class CapabilityGenerateRequest(BaseModel):
+    """LLM 生成能力请求：结合业务描述 + 已有本体对象模型，生成可执行能力（不落盘，逐条校验）。"""
+    text: str = Field(..., min_length=1, description="业务描述文本")
+    ontology_id: str = Field(..., min_length=1, max_length=64, description="作为上下文的本体 id")
+    llm_endpoint: Optional[str] = Field(default=None, max_length=256)
+    model: Optional[str] = Field(default=None, max_length=128)
+    max_tokens: Optional[int] = Field(default=None, ge=1)

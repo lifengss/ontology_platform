@@ -15,11 +15,16 @@ import io
 import os
 import uuid
 
+import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
+from _authenv import auth_module_guard
 from main import app
 from core.storage import JsonStore
+
+pytestmark = pytest.mark.auth
+_guard = auth_module_guard()  # GAP-20：模块边界隔离鉴权环境，防跨模块污染
 
 c = TestClient(app)
 

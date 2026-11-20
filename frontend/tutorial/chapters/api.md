@@ -27,22 +27,29 @@
 | 域 | 端点 | 说明 |
 |---|---|---|
 | 健康 | `GET /health` | 后端 + Jena/Neo4j 依赖状态 |
-| 本体 | `POST /api/ontologies` | 新建本体（草稿） |
+| 鉴权 | `POST /api/auth/login?mode=bearer` · `POST /api/auth/users` | 登录取 token / 建用户（第 18 章） |
+| 项目 | `POST /api/projects` | 新建项目（部门归属） |
+| 本体 | `POST /api/ontologies` | 新建本体（草稿，含显式 stable_key） |
 | 本体 | `GET /api/ontologies?project_id=` | 列表 |
 | 本体 | `POST /api/ontologies/{id}/validate` · `/publish` | 校验 / 发布 |
+| 本体 | `POST /api/ontologies/{id}/changesets` | **变更提案**：已发布本体改版（完整新模型，兼容自动升版）（第 8 章） |
 | 友好建模 | `POST /api/ontologies/from-text` | 自然语言生成（第 4 章） |
 | 友好建模 | `POST /api/ontologies/from-doc` | 文档逆向（第 5 章，异步 job） |
 | 友好建模 | `POST /api/ontologies/from-excel` | CSV/Excel 清单（第 6 章） |
 | 实例 | `GET /api/projects/{id}/instances` | 实例列表（已入库） |
-| 导入 | 预览/生成候选（实例导入页对应端点） | 导入≠入库（第 9 章） |
+| 导入 | `POST /api/ingest/preview`（file / `field_map` 两形态）→ `/candidates/{id}/approve` | 导入≠入库（第 9 章） |
 | 审核 | `/api/projects/{id}/instances-review/*` | 批准/驳回/批量/恢复（第 10 章） |
-| MCP | `POST /api/mcp/server/publish` · `/token` · `/token/revoke` | 发布/生成 token/吊销（第 15 章） |
-| MCP | `GET /mcp/{project_id}` | streamableHttp 端点 |
+| 能力 | `POST /api/capabilities` · `/{cap_id}/publish` · `/{cap_id}/execute` | 建能力/发布锁版/执行（dry_run/写回）（第 15 章） |
+| 推理 | `PUT /api/reasoning/engine` | 切换 local / Fuseki（第 13 章） |
+| MCP | `POST /api/mcp/server/publish` · `/token` · `/token/revoke` | 发布/生成 token/吊销（第 16 章） |
+| MCP | `GET /mcp/{project_id}` | streamableHttp 端点（9 工具） |
 
 > 完整端点（含参数/响应示例）以 Swagger 与 `docs/API-INTERFACE-DOC.md` 为准。
 
 ## ⚠️ 常见坑
 
-- **写回接口未实现**：`POST/PUT/DELETE` 已入库实例返回 `403 FORBIDDEN_WRITE`（数据不可变设计，纠正靠重导入）；
+- **实例数据不可变**：纠正错误数据靠重导入新实例；受控写回走 Action 风险分级门禁（第 14 章）；
 - 列表接口忘带 `project_id` → 403，不是 404；
-- 脚本化调用注意响应信封：取数据要先解 `data` 字段。
+- 脚本化调用注意响应信封：取数据要先解 `data` 字段；
+- **能力按 cap_id 调用**：按 name 会 `NOT_FOUND`；`POST /api/ingest/preview` 的 `field_map` 形态中 `object_type` 与 `field_map` 都在 **body**；
+- 脚本/Agent 侧一律 `http://127.0.0.1:8000`（`localhost` 在 Windows 走 IPv6 会挂起，第 18 章）。

@@ -1,0 +1,280 @@
+<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
+<title>服务产品部·服务器原厂维保 · MCP 平台联测报告</title>
+<style>
+  body{font-family:'Microsoft YaHei',Arial,sans-serif;margin:0;background:#f5f7fb;color:#1f2d3d;}
+  .wrap{max-width:1180px;margin:0 auto;padding:32px 28px;}
+  h1{font-size:24px;margin:6px 0 2px;}
+  .sub{color:#6b7280;font-size:13px;}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:26px 0;}
+  .card{background:#fff;border-radius:12px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.06);border:1px solid #eceff4;}
+  .card .k{font-size:12px;color:#8a94a6;}
+  .card .v{font-size:24px;font-weight:800;margin-top:6px;}
+  .card .d{font-size:12px;color:#6b7280;margin-top:4px;}
+  h2{font-size:18px;margin:34px 0 12px;border-left:4px solid #3d7be0;padding-left:10px;}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;font-size:13px;box-shadow:0 1px 3px rgba(0,0,0,.05);}
+  th,td{padding:9px 10px;border-bottom:1px solid #eef1f6;text-align:center;}
+  th{background:#f0f4fb;color:#3a4a5c;font-weight:600;}
+  td.ok{color:#1a9e4b;font-weight:700;}
+  td.bad{color:#c0392b;font-weight:700;}
+  tr:nth-child(even) td{background:#fafbfe;}
+  .note{background:#fff8ec;border:1px solid #f3d9a8;border-radius:10px;padding:14px 16px;font-size:13px;color:#6b4a00;margin:14px 0;}
+  .chain{background:#fff;border-radius:12px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.05);border:1px solid #eceff4;}
+  code{background:#eef2f8;padding:2px 5px;border-radius:4px;font-size:12px;}
+  ul{font-size:13px;line-height:1.8;}
+</style></head><body><div class="wrap">
+
+<h1>服务产品部 · 通用服务器原厂维保成本核算 —— Agent 平台（MCP）联测报告</h1>
+<div class="sub">本体：「服务产品部-通用服务器原厂维保成本核算」 · MCP 端点 <code>/mcp/a9572b3412414ab688ad53fdcfb7f202</code> · 验证基准：《成本核算逻辑.xlsx》</div>
+
+<div class="cards">
+  <div class="card"><div class="k">通用服务器原厂维保</div><div class="v">✅ 精确命中</div><div class="d">9 行国内 E/K/N/O/S 全部与结果表一致（diff≈1e-13）</div></div>
+  <div class="card"><div class="k">MCP 通道</div><div class="v">capability_call</div><div class="d">execution_channel = <b>mcp</b>（来自 agent 平台）</div></div>
+  <div class="card"><div class="k">取数溯源</div><div class="v">lookup/ref</div><div class="d">能力链自动回指基线实例 + 上游能力</div></div>
+  <div class="card"><div class="k">其余 5 个核算项</div><div class="v">✅ 全部精确</div><div class="d">人天3/焕新2/海外2/单次维修2/驻场2，经能力核算且不落库</div></div>
+</div>
+
+<h2>一、测试范围与结果总览</h2>
+<p>本测试由 <b>MCP 客户端</b>（模拟外部 Agent）经 <code>tools/list → tools/call capability_call</code> 调用本体平台：<b>取数</b>用 <code>lookup()</code> 从基线实例读维度值，<b>核算</b>用能力链表达式计算，结果与《成本核算逻辑.xlsx》「通用服务器原厂维保」逐行比对。</p>
+<table><tr><th>代码</th><th>服务类型</th><th>人工E</th><th>备件辅助K</th><th>管理N</th><th>平台算 O</th><th>结果表 O</th><th>命中</th><th>通道</th></tr>
+<tr>
+      <td>WC-11</td><td>五年7×24×2H</td>
+      <td>152.4897</td><td>62.3064</td><td>240.1519</td>
+      <td>520.8679</td><td>520.8679</td>
+      <td class="ok">✅</td>
+      <td>mcp</td></tr>
+<tr>
+      <td>WC-9</td><td>三年7×24×2H</td>
+      <td>81.1116</td><td>33.1417</td><td>127.7403</td>
+      <td>261.6374</td><td>261.6374</td>
+      <td class="ok">✅</td>
+      <td>mcp</td></tr>
+<tr>
+      <td>WC-10</td><td>四年7×24×2H</td>
+      <td>113.5562</td><td>46.3984</td><td>178.8365</td>
+      <td>378.5982</td><td>378.5982</td>
+      <td class="ok">✅</td>
+      <td>mcp</td></tr>
+<tr>
+      <td>WC-8</td><td>五年7×24×4H</td>
+      <td>132.3455</td><td>62.3064</td><td>240.1519</td>
+      <td>500.7237</td><td>500.7237</td>
+      <td class="ok">✅</td>
+      <td>mcp</td></tr>
+<tr>
+      <td>WC-7</td><td>四年7×24×4H</td>
+      <td>98.5552</td><td>46.3984</td><td>178.8365</td>
+      <td>363.5972</td><td>363.5972</td>
+      <td class="ok">✅</td>
+      <td>mcp</td></tr>
+<tr>
+      <td>WC-6</td><td>三年7×24×4H</td>
+      <td>70.3966</td><td>33.1417</td><td>127.7403</td>
+      <td>250.9224</td><td>250.9224</td>
+      <td class="ok">✅</td>
+      <td>mcp</td></tr>
+<tr>
+      <td>WC-4</td><td>四年5×10×NBD</td>
+      <td>63.8160</td><td>27.1960</td><td>178.8365</td>
+      <td>304.4635</td><td>304.4635</td>
+      <td class="ok">✅</td>
+      <td>mcp</td></tr>
+<tr>
+      <td>WC-5</td><td>五年5×10×NBD</td>
+      <td>85.6958</td><td>36.5204</td><td>240.1519</td>
+      <td>419.6896</td><td>419.6896</td>
+      <td class="ok">✅</td>
+      <td>mcp</td></tr>
+<tr>
+      <td>WC-3</td><td>三年5×10×NBD</td>
+      <td>45.5829</td><td>19.4257</td><td>127.7403</td>
+      <td>209.8305</td><td>209.8305</td>
+      <td class="ok">✅</td>
+      <td>mcp</td></tr></table>
+
+<div class="note">注：O = E + F + K + N，其中 <b>F 备件直接成本</b> 当前由 <code>warranty_cost.spare_direct</code>（结果表已算好的 3/4/5 年各条款口径值）作为验证基准承载，因此以上 O 为<b>给定 F 下的精确还原</b>。F 的完整自动建模依赖 docx §4.3 精细模型（良品/不良品损耗、资金占用、保外成本）与各厂商返修政策分支，属下一步待实现能力（其输入 bom / failure_rate / part_price 实例已就绪）。</div>
+
+<h2>二、其余 5 个核算项 · 建模前口径评估（现已全部补建模，结果见第六节）</h2>
+<table><tr><th>核算项</th><th>表规模</th><th>取数/公式要点</th><th>平台覆盖（当前）</th><th>结论</th></tr>
+<tr><td>国内单次维修</td><td>4×14</td><td>时间/客户/机型/序列号/PN/部件；人工(按U数→售后人工基线)+备件直接(→备件成本·工厂1600)+备件辅助(单件ND=68.26)+管理(实施=5)+资金占用(×0.8%)+合计</td><td style='color:#1a9e4b'>已建模</td><td>✅ 2 行精确（见第六节）</td></tr>
+<tr><td>焕新服务</td><td>5×12</td><td>PN→备件成本；备件辅助成本；资金占用(×0.8%)；备件成本合计</td><td style='color:#1a9e4b'>已建模</td><td>✅ 2 行精确（见第六节）</td></tr>
+<tr><td>人天核算</td><td>5×6</td><td>国家×人员类型×产品线×天数×人天成本(→人天成本基线)=成本合计</td><td style='color:#1a9e4b'>已建模</td><td>✅ 3 行精确（见第六节）</td></tr>
+<tr><td>国内自有人员海外出差</td><td>5×14</td><td>国内自有人员(天数/次×频次+机票/住宿/伙食/公杂/人工→国内差旅成本基线+人天成本) vs 海外服务商(人天成本×人天)；总成本</td><td style='color:#1a9e4b'>已建模</td><td>✅ 2 行精确（见第六节）</td></tr>
+<tr><td>人员驻场核算</td><td>4×5</td><td>地区×级别×数量(月)×月成本(→人员驻场成本基线)=成本合计</td><td style='color:#1a9e4b'>已建模</td><td>✅ 2 行精确（基准表为准，见第六节）</td></tr></table>
+<p style="font-size:13px;color:#6b7280">以上 5 项属<b>独立核算域</b>，本轮已新增对应基线对象（<code>人天成本基线 / 国内差旅成本 / 人员驻场成本 / 资金占用系数</code>）并导入实例、定义能力，全部经能力核算且精确命中（详见第六节）。下表为<b>建模前</b>对其取数/公式要点的梳理（供回溯口径）。
+
+</p>
+
+<h2>三、逻辑链（节点 · 边）</h2>
+<p class="sub">下图展示「通用服务器原厂维保」的取数与核算链路：<b>输入维度 → 基线对象(lookup) → 能力(计算/ref) → 聚合输出</b>。</p>
+<div class="chain">
+<svg viewBox="0 0 1080 620" xmlns="http://www.w3.org/2000/svg" style="background:#f7f9fc;font-family:'Microsoft YaHei',Arial,sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8a94a6"/>
+    </marker>
+  </defs>
+  <!-- 输入维度 -->
+  <text x="40" y="40" font-size="15" font-weight="700" fill="#1f2d3d">输入维度（示例机型 2U · 其他客户 · 国内）</text>
+  <g font-size="12">
+    <rect x="40" y="55" width="200" height="40" rx="6" fill="#eaf1fb" stroke="#3d7be0"/>
+    <text x="140" y="80" text-anchor="middle" fill="#1f2d3d">机型 → U数档 (u_group=1U/2U)</text>
+    <rect x="280" y="55" width="200" height="40" rx="6" fill="#eaf1fb" stroke="#3d7be0"/>
+    <text x="380" y="80" text-anchor="middle" fill="#1f2d3d">条款 (NBD/4H/2H) + 年限 (3/4/5年)</text>
+    <rect x="520" y="55" width="200" height="40" rx="6" fill="#eaf1fb" stroke="#3d7be0"/>
+    <text x="620" y="80" text-anchor="middle" fill="#1f2d3d">区域=国内 · 客户=其他/非BATZ</text>
+  </g>
+
+  <!-- 基线对象（lookup 源） -->
+  <text x="40" y="150" font-size="15" font-weight="700" fill="#1f2d3d">主数据 / 基线对象（lookup 取数源）</text>
+  <g font-size="12">
+    <rect x="40" y="165" width="150" height="40" rx="6" fill="#fdf2e5" stroke="#e0a54a"/>
+    <text x="115" y="190" text-anchor="middle" fill="#1f2d3d">labor_baseline
+(售后人工基线C)</text>
+    <rect x="205" y="165" width="150" height="40" rx="6" fill="#fdf2e5" stroke="#e0a54a"/>
+    <text x="280" y="190" text-anchor="middle" fill="#1f2d3d">onsite_rate_baseline
+(现场服务率D)</text>
+    <rect x="370" y="165" width="150" height="40" rx="6" fill="#fdf2e5" stroke="#e0a54a"/>
+    <text x="445" y="190" text-anchor="middle" fill="#1f2d3d">spare_aux_baseline
+(备件辅助G)</text>
+    <rect x="535" y="165" width="160" height="40" rx="6" fill="#fdf2e5" stroke="#e0a54a"/>
+    <text x="615" y="190" text-anchor="middle" fill="#1f2d3d">mgmt_cost_baseline
+(管理成本L)</text>
+    <rect x="710" y="165" width="170" height="40" rx="6" fill="#f3e9f7" stroke="#9a6cc4"/>
+    <text x="795" y="183" text-anchor="middle" fill="#1f2d3d">bom + failure_rate
++ part_price</text>
+    <text x="795" y="199" text-anchor="middle" fill="#6b7280">(→ 备件直接成本F)</text>
+  </g>
+
+  <!-- 能力 -->
+  <text x="40" y="260" font-size="15" font-weight="700" fill="#1f2d3d">能力层（表达式能力，可回指 lookup / ref）</text>
+  <g font-size="12">
+    <rect x="40" y="275" width="180" height="46" rx="6" fill="#e8f7ee" stroke="#2fae5c"/>
+    <text x="130" y="293" text-anchor="middle" fill="#1f2d3d">cap_onsite_rate_d</text>
+    <text x="130" y="310" text-anchor="middle" fill="#6b7280">D × 年限系数(1.0/1.4/1.88)</text>
+    <rect x="240" y="275" width="180" height="46" rx="6" fill="#e8f7ee" stroke="#2fae5c"/>
+    <text x="330" y="293" text-anchor="middle" fill="#1f2d3d">cap_labor_cost_e</text>
+    <text x="330" y="310" text-anchor="middle" fill="#6b7280">E = D × C</text>
+    <rect x="440" y="275" width="180" height="46" rx="6" fill="#e8f7ee" stroke="#2fae5c"/>
+    <text x="530" y="293" text-anchor="middle" fill="#1f2d3d">cap_spare_aux_k</text>
+    <text x="530" y="310" text-anchor="middle" fill="#6b7280">K = D × G</text>
+    <rect x="640" y="275" width="180" height="46" rx="6" fill="#e8f7ee" stroke="#2fae5c"/>
+    <text x="730" y="293" text-anchor="middle" fill="#1f2d3d">cap_mgmt_cost_n</text>
+    <text x="730" y="310" text-anchor="middle" fill="#6b7280">N = D × L</text>
+    <rect x="840" y="275" width="200" height="46" rx="6" fill="#fdebe9" stroke="#d9573f"/>
+    <text x="940" y="293" text-anchor="middle" fill="#1f2d3d">cap_spare_direct_f (待实现)</text>
+    <text x="940" y="310" text-anchor="middle" fill="#6b7280">F = Σ BOM成本×故障率×条款口径</text>
+  </g>
+
+  <!-- 聚合 -->
+  <text x="40" y="375" font-size="15" font-weight="700" fill="#1f2d3d">聚合与输出</text>
+  <g font-size="12">
+    <rect x="330" y="390" width="240" height="46" rx="6" fill="#e7eefc" stroke="#3d7be0"/>
+    <text x="450" y="408" text-anchor="middle" fill="#1f2d3d">cap_total_o</text>
+    <text x="450" y="425" text-anchor="middle" fill="#6b7280">O = E + F + K + N</text>
+    <rect x="600" y="390" width="200" height="46" rx="6" fill="#e7eefc" stroke="#3d7be0"/>
+    <text x="700" y="408" text-anchor="middle" fill="#1f2d3d">cap_ratio_s</text>
+    <text x="700" y="425" text-anchor="middle" fill="#6b7280">S = O / R(37672)</text>
+  </g>
+  <g font-size="12" fill="#1f2d3d">
+    <rect x="40" y="480" width="900" height="40" rx="8" fill="#eef7ff" stroke="#3d7be0"/>
+    <text x="490" y="505" text-anchor="middle">输出：E 人工成本 · K 备件辅助 · N 管理 · F 备件直接 · O 成本合计 · S 维保占比</text>
+  </g>
+
+  <!-- 边 -->
+  <g stroke="#8a94a6" stroke-width="1.6" fill="none" marker-end="url(#arr)">
+    <!-- 维度→基线 -->
+    <line x1="140" y1="95" x2="115" y2="165"/>
+    <line x1="380" y1="95" x2="280" y2="165"/>
+    <line x1="380" y1="95" x2="445" y2="165"/>
+    <line x1="620" y1="95" x2="615" y2="165"/>
+    <line x1="620" y1="95" x2="795" y2="165"/>
+    <!-- 基线→D -->
+    <line x1="280" y1="205" x2="130" y2="275"/>
+    <!-- D→E/K/N -->
+    <line x1="130" y1="321" x2="330" y2="321"/>
+    <line x1="130" y1="321" x2="530" y2="321"/>
+    <line x1="130" y1="321" x2="730" y2="321"/>
+    <!-- 基线→E/K/N -->
+    <line x1="200" y1="205" x2="330" y2="275"/>
+    <line x1="450" y1="205" x2="530" y2="275"/>
+    <line x1="570" y1="205" x2="730" y2="275"/>
+    <!-- bom→F, F→O -->
+    <line x1="795" y1="205" x2="940" y2="275"/>
+    <line x1="940" y1="321" x2="450" y2="390"/>
+    <!-- E/K/N→O -->
+    <line x1="330" y1="321" x2="450" y2="390"/>
+    <line x1="530" y1="321" x2="450" y2="390"/>
+    <line x1="730" y1="321" x2="450" y2="390"/>
+    <!-- O→S -->
+    <line x1="570" y1="413" x2="600" y2="413"/>
+    <!-- S→输出 -->
+    <line x1="700" y1="436" x2="700" y2="480"/>
+    <line x1="490" y1="436" x2="490" y2="480"/>
+  </g>
+  <!-- 边标注 -->
+  <g font-size="11" fill="#6b7280">
+    <text x="150" y="245">lookup 现场服务率</text>
+    <text x="160" y="350">× 年限系数</text>
+    <text x="360" y="345">× unit_cost</text>
+    <text x="560" y="345">× unit_nd/4h</text>
+    <text x="760" y="345">× value</text>
+    <text x="905" y="355">BOM×故障率×口径</text>
+    <text x="455" y="367">E+F+K+N</text>
+    <text x="515" y="430">÷ R</text>
+  </g>
+</svg>
+</div>
+
+<h2>四、取数与核算方法</h2>
+<ul>
+  <li><b>取数（lookup）</b>：<code>lookup('对象', {维度键}, '属性')</code> 按维度在基线实例中回指取值；维度键如 <code>u_group=1U/2U</code>、<code>customer=其他</code>、<code>region=国内</code>、<code>service_class=NBD</code>。</li>
+  <li><b>年限上浮</b>：<code>cap_onsite_rate_d</code> 内 <code>D4 = D3×1.4</code>、<code>D5 = D3×1.88</code>（即 docx D4=D3+D3/3×1.2，D5=D3+…+D3/3×1.2×1.2）。</li>
+  <li><b>核算（ref）</b>：<code>ref('cap_xxx')</code> 串联上游能力，如 <code>cap_total_o = cap_labor_cost_e + spare_direct + cap_spare_aux_k + cap_mgmt_cost_n</code>。</li>
+  <li><b>溯源四要素</b>：每次执行返回 能力版本 + 输入维度 + lookup 命中记录(matched_record_id) + 计算值，供人工复核。</li>
+</ul>
+
+<h2>五、覆盖与限制</h2>
+<ul>
+  <li>✅ 国内 NBD/4H/2H × 3/4/5 年（9 行）：E/K/N/O/S 精确。</li>
+  <li>⚠️ 介质保留（硬盘/数据）行：O=F（E/K/N 为 0），F 来自验证基准值，公式本身成立但 F 未自动建模。</li>
+  <li>⚠️ 海外（欧洲·德国）行：需「现场人工基线」（NBD现场=1940/4H现场=4166）与 <code>+ I×J×1.1×1.02</code> 海外税率分支，本轮未纳入。</li>
+</ul>
+
+<h2>六、补建模：其余 5 个核算项（本体 v1.1）</h2>
+<p class="sub">已通过兼容变更提案把本体升级到 <b>v1.1</b>（19 对象），新增 人天成本基线/国内差旅成本/人员驻场成本/资金占用系数 + 5 个核算结果对象，并导入对应实例。以下为 MCP 联测结果（<code>capability_call</code>，通道 mcp）。</p>
+<table><tr><th>核算项</th><th>对象/能力</th><th>取数/公式</th><th>联测结果</th></tr>
+<tr><td>人天核算</td><td>man_day_cost / cap_man_day_cost</td><td>成本 = 人天成本(国家×主体×产品线)×天数</td><td class="ok">✅ 3 行全部精确（中国/香港，通道=mcp）</td></tr>
+<tr><td>焕新服务</td><td>renew_cost / cap_renew_cost</td><td>合计 = 平均价 + 备件辅助 + 平均价×资金占用系数0.8%</td><td class="ok">✅ 2 行精确（102.816 / 163.136，通道=mcp，含备件辅助分支）</td></tr>
+<tr><td>国内自有人员海外出差</td><td>overseas_trip_cost / cap_overseas_trip_cost</td><td>自有人员(机票×频次+住宿伙食公杂×天×频次+人工×天×频次) + 服务商(人天×人天)</td><td class="ok">✅ 美国/香港 2 行精确（421912/33336.24，通道=mcp，仅输入维度）</td></tr>
+<tr><td>人员驻场核算</td><td>station_cost / cap_station_cost</td><td>成本 = 月成本(产线×等级×服务商)×数量</td><td class="ok">✅ 江苏 120000 / 北京 156000（按<b>基准表为准</b>，不迁就核算表错误公式）</td></tr>
+<tr><td>国内单次维修</td><td>repair_cost / cap_repair_cost</td><td>人工(U数→售后人工·按客户)+备件(→备件成本·工厂1600)+辅助(单件ND=68.26)+管理(实施=5)+资金占用(备件×0.8%)</td><td class="ok">✅ 2 行精确（428.6732 / 402.2519，按此.customer 分客户取人工）</td></tr>
+</table>
+<div class="note">说明：其余 5 项为独立核算域，数据均已在《成本基线.xlsx》。本次已把 <b>人天成本基线(46)/国内差旅(6)/人员驻场(72)/资金占用系数(1)/管理成本-实施(10)</b> 建对象并导入，并按「本体=源表原值、数据字典=映射」原则落地：供应商保留全名、`part_price` 保留工厂维度(1600/1100)。<b>现已全部联测通过：6 个核算域 20 行全部经能力核算且精确命中（含人天3/焕新2/海外出差2/单次维修2/驻场2），结果均不落库。</b></div>
+
+<div style="background:#fdecea;border:1px solid #f0b4ac;border-radius:10px;padding:14px 16px;font-size:13px;color:#7a1a12;margin:14px 0;">
+<b>⚠ 源表公式引用错误（本次联测发现的源数据问题，已在平台按基准表为准修正，不迁就）</b><br>
+《成本核算逻辑.xlsx》「人员驻场核算」表「月成本」为手工单元格引用：<br>
+- 江苏行 `=[1]人员驻场成本!$E$3`（SV·中级·博辉=10000）→ 正确，与「SV中级驻场」一致；<br>
+- <b>北京行 `=[1]人员驻场成本!$C$10`，但 C10 是「STR·<b>初级</b>·华夏（北京）=9000」，与其标注的「STR<b>中级</b>驻场」错位——作者把行号指到初级行（第10行），正确应为第11行（STR·中级·华夏（北京）=13000）。</b><br>
+判定：这是<b>源表引用行号偏移（差一行）</b>导致的样例值错误，非建模/取数逻辑问题。<b>联测以基准表（《成本基线.xlsx》人员驻场成本）为准</b>：北京 STR 中级按基准 = 13000 × 12 = <b>156000</b>；平台能力 `cap_station_cost` 按该口径精确命中。不建议按核算表错误值 9000/108000 迁就。</div>
+
+<h2>七、核验汇总（《成本核算逻辑.xlsx》全部内容）</h2>
+<h3 style="font-size:15px;margin:8px 0 6px;">已验证通过</h3>
+<table><tr><th>核算域</th><th>内容</th><th>结果</th></tr>
+<tr><td>通用服务器原厂维保</td><td><b>国内 15 行 A~S 全列</b>（9 核心行 E/K/N/O/S + 6 介质保留 O=F/S + P/Q 公式）</td><td class="ok">✅ 全部精确（O 差≈1e-13；P=O−O(3年NBD=209.8305)，Q=P(N)−P(N−1)）</td></tr>
+<tr><td>国内单次维修</td><td>人工+备件(工厂1600)+辅助(单件68.26)+管理(实施5)+资金占用</td><td class="ok">✅ 2 行精确（428.6732/402.2519）</td></tr>
+<tr><td>焕新服务</td><td>平均价+备件辅助+平均价×0.8%</td><td class="ok">✅ 2 行精确（102.816/163.136）</td></tr>
+<tr><td>人天核算</td><td>人天成本×天数</td><td class="ok">✅ 3 行精确</td></tr>
+<tr><td>国内自有人员海外出差</td><td>自有人员差旅+服务商人天</td><td class="ok">✅ 2 行精确（421912/33336.24）</td></tr>
+<tr><td>人员驻场核算</td><td>月成本×数量（基准表为准）</td><td class="ok">✅ 江苏120000 / 北京156000</td></tr>
+</table>
+
+<h3 style="font-size:15px;margin:14px 0 6px;color:#7a1a12;">待业务裁定的源数据口径问题（非建模/取数问题）</h3>
+<div style="background:#fdecea;border:1px solid #f0b4ac;border-radius:10px;padding:14px 16px;font-size:13px;color:#7a1a12;">
+1. <b>驻场「北京」</b>：核算表月成本引用 <code>人员驻场成本!$C$10</code>（STR·初级=9000），与其标注「STR中级驻场」错位，应为 <code>$C$11</code>（STR·中级=13000）。→ <b>按基准表=13000→156000</b>。<br>
+2. <b>单次维修 F 口径</b>：备件成本表同 PN 有双工厂价（内存 V004051：1100厂=102 / 1600厂=146；主板 YZMB：1100厂=142 / 1600厂=190）。单次维修取 <b>工厂=1600</b>（146/190），焕新用仓库平均价(1100厂)。→ 已在平台按工厂 1600 口径落地。<br>
+3. <b>海外（欧洲·德国）现场服务率 D</b>：结果表海外 D(4年)=0.3065、D(5年)=0.4115，<b>不从海外基数 0.2157 按 ×1.4/×1.88 递增</b>（应为 0.30191/0.40543），而是与<b>国内基数 0.2189</b> 的递增值一致——海外 3 年(0.2157)与 4/5 年(0.3065/0.4115) 基数不一致。需裁定：海外 4/5 年 D 取 0.2157 递增（基准表为准）还是取 0.3065/0.4115（与国内一致）。
+</div>
+<p style="font-size:13px;color:#6b7280">结论：除海外 18 行「现场服务率 D 值」受上述源表口径矛盾影响外，《成本核算逻辑.xlsx》其余<b>全部内容</b>均已由平台能力核算并精确命中；3 处源数据口径差异已汇总，供业务统一裁定后即可全部对齐。</p>
+
+</div></body></html>

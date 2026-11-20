@@ -89,6 +89,7 @@
 ### 1.6 其它
 - 所有写接口接受 `application/json`；时间字段服务端生成，客户端不传。
 - 资源 ID 一律用字符串（UUID v4）。
+- **`project_id` 可省略（GAP-07，2026-11-19）**：接受 `?project_id=` 的项目级接口统一支持省略——省略时回退**当前身份最近使用的项目**（服务端默认项目），无记录、或该项目已删除/跨租户不可读 → `default`。显式传 `project_id` 的请求会把该身份最近使用记录刷新为所传值（仅值变化时写盘，每请求零额外 IO）。`GET /api/projects` 响应携带 `data.default_project`（当前身份默认项目，无则 `null`，见 §16）。
 
 ---
 
@@ -241,9 +242,10 @@
 | POST | `/api/ingest/preview` | 生成候选（LLM/字段映射/外部读取），**不入库** |
 | GET | `/api/ingest/candidates` | 候选列表（分页，query=`namespace`,`ontology_id`,`status`,`page`,`pageSize`） |
 | GET | `/api/ingest/candidates/{id}` | 候选详情 |
-| POST | `/api/ingest/candidates/{id}/approve` | 人工审核通过 → SHACL → 落 Neo4j（返回落库结果） |
+| POST | `/api/ingest/candidates/{id}/approve` | 人工审核通过 → SHACL → 落 Neo4j（返回落库结果；SHACL 拦截时 `data.model_gaps` 附结构化模型缺口，GAP-05） |
 | POST | `/api/ingest/candidates/{id}/reject` | 人工拒绝 |
-| GET | `/api/ingest/instances` | 已入库实例列表（分页，query=`namespace`,`ontology_id`,`object_type`,`page`,`pageSize`，默认 pageSize=50 上限 200） |
+| POST | `/api/ingest/model-gaps/fix` | GAP-05：一键修复模型缺口并重发布——body `{ontology_id, object_type, gaps[], note?}`；只执行兼容修复（新增可选属性/补枚举值/放宽约束），内部复用 changesets 兼容变更管线（自动升小版本＋直接发布）；不兼容项在 `data.skipped` 返回；非 active 本体 422 `MODEL_GAP_MANUAL`；无可执行项 422 `MODEL_GAP_NOOP` |
+| GET | `/api/ingest/instances` | 已入库实例列表（分页，query=`namespace`,`ontology_id`,`object_type`,`page`,`pageSize`，别名 `page_size`/`offset` 亦接受（GAP-06），默认 pageSize=50 上限 200） |
 | PUT | `/api/ingest/instances/batch` | 批量更新：统一校验/变更日志；query=`project_id`,`reason`,`strict_fields`,`defer_rdf_sync`；默认按 touched ontology 末尾只同步一次 |
 | PUT | `/api/ingest/instances/{instance_id}` | 整体替换：SHACL＋字段白名单＋复合唯一校验，写变更日志，默认单实例增量 RDF 同步 |
 | PATCH | `/api/ingest/instances/{instance_id}` | 字段级局部更新，保留 `_source` / `__capability__` 血缘；走同一校验链路 |
@@ -274,9 +276,23 @@
 - `mapping.field_map` 方向：**源字段名 → 本体属性 id**（如 `"account_name": "name"`）。
 - 响应：`data` = 候选实例对象（§3.1，`status=pending`）。
 - `preview` 会先校验本体业务层门；不通过返回 422。
-- `POST .../approve` 响应：`data = { "imported": 5, "rejected": 0, "violations": [], "neoTxId": "..." }`；若 SHACL 校验失败返回 `data={ "imported":0, "violations":[...] }` 且 HTTP 200（业务级失败，非 5xx）。
+- `POST .../approve` 响应：`data = { "imported": 5, "rejected": 0, "violations": [], "model_gaps": [], "neoTxId": "..." }`；若 SHACL 校验失败返回 `data={ "imported":0, "violations":[...], "model_gaps":[...] }` 且 HTTP 200（业务级失败，非 5xx）。
+- **模型缺口（GAP-05）**：`model_gaps` 每项为 `{kind, attribute_id?, attribute_name, detail, auto_fixable, fix?: {action, params}, values?}`，`kind` ∈ `missing_attribute`（缺字段）/`enum_value_missing`（枚举缺值）/`constraint_too_strict`（约束过紧）/`type_mismatch`（类型不符，需人工）/`unknown`（其他，需人工）；`fix.action` ∈ `add_attribute` / `add_enum_values` / `remove_pattern` / `relax_max_length` / `relax_min_length` / `relax_maximum` / `relax_minimum` / `unset_required`。产生位置：① approve SHACL 拦截（按违规＋候选实例样本归纳）；② 上传 `POST /api/ingest/upload` 表头**全部**未匹配时 422，`error.details = {object_type, model_gaps}`（missing_attribute 缺口，含样本推断 `data_type`）；③ 表头**部分**匹配时候选成功创建，候选对象携带 `model_gaps`（未匹配列数据不落入候选实例）。前端导入页据此弹「模型缺口」层，一键修复（`/model-gaps/fix`）后自动重新上传/重新审批继续导入。
 - approve 流程：先跑业务层门 → 再跑 SHACL（pyshacl）→ 通过则写 Neo4j；Neo4j 不可用时降级为本地 `data/instances.jsonl`，仍可被后续 VS4 图谱读取。
 - **护栏**：任何试图绕过审核直接落库的入口返回 `FORBIDDEN_WRITE`；已落库候选不可拒绝。
+- **接口约定与别名（GAP-06，面向集成方/脚本开发者）**：
+  - **object_type 双通道**：`POST /api/ingest/upload`、`/upload-smart` 的 `object_type` 可用查询参数（`?object_type=<对象id>`）或 multipart 表单字段（`-F 'object_type=<对象id>'`），二者等价、同时给出时查询参数优先；`POST /api/ingest/preview` 的 `object_type` 可用 body 字段或查询参数 `?object_type=`，body 优先（body 与 query 均未给时回退本体首个对象，可能并非目标对象）。
+  - **分页别名**：列表端点正式参数为 `page`/`pageSize`；同时接受常见误用的 `page_size`（pageSize 别名）与 `offset`（page 别名，`page = offset // pageSize + 1`）。正式名与别名同时给出时以正式名为准；非法值忽略。适用端点：`GET /api/ingest/candidates`、`/api/ingest/instances`、`/api/ingest/instances/{id}/change-logs`、`GET /api/instances`（通用 REST 查询）。
+  - **CSV/Excel 空单元格视为缺失**：空串/纯空白单元格不再以 `""` 落入实例——可选属性直接缺键、必填属性得到清晰的「必填缺失」违规（并附 `unset_required` 模型缺口可一键放宽），避免 `Literal("")` 与枚举/类型约束误报。
+  - **field_map 空值明确报错**：`POST /api/ingest/preview` 的 `mapping.field_map` 为空或缺失 → 422，消息说明可传 identity map（源表头与属性 id 相同即可，如 `{"orderCode":"orderCode"}`）并附 curl 示例；`upload` 端点可不传 `field_map`（按表头自动匹配）。
+  - curl 示例：
+  ```bash
+  # CSV 上传（object_type 走表单字段，等价于 ?object_type=Order）
+  curl -F 'file=@orders.csv' -F 'object_type=Order' \
+       'http://<host>/api/ingest/upload?project_id=<项目>&ontology_id=<本体id>'
+  # 分页别名（等价于 page=3&pageSize=20）
+  curl 'http://<host>/api/ingest/instances?project_id=<项目>&page_size=20&offset=40'
+  ```
 
 ---
 
@@ -285,8 +301,13 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/graph/{id}` | 图谱数据（含 `source` 溯源着色字段） |
+| GET | `/api/graph/{id}/neighbors` | 按需邻居查询（GAP-12，大图不全量拉取） |
+| GET | `/api/graph/{id}/consistency` | 本地 TTL 与模型/实例数据一致性对账（GAP-15，轻量 mtime 对比） |
+| POST | `/api/projects/{id}/seed-example` | 空项目一键预置示例本体＋示例实例（GAP-13，非空项目 409） |
 | GET | `/api/inference/trace/{id}` | 推理链路 steps |
 | POST | `/api/graph/{id}/nl-query` | 自然语言 → SPARQL → 图谱查询（O-05） |
+
+- **`GET /api/graph/{id}/neighbors`（GAP-12 按需邻居，2026-11-19）**：Query 参数 `node_id`（必填，对象 id 或实例 id）、`mode=schema|knowledge`（缺省 schema）、`depth`（对象关系 BFS 层级 1~2，缺省 1）、`limit`（实例邻居抽样上限 0~200，缺省 50，0=不截断）。响应 `{node, nodes, edges, truncated, total}`——对象节点返回关系边无向 BFS 邻居（knowledge 模式附焦点对象实例抽样）；实例节点返回所属对象＋同对象其他实例抽样。节点不存在 404；`depth>2`/`limit>200` 422。前端双击节点增量展开邻居（`mergeGraphNeighbors` 去重并入当前图，不全量重拉）。配套前端大图优化：视口虚拟化渲染（>150 节点只显示视口内节点与两端可见的边，zoom/tick 双触发）、类型（对象/实例）与来源（内部建模/外部归化）筛选 chips＋知识视图按对象类型下拉筛选。
 
 - `POST /api/graph/{id}/nl-query` 请求体：`{ "question": "查询所有客户及其订单" }`；响应：`{ "question": "...", "sparql": "SELECT ...", "source": "llm|fallback", "rows": [{...}], "count": N }`。`source` 为 SPARQL 生成来源：`llm`（LLM 生成并通过语法校验）/ `fallback`（LLM 不可达、超时或返回非法时的确定性模板查询，仅能近似列出对象实例，不含条件过滤），前端应据此向用户提示兜底。
 - `GET /api/graph/{id}` 响应：
@@ -586,7 +607,7 @@
 | POST | `/api/templates/instantiate-external` | 外部 LinkML 模板一键实例化为本地可编辑本体（V2-19） |
 
 - 请求体/响应体与 §2 本体结构一致，模板字段：`name`、`description`、`industry`、`tags`、`model`（即 `OntologyCreate`）。
-- 内置模板（可覆盖更新）：`tpl_customer_basic`（基础客户-联系人-订单）、`tpl_product_catalog`（品类-SPU）。
+- 内置模板（可覆盖更新）：`tpl_customer_basic`（基础客户-联系人-订单）、`tpl_product_catalog`（品类-SPU）、`tpl_order_sample`（订单履约示例（约束示范）：订单+客户两对象，覆盖 pattern/enum/min/max/长度区间全部约束类型，供新手一键复用后修改，GAP-04 2026-11-18）。
 - **V2-19 外部 LinkML 模板网络加载**：
   - `POST /api/templates/preview-external` 请求体：`{ "url": "https://example.com/supply-chain.yaml" }`（仅 http/https，禁止 file:// 等本地协议）。响应：`{ name, description, object_count, objects:[{ id, name, business_definition, stable_key, attributes:[{ id, name, data_type, required, constraints }], relations:[{ id, name, target_object, cardinality }] }], license }`；`license` 为模板中的许可声明（`license`/`license_text`/`license_url`）并入描述。
   - `POST /api/templates/instantiate-external` 请求体：`{ "url": "...", "name": "可选覆盖本体名" }`。复用 §2 create 校验在平台 `draft` 态创建本地可编辑本体，返回 201 与本体信封（同 §2）。
@@ -600,16 +621,28 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/ontologies/from-text` | 自然语言描述 → 生成本体草稿（201） |
-| POST | `/api/ontologies/from-excel` | 上传 CSV/Excel（对象/属性/关系表）→ 生成本体草稿（201） |
-| POST | `/api/ontologies/from-doc` | 上传 PRD/Word/Excel/PDF/文本 → 异步解析抽取本体（202 返回 job_id） |
-| GET | `/api/ontologies/jobs/{job_id}` | 查询异步解析任务状态 |
+| POST | `/api/ontologies/from-excel` | 上传 CSV/Excel 数据表（宽数据表/长表属性清单/B0 三 sheet 自动识别）→ 生成本体草稿（201）；可选 form 参数 `name` 覆盖本体名（缺省：宽表取文件名主干） |
+| POST | `/api/ontologies/from-doc` | 上传 PRD/Word/Excel/PDF/文本 → 异步解析抽取本体（202 返回 job_id）；多文档增量建模（2026-11-19）：支持 `files` 多文件，可选 form 字段 `ontology_id` 指定**合并目标草稿**（未指定=新建独立草稿；指定→202 附 `merge_target_id`，job 记录带 `merge_target_id/merge_target_name`，retry 沿用目标、目标已删则退化普通解析） |
+| GET | `/api/ontologies/jobs/{job_id}` | 查询异步解析任务状态（GAP-11：含 status/stage/progress/kind/file_names/draft_id/error） |
+| GET | `/api/ontologies/jobs` | GAP-11：当前项目任务列表（created_at 倒序，信封 `{items,total,page,page_size}`；须先于 `GET /{ontology_id}` 通配注册防吞路由） |
+| POST | `/api/ontologies/jobs/{job_id}/cancel` | GAP-11：取消任务（仅 `pending/running`，协作式置事件，worker 下一检查点退出；终态→409） |
+| POST | `/api/ontologies/jobs/{job_id}/retry` | GAP-11：重试任务（仅 `error/cancelled`，复用原上传参数**新建 job**，202 返回 `{job_id,status,retried_from}`；原参数缺失→409） |
 | POST | `/api/ontologies/{id}/publish` | 将 `draft` 状态本体发布为 `active` |
+| POST | `/api/ontologies/{id}/draft-diff` | GAP-09：生成结果（来源草稿）vs 当前模型（本本体）结构化差异，只读（见下「差异审核」） |
+| POST | `/api/ontologies/{id}/adopt-changes` | GAP-09：把差异审核中勾选的变更合并进本本体（仅 `draft` 可直编；`active`→409 走变更提案） |
 
 - 所有逆向生成结果默认先为 `status=draft`，可编辑后发布；发布时调用翻译器写入 Jena。
+- **差异审核（GAP-09，2026-11-19）**：
+  - `POST /api/ontologies/{id}/draft-diff` 请求体 `{source_draft_id}`：来源必须是**草稿**（AI/文档/表格生成未发布），目标（`{id}`）任意状态（只读对比）。响应 `data = {target:{id,name,status,version,object_count}, source:{id,name,status,draft_source,generation_mode,object_count}, diff:{compatible, version_bump, changes[]}, change_count}`；`changes[]` 为 `schemadiff.diff_ontology` 输出（18 类 kind：对象增删/主键与父级变更/属性增删/类型与必填/约束 enum/pattern/minimum/maximum/关系增删改/本体级约束与函数增删改），每项含 `compatible` 与 `index`（供逐项采纳）。错误：目标/来源不存在 404 `NOT_FOUND`；来源非草稿 422 `VALIDATION_ERROR`。
+  - **多文档增量建模对齐（2026-11-19）**：`DraftDiffRequest`/`AdoptChangesRequest` 均带 `align: bool = True`——采纳前先做**确定性对齐**（新模块 `backend/draft_align.py`，复用 GAP-09 同一 `_diff_models()` 口径，保证 diff 与 adopt 变更序号一致）。三通道：① 名称归一化（NFKC/去空白/casefold）精确匹配；② 数据字典同义词（词条 `object_type` 绑定目标对象且导入名命中 `synonyms`；字典未维护自动落到 ①+③）；③ 相似度（复用 `dictionary._similarity`：包含度 0.75+0.25×len 比 / `SequenceMatcher.ratio()`，阈值 0.85；top1−top2<0.1 判**歧义不对齐不猜测**）。属性 ID 映射后同步重映射对象 `stable_key`（避免假 `stable_key_changed`）；关系按（名称, 目标对象）对齐并改写端点 `target_object`。diff 响应附 `alignment` 明细与 `aligned_count`；采纳后 method=semantic 且名称不同的对象对自动**沉淀数据字典同义词**（`promote_synonym`/`create_term`，失败不阻断；采纳审计/响应带 `aligned_count`/`synonyms_recorded`）。对齐主语是目标本体自身，数据字典是建模过程的沉淀物而非前置条件（互哺闭环）。
+  - `POST /api/ontologies/{id}/adopt-changes` 请求体 `{source_draft_id, adopt, note?}`：`adopt` 为 `changes[].index` 整数数组或 `"all"`（一键采纳全部）。端点先对当前目标/源**重新 diff** 再按 index 逐项应用（**index 只对应当前目标状态**——分批采纳须先重新 `draft-diff` 取新 index；越界 index 422 并附 `details.count`）；应用幂等（已生效项计入 `data.skipped`）；约束级变更按 `constraint_key` 字段精确同步（枚举增补不动 minimum）。合并结果与 PUT 编辑同一门：`blocking_violations` 不过→422 `VALIDATION_ERROR` 不写入。响应 `data = {…更新后本体, adopted, skipped, source_id, note}`。错误：目标非草稿 409 `PUBLISHED_IMMUTABLE`（已发布本体须走 changesets 变更提案）；来源非草稿/来源=目标/无效 index 422 `VALIDATION_ERROR`。
+  - 审计动作 `ontology_adopt_changes`（before/after 模型视图＋`source_id/adopted/skipped/note`）；前端：生成成功后自动弹「草稿差异审核」层（兼容项默认勾选、不兼容项需显式勾选）＋详情面板「差异审核」按钮，可勾选「采纳后删除生成草稿」。
 - `POST /api/ontologies/from-text` 请求体可选 `max_tokens`（整数 ≥1）：LLM 生成最大 token 数，缺省用 LLM 设置中的 `max_tokens`。**不要传小值**：思考型模型（如 qwen3.8-27b）的 reasoning tokens 计入 completion_tokens，小值会被推理过程吃光导致正文为空。
 - LLM 生成失败（不可达/正文为空/JSON 非法）时自动回退确定性模板，草稿仍正常返回，但记录带 `generation_mode` 字段：`"llm"`=模型真实产出，`"fallback"`=确定性兜底（`from-text` 与 `from-doc` 均适用）；前端对 `fallback` 结果有显式「模板兜底」标识，勿将兜底结果当 AI 产出。
-- `POST /api/ontologies/from-excel` 约束列（**均可选**，缺列=无约束）：属性表支持 `min_length` / `max_length` / `pattern` / `minimum` / `maximum` / `enum` 六个约束列（中文列名"最小长度/最大长度/正则/最小值/最大值/枚举"亦可）；`enum` 逗号分隔，数值属性的枚举项可为数字（类型跟随 data_type，同 §2.1）；数字列解析失败时**忽略该列**而非报错（宽容导入）。
+- `POST /api/ontologies/from-excel` 三种格式自动识别（GAP-04，2026-11-18）：**① 宽数据表（最常用）**——首行为列名（列=属性）、其余为数据行，生成**单对象**草稿；`data_type`（string/integer/float/boolean/date）、`required`（样本全填充）、稳定主键（列名含 id/编号/编码/code/identifier/单号 关键词 → 首个 string 列 → 首列）、约束（数值 min/max、字符串长度区间、低基数≤8 且重复 → enum，主键列不推断枚举）全部由样本自动推断（最多取前 500 行样本），仅表头无数据行时退化为骨架草稿（各列 string/非必填/无约束）；重复列名属性 id 自动加 `_1` 后缀。**② 长表（属性清单）**——表头显式含 对象/对象名/object 列，一行一属性、可多对象；**③ B0 三 sheet 模板**。
+- 长表约束列（**均可选**，缺列=无约束）：属性表支持 `min_length` / `max_length` / `pattern` / `minimum` / `maximum` / `enum` 六个约束列（中文列名"最小长度/最大长度/正则/最小值/最大值/枚举"亦可）；`enum` 逗号分隔，数值属性的枚举项可为数字（类型跟随 data_type，同 §2.1）；数字列解析失败时**忽略该列**而非报错（宽容导入）。
 - `from-doc` 解析异常时返回 `error` 状态；LLM 不可达时启用确定性 fallback 生成最小可用本体。
+- **GAP-11 任务生命周期（2026-11-19）**：job 记录字段 `status`（`pending→running→done/error/cancelled`）、`stage`（人话阶段：排队中/解析文档/LLM 抽取/业务校验/保存草稿/完成/执行失败/已取消）、`progress`（0-100 整数）、`kind`（`from-doc`）、`file_names`、`draft_id`（完成后可据此查草稿本体）、`error`、`created_at/updated_at`、`retried_from`（重试来源 job）。取消为**协作式**：cancel 仅置事件＋置状态，进行中的 LLM 调用无法被杀，worker 在下一检查点（阶段切换/分段循环）自行退出并落 `cancelled`；任务状态存于**进程内存**（重启即失，前端对后端已不存在的任务标记「记录已丢失」并恢复操作）。前端左下任务面板 2s 轮询 `GET /jobs` 整表刷新；`?api=` URL 参数可显式指定后端基址（开发/冒烟沙箱）。
 
 ---
 
@@ -654,7 +687,7 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/projects` | 新建项目，201；body `{name, description?, department?}` |
-| GET | `/api/projects` | 项目列表（分页）；`?with_stats=true` 见下；`?department=` 按所属部门精确过滤 |
+| GET | `/api/projects` | 项目列表（分页）；`?with_stats=true` 见下；`?department=` 按所属部门精确过滤；`data.default_project` 见下（GAP-07） |
 | GET | `/api/projects/{project_id}` | 项目详情 |
 | PUT | `/api/projects/{project_id}` | 更新 `name`/`description`/`department`（**status 只允许经 archive/restore 变更**）；`department` 传空串视为 `默认部门` |
 | DELETE | `/api/projects/{project_id}` | 删除项目；级联：MCP 发布态下线（尽力而为）+ 数据目录 + 归档包；`default`/`_shared` 返回 403 |
@@ -670,6 +703,8 @@
 }
 ```
 归档项目的 `stats` 直接读 `archive_info`（`size_kind=archive`，`data_size` 为压缩包大小），不解压。
+
+`data.default_project`（GAP-07）：当前身份默认项目 = 最近使用且仍可读的项目 ID，无则 `null`。「可读」= 通过 V2-06 租户判定且项目真实存在（已删除的最近项目自动失效）。最近使用记录由任意显式传 `project_id` 的请求刷新（仅值变化时写盘）。前端用途：本地无 `op_currentProject` 记录时（新设备/清缓存）优先选中 `default_project` 实现上下文续接，其次退回列表第一项。
 
 > 归档语义（用户定义）：只保留索引——项目仍出现在项目列表/首页（名称、ID、本体清单与计数），但本体定义、实例等重数据以压缩方式存放；Jena/Neo4j 远端数据**不在**本次归档范围（避免恢复失败造成不可逆丢失，列入待增强）。
 
@@ -919,7 +954,7 @@
 - 动作映射：GET/HEAD → `read`；写方法 → `write`；`/api/ingest/.../approve|reject|revert|batch-*` → `review`；`/api/auth/users|roles|audit` → `admin`。只读/计算型 POST（validate / export / term-lookup / nl-query / preview / connections test|read / actions execute / llm test）白名单归 `read`，避免误伤只读与审核角色。
 - 资源键从 query `project_id` 与路径 `/api/projects/{pid}`、`/api/ontologies/{oid}`、`/api/graph/{oid}` 提取（中间件不读 body，避免消费请求流）。
 - 授权优先级：**本体级 grant > 项目级 grant > 角色默认**；`level ∈ read|write|review|none`（`none` 为显式拒绝）。未显式授权的资源沿用角色默认，管理员创建用户时应按项目显式收敛。
-- 权限矩阵由 `GET /api/auth/me` 返回 `data.permissions.{role,actions,tabs,grants}`，前端据此隐藏菜单/禁用操作按钮；**服务端每次请求重新判定**，不信任前端矩阵。
+- 权限矩阵由 `GET /api/auth/me` 返回 `data.permissions.{role,actions,tabs,grants}`，前端据此**显示无权限菜单但禁用＋工具提示所需权限**（GAP-10，2026-11-19：原为直接隐藏；`tabs` 白名单分档=只读 11 项 home/graph/query/inference/logs/settings/credentials/tutorial/quality/alignment/resources、写 6 项＋审核（ingest/approvals 需 write 或 review）、管理 2 项 users/audit）＋禁用操作按钮；点击被禁用菜单弹原因提示。**服务端每次请求重新判定**，不信任前端矩阵。
 
 ### 21.4 端点清单
 

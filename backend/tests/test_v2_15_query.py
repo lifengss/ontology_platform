@@ -17,11 +17,16 @@ import os
 import time
 import uuid
 
+import pytest
 from fastapi.testclient import TestClient
 
+from _authenv import auth_module_guard
 from main import app
 from core.instance_store import get_instance_store
 from core.storage import JsonStore
+
+pytestmark = pytest.mark.auth
+_guard = auth_module_guard()  # GAP-20：模块边界隔离鉴权环境（本模块含 TC-15-03/07 鉴权用例）
 
 PID = "v215-m4b"
 ONT: str | None = None      # 已发布本体（_setup 赋值）

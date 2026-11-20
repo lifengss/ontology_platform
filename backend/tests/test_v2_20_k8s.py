@@ -23,6 +23,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # noqa: E402  backend dir
 
+from _pgprobe import pg_skipif  # noqa: E402
 from core.instance_store import get_instance_store  # noqa: E402
 from core.pg_instance_store import PgInstanceStore  # noqa: E402
 
@@ -63,6 +64,7 @@ def pg_store():
 # ----------------------------------------------------------------------
 # TC-20-03 后端本地文件型实例存储收敛 PG，多副本无分叉
 # ----------------------------------------------------------------------
+@pg_skipif()
 def test_20_03_pg_backend_no_file_fork(pg_store):
     """get_instance_store(backend='pg') 返回 PgInstanceStore（多副本共享收敛）。"""
     store = get_instance_store(pg_store._project_id, backend="pg")
@@ -135,6 +137,7 @@ def test_20_prod_overlay_multireplica_pg():
     assert "namePrefix: prod-" in kf, "prod overlay 缺 namePrefix"
 
 
+@pg_skipif()
 def test_20_03_pg_backend_via_env():
     """环境变量 INSTANCE_STORE_BACKEND=pg 时 get_instance_store 返回 PgInstanceStore。"""
     import config as config_mod
@@ -157,6 +160,7 @@ def test_20_03_pg_backend_via_env():
         s.delete(r["id"])
 
 
+@pg_skipif()
 def test_20_03_concurrent_replicas_read_consistent(pg_store):
     """两个「副本」（各自 PgInstanceStore 实例）并发写+更新同一项目：无文件分叉、数据一致。"""
     pid = pg_store._project_id
@@ -208,6 +212,7 @@ def test_20_03_concurrent_replicas_read_consistent(pg_store):
         assert "tick" in by_id_a[rid], "并发 update_many 未写入 patch 字段"
 
 
+@pg_skipif()
 def test_20_03_pg_interface_consistency_with_jsonl():
     """PgInstanceStore 与 JsonlInstanceStore 接口语义一致（行为兼容，切换不破坏）。"""
     from core.instance_store import JsonlInstanceStore

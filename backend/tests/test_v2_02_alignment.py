@@ -16,25 +16,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 import alignment
+from _authenv import auth_module_guard
+from core.storage import JsonStore
 from main import app
+
+pytestmark = pytest.mark.auth
+# GAP-20：模块边界隔离鉴权环境——setup 强制清洁态（消除前模块残留 auth=true 的污染，
+# 曾致本模块前置无鉴权用例 401），teardown 恢复模块前状态
+_guard = auth_module_guard()
 
 c = TestClient(app)
 _ctx: dict = {}
-
-AUTH_ENV_KEYS = ("ONTOLOGY_AUTH_ENABLED",
-                 "ONTOLOGY_BOOTSTRAP_ADMIN_PASSWORD",
-                 "ONTOLOGY_PBKDF2_ITERATIONS")
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _restore_auth_env():
-    prev = {k: os.environ.get(k) for k in AUTH_ENV_KEYS}
-    yield
-    for k, v in prev.items():
-        if v is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = v
 
 
 def _p() -> dict:
@@ -157,6 +149,11 @@ class TestV202M4bAlignment:
         os.environ["ONTOLOGY_AUTH_ENABLED"] = "true"
         os.environ["ONTOLOGY_BOOTSTRAP_ADMIN_PASSWORD"] = "m4b-admin-pw"
         os.environ["ONTOLOGY_PBKDF2_ITERATIONS"] = "10000"
+        # GAP-20：清除前序鉴权模块残留的用户数据——ensure_bootstrap 幂等，
+        # 已存在 admin（其他模块的随机密码）时不会用 env 密码重置，须先清空
+        _ustore = JsonStore("auth_users", project_id="_shared")
+        for _u in _ustore.all():
+            _ustore.delete(_u["id"])
         r = c.post("/api/auth/login", params={"mode": "bearer"},
                    json={"username": "admin", "password": "m4b-admin-pw"})
         assert r.status_code == 200, r.text

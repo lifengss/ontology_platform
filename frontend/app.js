@@ -1,7 +1,10 @@
-const API_BASE = (location.hostname === 'localhost' && location.port === '8000') ? '' : 'http://localhost:8000';
+// 开发/测试钩子：URL 追加 ?api=http://host:port 可显式指定后端基址（如独立冒烟沙箱）；缺省走原逻辑
+const _apiOverride = new URLSearchParams(location.search).get('api');
+const API_BASE = _apiOverride || ((location.hostname === 'localhost' && location.port === '8000') ? '' : 'http://localhost:8000');
 const $ = id => document.getElementById(id);
 let state = {
   ontologies: [], candidates: [], graphTab: 'schema',
+  graphDataAll: null, graphExpanded: null, graphFilter: { kinds: null, origin: '', objectType: '' },
   currentOntology: null, editingId: null, filter: 'all', editorMode: 'form', formObjects: [],
   projects: [], currentProject: null,
   actions: [], currentAction: null, actionToken: null,
@@ -125,6 +128,17 @@ async function api(path, opts = {}) {
       err.status = r.status;
       err.code = j.error?.code || null;
       err.details = j.error?.details || null; // 2.2：保留后端 details（如 violations 明细）
+      // GAP-02：后端返回通俗解释＋修复建议时替换 e.message（各调用点
+      // toast('...: ' + e.message) 零侵入受益）；原文保留在 err.rawMessage。
+      if (j.error?.message_zh) {
+        err.rawMessage = j.error.message || null;
+        err.message_zh = j.error.message_zh;
+        err.suggestion = j.error.suggestion || null;
+        const parts = [j.error.message_zh];
+        if (err.suggestion) parts.push('建议：' + err.suggestion);
+        if (j.error.message) parts.push('（原始信息）' + j.error.message);
+        err.message = parts.join('\n');
+      }
       throw err;
     }
     clientLog('info', `API ${opts.method || 'GET'} ${path} ok`, { status: r.status, elapsed_ms: elapsed });
@@ -241,7 +255,11 @@ async function loadProjects() {
     state.projects = (j.data.items || []).filter(p => (p.status || 'active') !== 'archived');
     const savedId = localStorage.getItem('op_currentProject');
     if (!state.currentProject && state.projects.length) {
-      state.currentProject = state.projects.find(p => p.id === savedId) || state.projects[0];
+      // GAP-07：本地无记录时优先服务端「当前身份最近使用的项目」（新设备续接上下文），再退回第一个项目
+      const serverDef = (j.data && j.data.default_project) || '';
+      state.currentProject = state.projects.find(p => p.id === savedId)
+        || (serverDef ? state.projects.find(p => p.id === serverDef) : null)
+        || state.projects[0];
       localStorage.setItem('op_currentProject', state.currentProject.id);
     }
     renderDepartmentSelector();
@@ -290,6 +308,7 @@ async function setProject(id) {
   await loadOntologies();
   await loadActions();
   await refreshActiveTabAfterScopeChange();
+  taskPanelReset(); // GAP-11：任务面板跟随项目作用域
   toast('已切换到项目：' + p.name, 'ok');
 }
 
@@ -330,6 +349,30 @@ async function createProject(name) {
     await loadProjects();
     if (!name) toast('项目已创建', 'ok');
   } catch (e) { if (!name) toast('创建项目失败: ' + e.message, 'err'); throw e; }
+}
+
+// ---- GAP-13 示例项目一条龙：一键创建含示例本体＋示例实例的项目 ----
+async function createSeedProject() {
+  const name = '示例项目-' + new Date().toISOString().slice(5, 16).replace(/[T:]/g, '');
+  try {
+    await createProject(name); // 建项目并设为当前项目
+    const j = await api('/api/projects/' + state.currentProject.id + '/seed-example', { method: 'POST', projectId: null, namespace: null });
+    toast('示例项目已创建：本体「' + (j.data.ontology_name || '') + '」＋ ' + j.data.instances + ' 条示例实例（草稿，可在建模页确认后发布）', 'ok');
+    await loadHome();
+    await loadOntologies();
+    const o = state.ontologies.find(x => x.id === j.data.ontology_id);
+    if (o) selectOntology(o);
+    switchTab('modeling');
+  } catch (e) { toast('创建示例项目失败: ' + e.message, 'err'); }
+}
+
+async function seedProjectExample(id) {
+  try {
+    const j = await api('/api/projects/' + id + '/seed-example', { method: 'POST', projectId: null, namespace: null });
+    toast('已填充示例：本体「' + (j.data.ontology_name || '') + '」＋ ' + j.data.instances + ' 条示例实例', 'ok');
+    await loadHome();
+    if (state.currentProject && state.currentProject.id === id) await loadOntologies();
+  } catch (e) { toast('填充示例失败: ' + e.message, 'err'); }
 }
 
 // ---- 首页：项目总览与项目管理 ----
@@ -381,6 +424,67 @@ function renderHomeStats() {
   const instSub = $('homeStatInstancesSub');
   if (ontoSub) ontoSub.textContent = '项目内本体模型数量';
   if (instSub) instSub.textContent = '归化入库后的实例';
+  renderOnboardingWizard();
+}
+
+// ---- GAP-08：ITBP 五步新手引导（首次进入展示；每步可跳转；进度按当前项目实况） ----
+const ONBOARD_KEY = 'op_wizard_seen';
+function _wzCurrentStats() {
+  const id = _currentProjectId();
+  const p = homeProjects.find(x => x.id === id) || state.projects.find(x => x.id === id) || {};
+  const st = p.stats || {};
+  return { onto: st.ontology_count || 0, inst: st.instance_count || 0, mcp: !!p.mcp_published };
+}
+const ONBOARD_STEPS = [
+  { title: '选定项目', desc: '顶部栏或下方项目管理中创建/选择要开展业务的项目', tab: 'home', done: () => !!_currentProjectId() },
+  { title: '建模或用模板', desc: '建模页从 AI 文档/文本生成本体，或选用本地模板起步', tab: 'modeling', done: () => _wzCurrentStats().onto > 0 },
+  { title: '导入数据', desc: '实例导入页上传表格（CSV/Excel）或粘贴数据，归化入库', tab: 'ingest', done: () => _wzCurrentStats().inst > 0 },
+  { title: '发布 MCP', desc: 'MCP 页将本体发布为 MCP 服务，生成可调用端点', tab: 'mcp', done: () => _wzCurrentStats().mcp },
+  { title: 'AI 平台调用', desc: '把 MCP 连接配置复制到 AI 平台（如 CodeBuddy）自然语言查询', tab: 'mcp', done: () => _wzCurrentStats().mcp },
+];
+function renderOnboardingWizard() {
+  const box = $('onboardingWizard');
+  if (!box) return;
+  const stepsBox = $('wzSteps');
+  if (stepsBox) {
+    stepsBox.innerHTML = ONBOARD_STEPS.map((s, i) => {
+      let ok = false;
+      try { ok = !!s.done(); } catch (e) {}
+      return '<div class="rounded-lg border p-3 ' + (ok ? 'border-emerald-500/40 bg-emerald-500/10' : 'border-slate-700/60 bg-slate-900/40') + '">' +
+        '<div class="flex items-center gap-2 mb-1">' +
+        '<span class="w-5 h-5 rounded-full flex items-center justify-center text-xs font-semibold ' + (ok ? 'bg-emerald-500 text-slate-950' : 'bg-slate-700 text-slate-300') + '">' + (ok ? '✓' : (i + 1)) + '</span>' +
+        '<span class="text-sm font-medium">' + esc(s.title) + '</span>' +
+        '</div>' +
+        '<div class="text-xs text-slate-400 leading-relaxed mb-2">' + esc(s.desc) + '</div>' +
+        '<button class="btn secondary" style="padding:2px 8px;font-size:12px" type="button" onclick="wzGoTo(' + (i + 1) + ')">前往 →</button>' +
+        '</div>';
+    }).join('');
+  }
+  const doneCount = ONBOARD_STEPS.filter(s => { try { return !!s.done(); } catch (e) { return false; } }).length;
+  const pt = $('wzProgressText');
+  if (pt) pt.textContent = '进度 ' + doneCount + ' / ' + ONBOARD_STEPS.length;
+}
+function showOnboardingWizard(force) {
+  const box = $('onboardingWizard');
+  if (!box) return;
+  if (!force) { try { if (localStorage.getItem(ONBOARD_KEY)) return; } catch (e) {} }
+  box.classList.remove('hidden');
+  renderOnboardingWizard();
+}
+function closeOnboardingWizard() {
+  try { localStorage.setItem(ONBOARD_KEY, '1'); } catch (e) {}
+  const box = $('onboardingWizard');
+  if (box) box.classList.add('hidden');
+}
+function wzGoTo(n) {
+  const s = ONBOARD_STEPS[n - 1];
+  if (!s) return;
+  if (s.tab === 'home') {
+    const sel = $('projectSelect');
+    if (sel) { sel.scrollIntoView({ behavior: 'smooth', block: 'center' }); sel.focus(); }
+    return;
+  }
+  switchTab(s.tab);
 }
 
 function renderProjects() {
@@ -393,7 +497,11 @@ function renderProjects() {
   });
   const tb = $('projectTableBody');
   if (!tb) return;
-  if (!items.length) { tb.innerHTML = '<tr><td colspan="10" class="p-3 text-center text-slate-500">暂无项目</td></tr>'; return; }
+  if (!items.length) {
+    // GAP-08：空态给新手引导入口
+    tb.innerHTML = '<tr><td colspan="10" class="p-3 text-center text-slate-500">暂无项目 — <button class="btn secondary" style="padding:2px 8px;font-size:12px" type="button" onclick="showOnboardingWizard(true)">查看新手引导</button> 或点上方「＋ 新建项目」，也可 <button class="btn secondary" style="padding:2px 8px;font-size:12px" type="button" onclick="createSeedProject()">一键创建示例项目</button></td></tr>';
+    return;
+  }
   tb.innerHTML = items.map(p => {
     const st = p.status || 'active';
     const archived = st === 'archived';
@@ -402,6 +510,7 @@ function renderProjects() {
     const isDefault = p.id === 'default' || p.id === '_shared';
     const acts = ['<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="enterProject(\'' + p.id + '\')">进入</button>'];
     if (!isDefault) {
+      if (!archived && !(stats.ontology_count > 0)) acts.push('<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="seedProjectExample(\'' + p.id + '\')">填充示例</button>');
       if (archived) acts.push('<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="restoreProject(\'' + p.id + '\', \'' + escAttr(p.name) + '\')">恢复</button>');
       else acts.push('<button class="btn secondary" style="padding:2px 8px;font-size:12px" onclick="archiveProject(\'' + p.id + '\', \'' + escAttr(p.name) + '\')">归档</button>');
       acts.push('<button class="btn danger" style="padding:2px 8px;font-size:12px" onclick="deleteProjectRow(\'' + p.id + '\', \'' + escAttr(p.name) + '\')">删除</button>');
@@ -1017,6 +1126,11 @@ function closeConnHealth() {
 let _lastTab = '';
 
 function switchTab(name) {
+  // GAP-10：被权限禁用的 tab 点击时给出原因（不止 title 提示）
+  const tabEl = document.querySelector('.tab[data-tab="' + name + '"]');
+  if (tabEl && tabEl.classList.contains('tab-disabled')) {
+    return toast(tabEl.title || '无权限访问该功能', 'info');
+  }
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-content').forEach(s => s.classList.add('hidden'));
   $(name).classList.remove('hidden');
@@ -1063,6 +1177,7 @@ function switchTab(name) {
   if (name === 'approvals') loadChangesets();
   if (name === 'audit') loadAuditLog();
   if (name === 'tutorial') loadTutorial();
+  if (name === 'resources') loadResources();
   _lastTab = name;
 }
 
@@ -1070,13 +1185,110 @@ function switchSettingTab(name) {
   document.querySelectorAll('#settings .subtab').forEach(t => t.classList.toggle('active', t.id === 'settingTab' + name.toUpperCase()));
 }
 
+function _fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+// 资源下载中心：加载可下载资源清单（资源为公开分享物，无需登录）
+async function loadResources() {
+  const list = $('resourcesList');
+  const empty = $('resourcesEmpty');
+  if (!list) return;
+  let items = [];
+  try {
+    const j = await api('/api/resources', { projectId: null });
+    items = j.data?.items || [];
+  } catch (e) {
+    clientLog('error', 'load resources failed', { message: e.message });
+    items = [];
+  }
+  if (!items.length) {
+    list.innerHTML = '';
+    if (empty) empty.classList.remove('hidden');
+    return;
+  }
+  if (empty) empty.classList.add('hidden');
+  list.innerHTML = items.map(function (r) {
+    const typeLabel = r.type === 'skill' ? 'Skill' : (r.type || '资源');
+    return '<div class="border border-slate-700 rounded-lg p-4 flex flex-col">'
+      + '<div class="flex items-center justify-between mb-1">'
+      + '<span class="text-sm font-semibold">' + esc(r.name || r.id) + '</span>'
+      + '<span class="text-[10px] px-2 py-0.5 rounded bg-slate-700/40 text-slate-300 shrink-0 ml-2">' + esc(typeLabel) + '</span>'
+      + '</div>'
+      + '<div class="text-xs text-slate-400 leading-relaxed mb-2">' + (r.description ? esc(r.description) : '') + '</div>'
+      + (r.usage ? '<div class="text-xs text-slate-500 leading-relaxed mb-2"><span class="text-slate-400">用法：</span>' + esc(r.usage) + '</div>' : '')
+      + '<div class="text-[10px] text-slate-500 mb-3">大小：' + _fmtBytes(r.size) + ' ｜ 更新：' + esc(r.updated || '—') + '</div>'
+      + '<button class="mt-auto px-3 py-1.5 rounded text-sm bg-[#4f8cff] hover:bg-[#3d78e6] text-white self-start" onclick="downloadResource(\'' + escAttr(r.id) + '\')">下载</button>'
+      + '</div>';
+  }).join('');
+}
+
+// 下载资源：fetch 拿 blob 后触发浏览器下载（跨域下 download 属性更可靠）
+async function downloadResource(id) {
+  if (!id) return;
+  try {
+    const url = API_BASE + '/api/resources/' + encodeURIComponent(id) + '/download';
+    const r = await fetch(url, { credentials: 'include' });
+    if (!r.ok) { toast('下载失败：HTTP ' + r.status, 'err', 6000); return; }
+    const blob = await r.blob();
+    const cd = r.headers.get('content-disposition') || '';
+    const m = /filename="?([^";]+)"?/.exec(cd);
+    const name = (m && m[1]) ? m[1] : (id + '.zip');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+    toast('开始下载：' + name, 'ok', 3000);
+  } catch (e) {
+    toast('下载失败：' + (e.message || e), 'err', 6000);
+  }
+}
+
 function toast(message, type = 'info', duration = 4000) {
   const el = document.createElement('div');
   el.className = 'toast ' + type;
   const title = type === 'ok' ? '成功' : type === 'err' ? '错误' : '提示';
-  el.innerHTML = '<div class="font-medium mb-1">' + title + '</div><div>' + message + '</div>';
+  // GAP-02：错误文案可能多行（通俗解释/建议/原始信息），换行渲染为 <br>
+  el.innerHTML = '<div class="font-medium mb-1">' + title + '</div><div>'
+    + String(message).replace(/\n/g, '<br>') + '</div>';
   document.body.appendChild(el);
   setTimeout(() => el.remove(), duration);
+}
+
+// GAP-02：能力执行运行时错误码 → [通俗解释, 修复建议]
+// （与 backend/capabilities/expr_parser.py 的 E_* 常量对应）
+const RUNTIME_ERROR_ZH = {
+  SYNTAX_ERROR: ['表达式语法不正确', '检查括号配对与函数写法；可用「校验」按钮先自检'],
+  UNKNOWN_FUNCTION: ['使用了白名单之外的函数', '查看能力公式支持的函数列表，换用受支持的函数'],
+  UNKNOWN_IDENTIFIER: ['表达式引用了不存在的字段/标识符', '检查字段名拼写，确认该字段在本体对象中存在'],
+  ARG_COUNT_ERROR: ['函数参数个数不对', '对照函数签名修正参数个数'],
+  CONSTANT_DIV_ZERO: ['常量折叠阶段除数为 0', '修正表达式中的常量除数'],
+  REF_BAD_ARGUMENT: ['引用(ref)参数不合法', '检查 ref() 的被引用能力名与参数'],
+  TYPE_ERROR: ['运算两侧类型不匹配', '用 num()/str() 等转换函数统一类型'],
+  DIV_ZERO: ['执行时除数为 0', '给分母加守卫（如 if_null(denom, 0) 后判零分支）'],
+  LOOKUP_NOT_FOUND: ['lookup 未找到匹配记录', '确认被查找数据集存在该键值；数据未导入时先在实例导入页补数据'],
+  LOOKUP_AMBIGUOUS: ['lookup 命中多条记录（歧义）', '用更精确的查找键（复合键）定位唯一记录'],
+  MISSING_INPUT_ATTR: ['实例缺少表达式引用的必填输入属性', '在实例数据中补齐缺失字段；可选字段用 if_null()/has_attr() 守卫或内联到 if() 条件'],
+  REF_NOT_RESOLVED: ['引用的能力/属性无法解析', '确认被引用能力已发布且引用 id/版本正确（下游引用上游必须先发布上游）'],
+};
+function capErrZh(code) {
+  if (!code) return null;
+  return RUNTIME_ERROR_ZH[code] || null;
+}
+function capErrFriendlyHtml(code, message) {
+  // 返回「通俗解释＋建议」HTML 片段（含原始码/信息的小字行）
+  const hit = capErrZh(code);
+  if (!hit) return message ? '<div class="text-slate-600 text-[11px]">' + esc(message) + '</div>' : '';
+  return '<div class="text-[11px]">'
+    + '<span class="text-amber-300">' + esc(hit[0]) + '</span>'
+    + '<div class="text-slate-500">建议：' + esc(hit[1]) + '</div>'
+    + '<div class="text-slate-600">' + esc(code) + (message ? ' — ' + esc(message) : '') + '</div>'
+    + '</div>';
 }
 
 async function loadOntologies() {
@@ -1084,6 +1296,7 @@ async function loadOntologies() {
   state.ontologies = j.data.items || [];
   renderOntologyList();
   renderOntologySelects();
+  refreshDocTargetOptions();
 }
 
 function setFilter(f) {
@@ -1637,7 +1850,54 @@ function resetTemplatePanel() {
   if (pv) pv.classList.add('hidden');
   const sis = $('tplName');
   if (sis) sis.value = '';
+  const tn = $('tblName');
+  if (tn) tn.value = '';
+  const tf = $('tblFile');
+  if (tf) tf.value = '';
   state.externalTpl = null;
+  loadLocalTemplates();
+}
+
+// GAP-04：本地模板库（内置示例含约束示范＋用户自建模板），一键实例化为可编辑本体草稿
+async function loadLocalTemplates() {
+  const box = $('localTplList');
+  if (!box) return;
+  try {
+    const j = await api('/api/templates?page_size=50');
+    const items = (j.data && j.data.items) || [];
+    if (!items.length) {
+      box.innerHTML = '<div class="text-xs text-slate-500">暂无模板，可先用「表单建模」建好后到模板管理保存为模板</div>';
+      return;
+    }
+    box.innerHTML = items.map(t => {
+      const model = t.model || {};
+      const nObj = (model.objects || []).length;
+      const nCon = (model.objects || []).reduce((s, o) => s + (o.attributes || []).filter(a => a.constraints && Object.keys(a.constraints).length).length, 0);
+      return '<div class="card p-3 border border-slate-700 flex items-center justify-between gap-3">' +
+        '<div class="min-w-0">' +
+          '<div class="text-sm font-medium truncate">' + esc(t.name || t.id) +
+            (t.industry ? ' <span class="badge slate">' + esc(t.industry) + '</span>' : '') +
+            (nCon ? ' <span class="badge green" title="模板内含约束示例">约束×' + nCon + '</span>' : '') +
+          '</div>' +
+          '<div class="text-xs text-slate-500 truncate">' + esc(t.description || '') + ' · ' + nObj + ' 个对象</div>' +
+        '</div>' +
+        '<button class="btn" onclick="instantiateLocalTemplate(\'' + esc(t.id) + '\')">实例化</button>' +
+      '</div>';
+    }).join('');
+  } catch (e) {
+    box.innerHTML = '<div class="text-xs text-red-400">本地模板库加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+async function instantiateLocalTemplate(templateId) {
+  try {
+    const j = await api('/api/templates/' + encodeURIComponent(templateId) + '/instantiate', { method: 'POST' });
+    const ov = j.data;
+    toast('已从模板实例化本体草稿: ' + (ov.name || ov.id), 'ok');
+    selectOntology(ov);
+  } catch (e) {
+    toast('模板实例化失败: ' + e.message, 'err');
+  }
 }
 
 async function previewExternalTemplate() {
@@ -1699,12 +1959,13 @@ function closeEditor() { $('editorCard').classList.add('hidden'); state.editingI
 
 function setEditorMode(mode) {
   state.editorMode = mode;
-  ['form', 'ai', 'doc', 'template'].forEach(m => {
+  ['form', 'ai', 'doc', 'table', 'template'].forEach(m => {
     const pan = $('mode' + m[0].toUpperCase() + m.slice(1));
     const tab = $('subtab' + m[0].toUpperCase() + m.slice(1));
     if (pan) pan.classList.toggle('hidden', m !== mode);
     if (tab) tab.classList.toggle('active', m === mode);
   });
+  if (mode === 'template') loadLocalTemplates();
 }
 
 function renderObjectForms() {
@@ -2237,16 +2498,22 @@ async function saveOntology() {
     const target = state.ontologies.find(x => x.id === j.data.id);
     if (target) selectOntology(target);
   } catch (e) {
-    toast('保存失败: ' + _formatApiError(e), 'err');
+    toast('保存失败: ' + _formatApiError(e), 'err', 6000);
+    // GAP-02 处理入口：已发布本体禁止直改 → 引导跳转「变更审批」
+    if (e.code === 'PUBLISHED_IMMUTABLE'
+      && confirm('该本体已发布，不能直接编辑。跳转到「变更审批」页提交变更单？')) {
+      switchTab('approvals');
+    }
   }
 }
 
 // 2.2：业务层校验失败时逐条展示具体失败项
+// GAP-02：e.message 已由 api() 提升为「通俗解释＋建议」；违规明细作为附加行
 function _formatApiError(e) {
   const v = e.details?.violations;
   if (Array.isArray(v) && v.length) {
     const lines = v.slice(0, 10).map(x => (typeof x === 'string' ? x : (x.message || JSON.stringify(x))));
-    return '业务层校验未通过，具体失败项：\n• ' + lines.join('\n• ') + (v.length > 10 ? '\n• …（共 ' + v.length + ' 项）' : '');
+    return (e.message || '') + '\n• ' + lines.join('\n• ') + (v.length > 10 ? '\n• …（共 ' + v.length + ' 项）' : '');
   }
   return e.message;
 }
@@ -2264,9 +2531,11 @@ async function generateFromText() {
     } else {
       toast('已生成本体草稿: ' + draft.name, 'ok');
     }
+    const prev = state.currentOntology; // GAP-09：记住原当前本体，生成后自动进入差异审核
     closeEditor();
     await loadOntologies();
     selectOntology(draft);
+    if (prev && prev.id !== draft.id) openDraftDiffReview({ sourceId: draft.id, targetId: prev.id });
   } catch (e) {
     toast('生成失败: ' + e.message, 'err');
   } finally {
@@ -2278,45 +2547,245 @@ async function uploadDoc() {
   const fileInput = $('docFile');
   if (!fileInput.files.length) return toast('请先选择文件', 'info');
   const form = new FormData();
-  form.append('file', fileInput.files[0]);
+  for (const f of fileInput.files) form.append('files', f);  // 多文件：后端拼接后同一上下文一次解析
+  const tgt = $('docTargetOntology');
+  const tgtId = (tgt && tgt.value) || '';
+  if (tgtId) form.append('ontology_id', tgtId);
+  const tgtName = tgtId ? ((state.ontologies || []).find(o => o.id === tgtId) || {}).name : '';
   $('btnDocParse').disabled = true;
-  toast('文档解析任务已提交…', 'info', 2000);
+  toast('文档解析任务已提交' + (tgtName ? '（合并目标：' + tgtName + '）' : '') + '…', 'info', 2000);
   try {
     const j = await api('/api/ontologies/from-doc', { method: 'POST', body: form });
-    pollJob(j.data.job_id);
+    // GAP-11：进入后台任务面板（进度/取消/重试/完成通知），不再单 job 死等轮询
+    taskRegisterLocal({
+      job_id: j.data.job_id, status: 'pending', stage: '排队中', progress: 0, kind: 'from-doc',
+      file_names: Array.from(fileInput.files).map(f => (f.name || '').toLowerCase()), draft_id: null, error: null,
+      merge_target_id: tgtId || null, merge_target_name: tgtName || null,
+      created_at: new Date().toISOString(),
+    });
   } catch (e) {
     toast('解析失败: ' + e.message, 'err');
     $('btnDocParse').disabled = false;
   }
 }
 
-async function pollJob(jobId) {
-  for (let i = 0; i < 30; i++) {
-    await new Promise(r => setTimeout(r, 1000));
-    try {
-      const j = await api('/api/ontologies/jobs/' + jobId);
-      const st = j.data.status;
-      if (st === 'done') {
-        $('btnDocParse').disabled = false;
+// 多文档增量建模：合并目标下拉（仅草稿；本体列表变化时刷新，保留当前选择）
+function refreshDocTargetOptions() {
+  const sel = $('docTargetOntology');
+  if (!sel) return;
+  const cur = sel.value;
+  const drafts = (state.ontologies || []).filter(o => o.status === 'draft');
+  sel.innerHTML = '<option value="">新建草稿（独立生成）</option>' +
+    drafts.map(o => '<option value="' + esc(o.id) + '">合并到：' + esc(o.name || o.id) + '</option>').join('');
+  if (cur && drafts.some(o => o.id === cur)) sel.value = cur;
+}
+
+// GAP-04：宽数据表确定性导入（不走 AI）——上传 CSV/Excel → from-excel → 草稿 → 进入编辑器逐项确认
+async function uploadTable() {
+  const fileInput = $('tblFile');
+  if (!fileInput.files || !fileInput.files.length) { toast('请选择 CSV/Excel 数据表文件', 'err'); return; }
+  const form = new FormData();
+  form.append('file', fileInput.files[0]);
+  const name = ($('tblName').value || '').trim();
+  if (name) form.append('name', name);
+  $('btnTblImport').disabled = true;
+  toast('表格解析中…', 'info', 1500);
+  try {
+    const j = await api('/api/ontologies/from-excel', { method: 'POST', body: form });
+    const draft = j.data;
+    await loadOntologies();
+    const sel = state.ontologies.find(o => o.id === draft.id) || draft;
+    toast('已生成草稿: ' + (draft.name || '') + '（类型/主键/约束为自动推断，请逐项确认）', 'ok', 6000);
+    selectOntology(sel);
+    fileInput.value = '';
+  } catch (e) {
+    toast('表格导入失败: ' + e.message, 'err');
+  } finally {
+    $('btnTblImport').disabled = false;
+  }
+}
+
+// ===================== GAP-11：后台任务面板（进度/取消/重试/完成通知） =====================
+// 任务记录与后端 JOBS 同构（job_id/status/stage/progress/kind/file_names/draft_id/error）。
+// 面板在存在活跃任务（pending/running）时 2s 轮询一次列表接口（整表刷新，非逐 job）；
+// 终态（done/error/cancelled）一次性通知（prev 记录去重）；本地任务在后端消失（服务重启等）→ 标记 lost。
+const taskPanel = { items: [], prev: {}, timer: null, closed: false, busy: false };
+
+function _taskDotClass(st) {
+  if (st === 'done') return 'ok';
+  if (st === 'error' || st === 'lost') return 'bad';
+  if (st === 'cancelled') return 'dim';
+  return 'run';
+}
+function _taskFileName(job) {
+  const f = (job.file_names || [])[0];
+  return f ? esc(f) : (job.kind || '任务');
+}
+function _taskActionHtml(job) {
+  const st = job.status;
+  if (st === 'pending' || st === 'running') {
+    return '<button class="task-btn" title="取消任务" onclick="cancelTask(\'' + job.job_id + '\')">取消</button>';
+  }
+  if (st === 'error' || st === 'cancelled') {
+    return '<button class="task-btn" title="用原参数重新执行" onclick="retryTask(\'' + job.job_id + '\')">重试</button>';
+  }
+  return '';
+}
+function renderTaskPanel() {
+  const panel = $('taskPanel');
+  if (!panel) return;
+  const items = taskPanel.items;
+  if (taskPanel.closed || !items.length) { panel.classList.add('hidden'); return; }
+  panel.classList.remove('hidden');
+  const active = items.filter(t => t.status === 'pending' || t.status === 'running').length;
+  $('taskPanelTitle').innerHTML = '后台任务' + (active ? ' <span class="task-badge">' + active + ' 进行中</span>' : '');
+  $('taskPanelBody').innerHTML = items.length ? items.map(t => {
+    const p = Math.max(0, Math.min(100, t.progress || 0));
+    const bar = (t.status === 'pending' || t.status === 'running')
+      ? '<div class="task-bar"><i style="width:' + p + '%"></i></div>' : '';
+    const title = (t.status === 'error' && t.error) ? ' title="' + esc(t.error) + '"' : '';
+    return '<div class="task-item"><div class="task-top">'
+      + '<span class="task-dot ' + _taskDotClass(t.status) + '"></span>'
+      + '<span class="task-name"' + title + '>' + _taskFileName(t) + '</span>'
+      + _taskActionHtml(t)
+      + '<button class="task-x" title="移除（不影响任务本身）" onclick="dismissTask(\'' + t.job_id + '\')">×</button>'
+      + '</div>'
+      + '<div class="task-meta">' + esc(t.stage || '') + ((t.status === 'pending' || t.status === 'running') ? ' · ' + p + '%' : '') + '</div>'
+      + bar
+      + '</div>';
+  }).join('') : '';
+}
+async function refreshTaskPanel(opts = {}) {
+  if (taskPanel.busy) return;
+  taskPanel.busy = true;
+  try {
+    const j = await api('/api/ontologies/jobs');
+    const server = j.data.items || [];
+    const map = {};
+    server.forEach(s => { map[s.job_id] = s; });
+    const items = server.slice();
+    taskPanel.items.forEach(t => {
+      if (!map[t.job_id]) {
+        // 后端内存态丢失（如服务重启）：本地记录标记 lost，避免按钮永远卡死
+        if (t.status === 'pending' || t.status === 'running') {
+          t.status = 'lost'; t.stage = '任务记录已丢失（服务可能重启过），请重新上传';
+          _taskNotify(t, taskPanel.prev[t.job_id]);
+          taskPanel.prev[t.job_id] = t.status;
+        }
+        items.push(t);
+      }
+    });
+    // 终态一次性通知（done/error/cancelled/lost），prev 记录去重
+    items.forEach(t => {
+      const prev = taskPanel.prev[t.job_id];
+      if (prev !== t.status) {
+        if (prev && prev !== t.status) _taskNotify(t, prev);
+        taskPanel.prev[t.job_id] = t.status;
+      }
+    });
+    taskPanel.items = items;
+    renderTaskPanel();
+    _taskSchedulePoll();
+  } catch (e) { /* 后端不可达时不打扰（toast 已由 api() 链路处理登录态等场景） */ }
+  finally { taskPanel.busy = false; }
+}
+function _taskNotify(job, prev) {
+  const st = job.status;
+  const isDoc = (job.kind || '') === 'from-doc';
+  if (st === 'done' && isDoc) {
+    $('btnDocParse').disabled = false;
+    (async () => {
+      try {
+        const prevOnto = state.currentOntology; // GAP-09：记住原当前本体，生成后自动进入差异审核
         await loadOntologies();
-        const draft = state.ontologies.find(o => o.id === j.data.draft_id);
+        const draft = state.ontologies.find(o => o.id === job.draft_id);
         if (draft && draft.generation_mode === 'fallback') {
           toast('文档解析完成（LLM 不可用，使用模板兜底结果，非 AI 产出）', 'err', 10000);
         } else {
-          toast('文档解析完成', 'ok');
+          toast('文档解析完成：' + ((job.file_names || [])[0] || ''), 'ok');
         }
         if (draft) selectOntology(draft);
-        return;
-      }
-      if (st === 'error') {
-        toast('解析失败: ' + (j.data.error || '未知错误'), 'err');
-        $('btnDocParse').disabled = false;
-        return;
-      }
-    } catch (e) { /* ignore poll error */ }
+        // 多文档增量建模：指定了合并目标 → 直接进「新草稿 → 目标」差异审核（同名对象已自动对齐）
+        if (draft && job.merge_target_id && (state.ontologies || []).some(o => o.id === job.merge_target_id)) {
+          openDraftDiffReview({ sourceId: draft.id, targetId: job.merge_target_id });
+        } else if (draft && prevOnto && prevOnto.id !== draft.id) {
+          openDraftDiffReview({ sourceId: draft.id, targetId: prevOnto.id });
+        }
+      } catch (e2) { clientLog('error', 'task done handling failed', { message: e2.message }); }
+    })();
+  } else if (st === 'error' && isDoc) {
+    $('btnDocParse').disabled = false;
+    toast('解析失败: ' + (job.error || '未知错误'), 'err');
+  } else if (st === 'error') {
+    toast('任务失败: ' + (job.error || '未知错误'), 'err');
+  } else if (st === 'cancelled') {
+    if (isDoc) $('btnDocParse').disabled = false;
+    toast('任务已取消', 'info');
+  } else if (st === 'lost') {
+    if (isDoc) $('btnDocParse').disabled = false;
+    toast('任务记录已丢失（服务可能重启过），请重新上传', 'info', 6000);
   }
-  toast('解析任务超时，请稍后手动刷新', 'err');
-  $('btnDocParse').disabled = false;
+}
+function _taskSchedulePoll() {
+  const active = taskPanel.items.some(t => t.status === 'pending' || t.status === 'running');
+  if (active && !taskPanel.timer) {
+    taskPanel.timer = setInterval(() => refreshTaskPanel(), 2000);
+  } else if (!active && taskPanel.timer) {
+    clearInterval(taskPanel.timer);
+    taskPanel.timer = null;
+  }
+}
+function taskRegisterLocal(job) {
+  const i = taskPanel.items.findIndex(t => t.job_id === job.job_id);
+  if (i >= 0) taskPanel.items[i] = { ...taskPanel.items[i], ...job };
+  else taskPanel.items.unshift(job);
+  taskPanel.closed = false;
+  renderTaskPanel();
+  _taskSchedulePoll();
+  refreshTaskPanel();
+}
+async function cancelTask(jobId) {
+  try {
+    const j = await api('/api/ontologies/jobs/' + jobId + '/cancel', { method: 'POST' });
+    const t = taskPanel.items.find(x => x.job_id === jobId);
+    if (t) { t.status = j.data.status; t.stage = j.data.stage; }
+    renderTaskPanel();
+    toast('已发送取消请求（进行中的 LLM 调用将在下一检查点退出）', 'info', 4000);
+  } catch (e) { toast('取消失败: ' + e.message, 'err'); }
+}
+async function retryTask(jobId) {
+  const old = taskPanel.items.find(x => x.job_id === jobId);
+  try {
+    const j = await api('/api/ontologies/jobs/' + jobId + '/retry', { method: 'POST' });
+    taskRegisterLocal({
+      job_id: j.data.job_id, status: 'pending', stage: '排队中', progress: 0, kind: (old && old.kind) || 'from-doc',
+      file_names: (old && old.file_names) || [], draft_id: null, error: null,
+      retried_from: jobId, created_at: new Date().toISOString(),
+    });
+    toast('已重新提交任务', 'ok', 2500);
+  } catch (e) { toast('重试失败: ' + e.message, 'err'); }
+}
+function dismissTask(jobId) {
+  taskPanel.items = taskPanel.items.filter(t => t.job_id !== jobId);
+  renderTaskPanel();
+  _taskSchedulePoll();
+}
+function clearFinishedTasks() {
+  taskPanel.items = taskPanel.items.filter(t => t.status === 'pending' || t.status === 'running');
+  renderTaskPanel();
+  _taskSchedulePoll();
+}
+function toggleTaskPanel() {
+  taskPanel.closed = !taskPanel.closed;
+  if (!taskPanel.closed) refreshTaskPanel();
+  renderTaskPanel();
+}
+function taskPanelReset() {
+  // GAP-11：任务按项目隔离——切换项目后旧项目任务不再属于当前作用域，清状态重拉
+  if (taskPanel.timer) { clearInterval(taskPanel.timer); taskPanel.timer = null; }
+  taskPanel.items = [];
+  taskPanel.prev = {};
+  refreshTaskPanel();
 }
 
 function editCurrentOntology() {
@@ -2662,7 +3131,12 @@ async function uploadIngestFile() {
     toast('已为「' + (state.selectedIngestObject.name || objectType) + '」生成 ' + total + ' 个候选，共 ' + list.reduce((s, c) => s + (c.instances || []).length, 0) + ' 条实例，请在下方候选审核区确认后入库', 'ok');
     fileInput.value = '';
     loadCandidates();
-  } catch (e) { toast('上传失败: ' + e.message, 'err'); }
+  } catch (e) {
+    toast('上传失败: ' + e.message, 'err');
+    if (e.details?.model_gaps?.length) {  // GAP-05：缺字段→缺口弹层（一键补模型后自动重传）
+      showModelGapsModal(e.details.model_gaps, { kind: 'upload', ontologyId: ontologyId, objectType: e.details.object_type || objectType, global: false });
+    }
+  }
 }
 
 // ---- 1.3 多对象批量导入（逆向建模：每个 sheet 自动匹配对象，全部命中对象生成候选） ----
@@ -2687,6 +3161,9 @@ async function uploadIngestFileGlobal() {
   } catch (e) {
     toast('上传失败: ' + e.message, 'err');
     if (msg) msg.textContent = '上传失败';
+    if (e.details?.model_gaps?.length) {  // GAP-05：缺字段→缺口弹层（一键补模型后自动重传）
+      showModelGapsModal(e.details.model_gaps, { kind: 'upload', ontologyId: ontologyId, objectType: e.details.object_type || '', global: true });
+    }
   }
 }
 
@@ -3177,7 +3654,8 @@ function renderCandidateTable() {
     html += '<tr class="border-b border-slate-800">' +
       '<td class="p-1"><input type="checkbox" class="cand-check" value="' + cid + '" /></td>' +
       '<td class="p-1 font-mono text-slate-500">' + cid.slice(0, 8) + '</td>' +
-      '<td class="p-1 font-mono">' + esc(c.object_type || '-') + '</td>' +
+      '<td class="p-1 font-mono">' + esc(c.object_type || '-') +
+      (c.model_gaps?.length ? ' <span class="badge warning cursor-pointer" title="点击查看模型缺口" onclick="openCandidateGaps(\'' + cid + '\')">缺字段 ' + c.model_gaps.length + '</span>' : '') + '</td>' +
       '<td class="p-1">' + (c.instances?.length || 0) + '</td>' +
       '<td class="p-1 text-slate-400">' + esc(c.source || '-') + '</td>' +
       '<td class="p-1">' + (statusBadge[c.status] || esc(c.status || '')) + '</td>' +
@@ -3266,12 +3744,105 @@ async function deleteCandidateRow(id) {
   } catch (e) { toast('删除失败: ' + e.message, 'err'); }
 }
 
+// ---- GAP-05：模型缺口弹层 + 一键修复并重发布（导入页就地处理，不跳页） ----
+const GAP_KIND_LABELS = {
+  missing_attribute: '缺字段',
+  enum_value_missing: '枚举缺值',
+  constraint_too_strict: '约束过紧',
+  type_mismatch: '类型不符',
+  unknown: '其他',
+};
+const GAP_FIX_LABELS = {
+  add_attribute: '新增可选属性',
+  add_enum_values: '补枚举值',
+  remove_pattern: '解除正则约束',
+  relax_max_length: '上调最大长度',
+  relax_min_length: '下调最小长度',
+  relax_maximum: '上调最大值',
+  relax_minimum: '下调最小值',
+  unset_required: '必填改可选',
+};
+let _gapCtx = null;
+const _gapAttempts = {};
+
+function showModelGapsModal(gaps, ctx) {
+  if (!gaps || !gaps.length) return;
+  _gapCtx = Object.assign({ gaps: gaps }, ctx || null);
+  const rows = gaps.map(g => {
+    const kind = GAP_KIND_LABELS[g.kind] || g.kind || '其他';
+    const fix = g.fix?.action ? (GAP_FIX_LABELS[g.fix.action] || g.fix.action) : '需人工处理';
+    return '<tr class="border-b border-slate-800">' +
+      '<td class="p-1"><span class="badge ' + (g.auto_fixable ? 'warning' : 'danger') + '">' + esc(kind) + '</span></td>' +
+      '<td class="p-1 font-mono">' + esc(g.attribute_name || g.attribute_id || '-') + '</td>' +
+      '<td class="p-1 text-slate-400">' + esc(g.detail || '') + '</td>' +
+      '<td class="p-1">' + esc(fix) + '</td>' +
+      '</tr>';
+  }).join('');
+  const autoN = gaps.filter(g => g.auto_fixable).length;
+  const hint = ctx?.kind === 'approve'
+    ? '候选入库被 SHACL 门禁拦截。兼容项可一键修复模型并自动重发布，随后自动重新审批、继续导入；不兼容项需人工处理。'
+    : '数据列未匹配到模型属性（这些列的数据不会被导入）。可一键将缺失字段补入模型（新增可选属性）并自动重发布，随后自动重新上传、继续导入。';
+  const content =
+    '<p class="text-xs text-slate-400 mb-2">' + esc(hint) + '</p>' +
+    '<div class="max-h-80 overflow-auto border border-slate-800 rounded">' +
+    '<table class="w-full text-xs border-collapse"><thead class="sticky top-0 bg-slate-900 text-slate-400"><tr>' +
+    '<th class="p-1 text-left">类型</th><th class="p-1 text-left">属性</th><th class="p-1 text-left">说明</th><th class="p-1 text-left">动作</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    (autoN ? '<div class="mt-3 flex gap-2 justify-end">' +
+      '<button class="btn secondary text-xs" onclick="closeModal()">关闭</button>' +
+      '<button class="btn text-xs" id="btnFixGaps" onclick="fixModelGaps()">一键修复模型并重发布（' + autoN + ' 项）</button>' +
+      '</div>' : '');
+  showModal('模型缺口（导入被校验拦截）', content);
+}
+
+function openCandidateGaps(cid) {
+  const c = (state.candidates || []).find(x => x.id === cid);
+  if (c?.model_gaps?.length) {
+    showModelGapsModal(c.model_gaps, { kind: 'upload', ontologyId: c.ontology_id, objectType: c.object_type, global: false });
+  }
+}
+
+async function fixModelGaps() {
+  const ctx = _gapCtx;
+  if (!ctx) return;
+  const key = ctx.kind === 'approve' ? ('c:' + ctx.cid) : ('o:' + (ctx.ontologyId || 'up'));
+  _gapAttempts[key] = (_gapAttempts[key] || 0) + 1;
+  const btn = $('btnFixGaps');
+  if (_gapAttempts[key] > 3) {
+    if (btn) { btn.disabled = false; btn.textContent = '一键修复模型并重发布'; }
+    toast('自动修复已达 3 次上限，请处理「需人工处理」项后重试', 'err');
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = '修复中…'; }
+  try {
+    const j = await api('/api/ingest/model-gaps/fix', {
+      method: 'POST',
+      body: JSON.stringify({ ontology_id: ctx.ontologyId, object_type: ctx.objectType, gaps: ctx.gaps }),
+    });
+    const d = j.data || {};
+    toast('模型已重发布' + (d.version ? '（v' + d.version + '）' : '') + '：' + (d.applied || []).length + ' 项兼容变更生效' +
+      (d.skipped?.length ? '，' + d.skipped.length + ' 项需人工处理' : ''), 'ok');
+    closeModal();
+    if (ctx.kind === 'approve') await approveCandidate(ctx.cid);
+    else if (ctx.global) uploadIngestFileGlobal();
+    else uploadIngestFile();
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '一键修复模型并重发布'; }
+    toast((e.code === 'MODEL_GAP_MANUAL' || e.code === 'MODEL_GAP_NOOP') ? e.message : '修复失败: ' + e.message, 'err');
+  }
+}
+
 async function approveCandidate(cid) {
   try {
     const j = await api('/api/ingest/candidates/' + cid + '/approve', { method: 'POST', body: '{}' });
     const result = j.data || {};
-    const msg = result.violations?.length ? '入库被 SHACL 拦截: ' + result.violations.map(v => v.message).join('; ') : '候选已入库 ' + (result.imported || 0) + ' 条';
-    toast(msg, result.violations?.length ? 'err' : 'ok');
+    if (result.violations?.length) {
+      toast('入库被 SHACL 门禁拦截：' + result.violations.length + ' 条违规，可一键修复模型缺口', 'err');
+      const cand = (state.candidates || []).find(x => x.id === cid) || {};
+      showModelGapsModal(result.model_gaps || [], { kind: 'approve', cid: cid, ontologyId: cand.ontology_id, objectType: cand.object_type });
+    } else {
+      toast('候选已入库 ' + (result.imported || 0) + ' 条', 'ok');
+    }
     loadCandidates();
     loadInstances();
   } catch (e) { toast('入库失败: ' + e.message, 'err'); }
@@ -3662,6 +4233,177 @@ async function loadFederationDetail(inst) {
       renderInstanceDetail(full);
     }
   } catch (e) { /* 回源失败由后端在 content_resolution.error 中表达，面板按列表标注展示 */ }
+}
+
+// ---- GAP-09：生成草稿差异审核（生成结果 → 当前模型；逐项采纳/拒绝、一键采纳全部） ----
+let _diffCtx = null;
+
+function _ddSourceLabel(o) {
+  const src = o.draft_source === 'text' ? 'AI文本' : o.draft_source === 'document' ? '文档' : o.draft_source === 'table' ? '表格' : '草稿';
+  return esc(o.name || o.id) + '（' + src + '）';
+}
+
+// opts: { sourceId?, targetId? }——生成后自动打开（sourceId=新草稿, targetId=原当前本体）或详情面板手动打开
+async function openDraftDiffReview(opts) {
+  opts = opts || {};
+  const all = state.ontologies || [];
+  const sources = all.filter(o => o.status === 'draft');
+  if (!sources.length) return toast('没有可审核的生成草稿（先经 AI/文档/表格生成一个草稿）', 'info');
+  let sourceId = opts.sourceId && sources.some(o => o.id === opts.sourceId) ? opts.sourceId : sources[0].id;
+  const targets = all.filter(o => o.id !== sourceId);
+  if (!targets.length) return toast('没有可作为目标的本体（需至少存在另一个本体）', 'info');
+  let targetId = opts.targetId && targets.some(o => o.id === opts.targetId) ? opts.targetId
+    : (state.currentOntology && state.currentOntology.id !== sourceId ? state.currentOntology.id : targets[0].id);
+  _diffCtx = { sourceId, targetId, changes: [], alignment: [], loaded: false };
+
+  const srcOpts = sources.map(o => '<option value="' + o.id + '"' + (o.id === sourceId ? ' selected' : '') + '>' + _ddSourceLabel(o) + '</option>').join('');
+  const content =
+    '<p class="text-xs text-slate-400 mb-3">对比「生成草稿 → 目标本体」的结构差异，逐项勾选后合并进目标本体。兼容项默认勾选；不兼容项（删除/类型变化/取值收窄等）默认不勾，需显式确认。目标本体须为草稿，已发布本体请走变更提案。</p>'
+    + '<div class="flex gap-2 items-center mb-1"><label class="text-xs text-slate-400 w-16 shrink-0">来源草稿</label>'
+    + '<select id="ddSource" class="flex-1" onchange="_ddSourceChanged()">' + srcOpts + '</select></div>'
+    + '<div class="flex gap-2 items-center mb-3"><label class="text-xs text-slate-400 w-16 shrink-0">目标本体</label>'
+    + '<select id="ddTarget" class="flex-1" onchange="_ddTargetChanged()"></select>'
+    + '<button class="btn secondary text-xs shrink-0" onclick="_ddReload()">重新对比</button></div>'
+    + '<div id="ddSummary" class="text-xs mb-2"></div>'
+    + '<div id="ddBody" class="max-h-80 overflow-auto border border-slate-700 rounded"></div>'
+    + '<div class="mt-3 flex gap-2 items-center flex-wrap">'
+    + '<label class="text-xs text-slate-400 mr-auto"><input type="checkbox" id="ddDropSrc"> 采纳后删除生成草稿</label>'
+    + '<button class="btn secondary text-xs" onclick="closeModal()">关闭</button>'
+    + '<button class="btn secondary text-xs" onclick="_ddSelectAll(\'compat\')">只选兼容项</button>'
+    + '<button class="btn secondary text-xs" onclick="_ddSelectAll(\'all\')">一键采纳全部</button>'
+    + '<button class="btn text-xs" id="btnDdAdopt" onclick="applyDraftDiff()">确认采纳</button>'
+    + '</div>';
+  showModal('草稿差异审核（生成结果 → 当前模型）', content);
+  _ddRenderTargets();
+  await _ddReload();
+}
+
+function _ddRenderTargets() {
+  const el = $('ddTarget');
+  if (!el || !_diffCtx) return;
+  const targets = (state.ontologies || []).filter(o => o.id !== _diffCtx.sourceId);
+  el.innerHTML = targets.map(t => {
+    const st = t.status === 'draft' ? '草稿' : '已发布';
+    return '<option value="' + t.id + '"' + (t.id === _diffCtx.targetId ? ' selected' : '') + '>'
+      + esc(t.name || t.id) + '（' + st + (t.status !== 'draft' ? '·仅查看差异' : '') + '）</option>';
+  }).join('');
+}
+
+function _ddSourceChanged() {
+  if (!_diffCtx) return;
+  _diffCtx.sourceId = $('ddSource').value;
+  const targets = (state.ontologies || []).filter(o => o.id !== _diffCtx.sourceId);
+  if (!targets.some(t => t.id === _diffCtx.targetId) && targets.length) _diffCtx.targetId = targets[0].id;
+  _diffCtx.loaded = false;
+  _ddRenderTargets();
+  _ddReload();
+}
+
+function _ddTargetChanged() { if (_diffCtx) { _diffCtx.targetId = $('ddTarget').value; _ddReload(); } }
+
+async function _ddReload() {
+  const ctx = _diffCtx;
+  if (!ctx) return;
+  const btn = $('btnDdAdopt'); if (btn) btn.disabled = true;
+  $('ddSummary').textContent = '对比中…';
+  try {
+    const j = await api('/api/ontologies/' + ctx.targetId + '/draft-diff', {
+      method: 'POST', body: JSON.stringify({ source_draft_id: ctx.sourceId, align: true }),
+    });
+    ctx.changes = (j.data.diff || {}).changes || [];
+    ctx.alignment = j.data.alignment || [];
+    ctx.loaded = true;
+    _ddRenderDiff();
+  } catch (e) {
+    $('ddSummary').textContent = '';
+    $('ddBody').innerHTML = '<p class="text-xs text-red-400 p-3">' + esc(e.message || String(e)) + '</p>';
+  }
+}
+
+function _ddRenderDiff() {
+  const ctx = _diffCtx;
+  if (!ctx) return;
+  const objNames = {};
+  (state.ontologies || []).forEach(o => (o.objects || []).forEach(ob => { objNames[ob.id] = ob.name; }));
+  const compatN = ctx.changes.filter(c => c.compatible).length;
+  const tgt = (state.ontologies || []).find(o => o.id === ctx.targetId);
+  const locked = tgt && tgt.status !== 'draft';
+  const aligns = ctx.alignment || [];
+  const alignTip = aligns.length
+    ? ' · 已自动对齐 ' + aligns.length + ' 个同名对象（' + aligns.map(a => esc(a.source_name) + '→' + esc(a.target_name) + '/' +
+        { exact: '名称', synonym: '字典同义词', semantic: '相似度' }[a.method || ''] + '）').join('、') + '，歧义未对齐项按新增/删除列出，请核对'
+    : '';
+  $('ddSummary').innerHTML = '共 <b>' + ctx.changes.length + '</b> 项差异：兼容 ' + compatN + ' 项 / 不兼容 '
+    + (ctx.changes.length - compatN) + ' 项'
+    + (ctx.changes.length && ctx.changes.every(c => c.compatible) ? '（整体兼容）' : '')
+    + alignTip
+    + (locked ? '<span class="text-red-400"> · 目标已发布：仅可查看差异，采纳请走变更提案</span>' : '');
+  if (!ctx.changes.length) {
+    $('ddBody').innerHTML = '<p class="text-xs text-slate-400 p-3">两个模型无结构差异，无需采纳。</p>';
+    const btn = $('btnDdAdopt'); if (btn) btn.disabled = true;
+    return;
+  }
+  const rows = ctx.changes.map((c, i) => {
+    const obj = c.object_id ? (objNames[c.object_id] || c.object_id) : '-';
+    const sub = c.attribute_id || c.relation_id || c.constraint_id || c.function_id || '';
+    return '<tr class="border-b border-slate-800">'
+      + '<td class="p-1"><input type="checkbox" id="ddc' + i + '"' + (c.compatible && !locked ? ' checked' : '') + (locked ? ' disabled' : '') + ' onchange="_ddUpdateCount()"></td>'
+      + '<td class="p-1 whitespace-nowrap"><span class="badge ' + (c.compatible ? 'success' : 'danger') + '">' + esc(_csKindLabel(c.kind)) + '</span></td>'
+      + '<td class="p-1 font-mono text-slate-300">' + esc(obj) + (sub ? ' <span class="text-slate-500">' + esc(sub) + '</span>' : '') + '</td>'
+      + '<td class="p-1 text-slate-400 break-all">' + esc(c.detail || '') + '</td>'
+      + '</tr>';
+  }).join('');
+  $('ddBody').innerHTML = '<table class="w-full text-xs border-collapse"><thead class="sticky top-0 bg-slate-900 text-slate-400"><tr>'
+    + '<th class="p-1 w-10">采纳</th><th class="p-1 text-left">变更</th><th class="p-1 text-left">对象 / 成员</th><th class="p-1 text-left">说明</th></tr></thead><tbody>'
+    + rows + '</tbody></table>';
+  _ddUpdateCount();
+}
+
+function _ddSelectAll(mode) {
+  const ctx = _diffCtx; if (!ctx) return;
+  ctx.changes.forEach((c, i) => {
+    const box = document.getElementById('ddc' + i);
+    if (box && !box.disabled) box.checked = mode === 'all' ? true : (mode === 'compat' ? !!c.compatible : false);
+  });
+  _ddUpdateCount();
+}
+
+function _ddUpdateCount() {
+  const ctx = _diffCtx; if (!ctx) return;
+  const n = ctx.changes.filter((c, i) => { const b = document.getElementById('ddc' + i); return b && b.checked; }).length;
+  const btn = $('btnDdAdopt');
+  if (btn) { btn.textContent = '确认采纳（' + n + ' 项）'; btn.disabled = n === 0; }
+}
+
+async function applyDraftDiff() {
+  const ctx = _diffCtx; if (!ctx) return;
+  const idx = ctx.changes.map((c, i) => { const b = document.getElementById('ddc' + i); return b && b.checked ? i : -1; }).filter(i => i >= 0);
+  if (!idx.length) return toast('请至少勾选一项变更', 'info');
+  const btn = $('btnDdAdopt'); btn.disabled = true;
+  const drop = $('ddDropSrc') && $('ddDropSrc').checked;
+  try {
+    const j = await api('/api/ontologies/' + ctx.targetId + '/adopt-changes', {
+      method: 'POST', body: JSON.stringify({ source_draft_id: ctx.sourceId, adopt: idx, align: true }),
+    });
+    const tgt = (state.ontologies || []).find(o => o.id === ctx.targetId);
+    toast('已采纳 ' + j.data.adopted + ' 项' + (j.data.skipped ? '（' + j.data.skipped + ' 项无变化跳过）' : '')
+      + (j.data.synonyms_recorded ? '；沉淀字典同义词 ' + j.data.synonyms_recorded + ' 条' : '')
+      + ' → ' + (tgt?.name || ctx.targetId), 'ok');
+    if (drop) {
+      try {
+        await api('/api/ontologies/' + ctx.sourceId + '?force=true', { method: 'DELETE' });
+        toast('生成草稿已删除', 'ok');
+      } catch (e2) { toast('生成草稿删除失败：' + (e2.message || e2), 'err'); }
+    }
+    _diffCtx = null;
+    closeModal();
+    await loadOntologies();
+    const t = (state.ontologies || []).find(o => o.id === ctx.targetId);
+    if (t) selectOntology(t);
+  } catch (e) {
+    toast('采纳失败：' + (e.message || e), 'err', 8000);
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ---- V2-06 / M2-C：上传型实例内容开放管理（仅上传者/admin 可见）----
@@ -4509,9 +5251,115 @@ async function loadGraph() {
     const j = await api(qs);
     const o = state.ontologies.find(x => x.id === id);
     if (o) state.currentOntology = o;
-    if (state.graphTab === 'tree') drawTree(j.data);
-    else drawGraph(j.data);
+    // GAP-12：全量数据缓存＋筛选/展开状态复位；重绘时应用筛选
+    state.graphDataAll = j.data;
+    state.graphExpanded = new Set();
+    state.graphFilter = { kinds: null, origin: '', objectType: '' };
+    renderGraphFilterBar();
+    redrawGraph();
   } catch (e) { toast('加载图谱失败: ' + e.message, 'err'); }
+}
+
+// ---- GAP-12 图谱筛选/按需邻居展开 ----
+function redrawGraph() {
+  const data = applyGraphFilter(state.graphDataAll || {});
+  const cnt = $('graphNodeCount');
+  if (cnt) cnt.textContent = (data.nodes || []).length + ' 节点 / ' + (data.edges || []).length + ' 边';
+  if (state.graphTab === 'tree') drawTree(data);
+  else drawGraph(data);
+}
+
+function applyGraphFilter(data) {
+  if (!data) return { nodes: [], edges: [] };
+  let nodes = data.nodes || [];
+  const f = state.graphFilter || {};
+  if (f.kinds && f.kinds.size) nodes = nodes.filter(n => f.kinds.has(n.kind || n.type || 'object'));
+  if (f.origin) nodes = nodes.filter(n => (n.source || 'internal') === f.origin);
+  if (f.objectType) nodes = nodes.filter(n => (n.kind || n.type) !== 'instance' || n.object_type === f.objectType);
+  const ids = new Set(nodes.map(n => n.id));
+  const edges = (data.edges || []).filter(e => ids.has(e.source) && ids.has(e.target));
+  return { nodes, edges, mode: data.mode, truncated: data.truncated, total_instances: data.total_instances, shown: data.shown };
+}
+
+function renderGraphFilterBar() {
+  const bar = $('graphFilterBar');
+  const data = state.graphDataAll;
+  const show = !!(bar && data && (state.graphTab === 'schema' || state.graphTab === 'knowledge'));
+  if (bar) bar.classList.toggle('hidden', !show);
+  if (!show) return;
+  const f = state.graphFilter;
+  const allKinds = new Set((data.nodes || []).map(n => n.kind || n.type || 'object'));
+  const kindDefs = [['object', '对象'], ['instance', '实例']].filter(k => allKinds.has(k[0]));
+  $('graphKindChips').innerHTML = kindDefs.map(k =>
+    '<button class="gchip' + (!f.kinds || f.kinds.has(k[0]) ? ' on' : '') + '" onclick="toggleGraphKind(\'' + k[0] + '\')">' + k[1] + '</button>').join('');
+  const allOrigins = new Set((data.nodes || []).map(n => n.source || 'internal'));
+  const originDefs = [['internal', '内部建模'], ['external_mcp', '外部归化']].filter(o => allOrigins.has(o[0]));
+  $('graphOriginChips').innerHTML = originDefs.map(o =>
+    '<button class="gchip' + (!f.origin || f.origin === o[0] ? ' on' : '') + '" onclick="setGraphOrigin(\'' + o[0] + '\')">' + o[1] + '</button>').join('');
+  const otSel = $('graphObjTypeFilter');
+  const ots = [...new Set((data.nodes || []).filter(n => (n.kind || n.type) === 'instance' && n.object_type).map(n => n.object_type))].sort();
+  if (state.graphTab === 'knowledge' && ots.length) {
+    otSel.classList.remove('hidden');
+    otSel.innerHTML = '<option value="">全部对象类型</option>' + ots.map(t =>
+      '<option value="' + esc(t) + '"' + (f.objectType === t ? ' selected' : '') + '>' + esc(t) + '</option>').join('');
+  } else otSel.classList.add('hidden');
+}
+
+function toggleGraphKind(k) {
+  const f = state.graphFilter;
+  const all = new Set(((state.graphDataAll || {}).nodes || []).map(n => n.kind || n.type || 'object'));
+  const cur = f.kinds ? new Set(f.kinds) : new Set(all);
+  if (cur.has(k)) cur.delete(k); else cur.add(k);
+  f.kinds = (!cur.size || cur.size === all.size) ? null : cur;
+  renderGraphFilterBar(); redrawGraph();
+}
+
+function setGraphOrigin(o) {
+  const f = state.graphFilter;
+  f.origin = f.origin === o ? '' : o;
+  renderGraphFilterBar(); redrawGraph();
+}
+
+function onGraphFilterChange() {
+  state.graphFilter.objectType = $('graphObjTypeFilter').value;
+  redrawGraph();
+}
+
+// 双击节点：调 /api/graph/{id}/neighbors 按需拉邻居并增量并入当前图（大图不全量重拉）
+async function graphExpandNeighbors(d) {
+  const id = $('graphOntology').value;
+  if (!id || !state.graphDataAll) return;
+  if (state.graphExpanded && state.graphExpanded.has(d.id)) { toast('该节点已展开过邻居', 'info'); return; }
+  const mode = state.graphTab === 'tree' ? 'schema' : state.graphTab;
+  try {
+    const qs = '/api/graph/' + id + '/neighbors?node_id=' + encodeURIComponent(d.id) + '&mode=' + mode + '&depth=1&limit=50';
+    const j = await api(qs);
+    const res = mergeGraphNeighbors(j.data);
+    state.graphExpanded.add(d.id);
+    toast(res.nodes ? ('已展开邻居：+' + res.nodes + ' 节点 + ' + res.edges + ' 边') : '该节点暂无更多邻居', res.nodes ? 'ok' : 'info');
+    renderGraphFilterBar();
+    redrawGraph();
+  } catch (e) { toast('展开邻居失败: ' + e.message, 'err'); }
+}
+
+function mergeGraphNeighbors(nd) {
+  const all = state.graphDataAll;
+  const ids = new Set((all.nodes || []).map(n => n.id));
+  let nn = 0;
+  for (const n of (nd.nodes || [])) if (!ids.has(n.id)) { all.nodes.push(n); ids.add(n.id); nn++; }
+  if (nd.node && !ids.has(nd.node.id)) { all.nodes.push(nd.node); nn++; }
+  const eids = new Set((all.edges || []).map(e => e.id || (e.source + '→' + e.target)));
+  let ne = 0;
+  for (const e of (nd.edges || [])) {
+    const eid = e.id || (e.source + '→' + e.target);
+    if (!eids.has(eid) && ids.has(e.source) && ids.has(e.target)) { all.edges.push(e); eids.add(eid); ne++; }
+  }
+  return { nodes: nn, edges: ne };
+}
+
+function graphResetExpand() {
+  if (state.graphExpanded && state.graphExpanded.size) loadGraph();
+  else toast('当前没有展开的邻居节点', 'info');
 }
 
 // 「适应画布」：按当前节点位置重新 fit（drawGraph/drawTree 绘制时挂载 state.graphRefit）
@@ -4586,17 +5434,25 @@ function drawGraph(data) {
   // 力参数按图规模分档：孤立节点只有斥力没有吸引力，distanceMax 不限作用半径会被无限推远
   // （17 节点图被撑到 ~2000×1500，fit 后 scale≈0.3、标签全隐藏）；
   // forceX/forceY 提供真实向心弹簧（forceCenter 只整体平移、不收缩）
+  // 布局松紧（用户反馈 2026-11-19：相连节点过挤）——关系边目标长度随画布短边自适应放大、
+  // 斥力增强、instance_of 弹簧弱化、collide 间距加大；大图档保持紧凑防 fit 后不可读
   const N = nodes.length;
-  const chargeStrength = N > 800 ? -35 : N > 300 ? -60 : N > 80 ? -90 : -130;
-  const chargeMaxDist = N > 300 ? 220 : 420;
+  const spread = Math.max(480, Math.min(width, height));
+  const relDist = N > 300 ? 70 : Math.max(120, Math.min(190, spread * 0.16));
+  const instDist = N > 300 ? 32 : N > 80 ? 62 : 78;
+  const instStrength = N > 300 ? 0.85 : 0.65;
+  const chargeStrength = N > 800 ? -40 : N > 300 ? -70 : N > 80 ? -120 : -170;
+  const chargeMaxDist = N > 300 ? 240 : N > 80 ? 480 : 620;
+  const centerPull = N > 300 ? 0.06 : 0.04;
+  const collidePad = N > 300 ? 3 : 10;
   const simulation = d3.forceSimulation(nodes)
     .force('link', d3.forceLink(links).id(d => d.id)
-      .distance(d => d.kind === 'instance_of' ? (N > 300 ? 30 : 55) : 90)
-      .strength(d => d.kind === 'instance_of' ? 0.9 : 0.5))
+      .distance(d => d.kind === 'instance_of' ? instDist : relDist)
+      .strength(d => d.kind === 'instance_of' ? instStrength : 0.35))
     .force('charge', d3.forceManyBody().strength(chargeStrength).distanceMax(chargeMaxDist))
-    .force('x', d3.forceX(width / 2).strength(0.06))
-    .force('y', d3.forceY(height / 2).strength(0.06))
-    .force('collide', d3.forceCollide(d => nodeRadius(d) + (N > 300 ? 3 : 6)));
+    .force('x', d3.forceX(width / 2).strength(centerPull))
+    .force('y', d3.forceY(height / 2).strength(centerPull))
+    .force('collide', d3.forceCollide(d => nodeRadius(d) + collidePad));
   if (N > 800) simulation.alphaDecay(0.05); // 大图提前收敛，减少首屏等待
 
   const g = svg.append('g');
@@ -4612,12 +5468,16 @@ function drawGraph(data) {
   const updateLabelVisibility = () => {
     if (nodeLabelSel) nodeLabelSel.style('opacity', d => nodeKind(d) === 'object' || nodeRadius(d) > R_BASE || nodeRadius(d) * viewScale > R_ZOOM ? 1 : 0);
   };
+  // GAP-12 视口虚拟化渲染：>150 节点时只显示视口内节点（含 60px 边距）与两端可见的边
+  const cullOn = nodes.length > 150;
+  let cullFn = null;
   const zoomBehavior = d3.zoom().scaleExtent([0.05, 8]).on('zoom', e => {
     g.attr('transform', e.transform);
     viewScale = e.transform.k;
     updateLabelVisibility();
+    if (cullFn) cullFn();
   });
-  svg.call(zoomBehavior);
+  svg.call(zoomBehavior).on('dblclick.zoom', null); // 双击留给「展开邻居」
   // 适配全图：放大上限 1.6（收拢后小图适度放大，字号可读）；
   // 首次 fit 直接应用（不走 transition，避免"先炸开再缩回"的观感）；
   // 「适应画布」按钮经 state.graphRefit 复用本函数（animate=true 时 300ms 过渡）
@@ -4655,7 +5515,8 @@ function drawGraph(data) {
   const node = g.append('g').selectAll('g').data(nodes).enter().append('g').call(d3.drag()
     .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
     .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
-    .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }));
+    .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }))
+    .on('dblclick', (e, d) => { e.stopPropagation(); graphExpandNeighbors(d); });
   node.append('circle').attr('r', d => nodeRadius(d))
     .attr('fill', d => {
       const k = nodeKind(d);
@@ -4681,15 +5542,34 @@ function drawGraph(data) {
     if (nodeLabelSel) nodeLabelSel.filter(l => l === d).style('opacity', 1);
     tip.style.opacity = 1;
     const k = nodeKind(d);
-    tip.innerHTML = '<strong>' + esc(d.label || d.name || d.id) + '</strong><br/>type: ' + k + (d.source ? '<br/>source: ' + esc(d.source.id || d.source) : '') + (d.object_type ? '<br/>object_type: ' + esc(d.object_type) : '');
+    tip.innerHTML = '<strong>' + esc(d.label || d.name || d.id) + '</strong><br/>type: ' + k + (d.source ? '<br/>source: ' + esc(d.source.id || d.source) : '') + (d.object_type ? '<br/>object_type: ' + esc(d.object_type) : '') + '<br/><span style="opacity:.65">双击节点展开邻居</span>';
     moveTip(e);
   }).on('mousemove', moveTip)
     .on('mouseout', () => { tip.style.opacity = 0; updateLabelVisibility(); });
+
+  // 剔除实现：视口世界坐标包围盒外的节点 display:none，两端均不可见的边/边标签一并隐藏
+  if (cullOn) {
+    cullFn = () => {
+      const t = d3.zoomTransform(svg.node());
+      const pad = 60;
+      const x0 = -t.x / t.k - pad, y0 = -t.y / t.k - pad;
+      const x1 = (width - t.x) / t.k + pad, y1 = (height - t.y) / t.k + pad;
+      const vis = new Set();
+      node.each(function (d) {
+        const inVp = d.x >= x0 && d.x <= x1 && d.y >= y0 && d.y <= y1;
+        this.style.display = inVp ? '' : 'none';
+        if (inVp) vis.add(d.id);
+      });
+      link.style('display', e => (vis.has(e.source.id) && vis.has(e.target.id)) ? '' : 'none');
+      linkLabel.style('display', e => (vis.has(e.source.id) && vis.has(e.target.id)) ? '' : 'none');
+    };
+  }
 
   simulation.on('tick', () => {
     link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
     linkLabel.attr('x', d => (d.source.x + d.target.x) / 2).attr('y', d => (d.source.y + d.target.y) / 2);
     node.attr('transform', d => 'translate(' + d.x + ',' + d.y + ')');
+    if (cullFn) cullFn();
   });
 }
 
@@ -5955,6 +6835,8 @@ async function bootApp() {
     await loadProjects();
   }
   switchTab('home');
+  showOnboardingWizard();  // GAP-08：首次进入（未关闭过）自动展开五步向导
+  refreshTaskPanel();      // GAP-11：启动即拉取当前项目后台任务（跨页面刷新续显）
   setInterval(checkHealth, 10000);
 }
 
@@ -6463,6 +7345,7 @@ function capShowValidate(res) {
     return '<div class="text-rose-400">✗ ' + esc(msg) + '</div>';
   }).join('');
   vb.innerHTML = '<div class="text-rose-400 font-medium">校验未通过' + (res.error_code ? '（' + esc(res.error_code) + '）' : '') + '</div>' +
+    (res.error_code ? '<div class="mt-1">' + capErrFriendlyHtml(res.error_code, null) + '</div>' : '') +
     '<div class="mt-1 space-y-0.5">' + (issues || '<div class="text-rose-400">详见上方 toast</div>') + '</div>';
 }
 
@@ -6638,7 +7521,8 @@ function capRenderExecResult(r) {
     '<div class="mb-1"><span class="text-slate-400">能力：</span><span class="font-mono">' + esc(r.capability_name || '') + '</span> v' + esc(r.capability_version || '?') +
     '　<span class="text-slate-400">实例：</span><span class="font-mono">' + esc(r.instance_id || '') + '</span></div>' +
     '<div class="mb-1 text-lg font-medium ' + (ok ? 'text-emerald-400' : 'text-rose-400') + '">' +
-      (ok ? 'value = ' + capFmtValue(r.value) : 'error: ' + esc(r.error_code || '') + ' — ' + esc(r.error_message || '')) + '</div>' +
+      (ok ? 'value = ' + capFmtValue(r.value) : 'error: ' + esc(r.error_code || '')) + '</div>' +
+    (ok ? '' : '<div class="mb-1">' + capErrFriendlyHtml(r.error_code, r.error_message) + '</div>') +
     '<div class="text-slate-400 mb-1">' + capTraceHtml(r.trace) + '</div>'
     + (r.federated ? '<div class="text-amber-300 mb-1">联邦读：' + esc(r.federated.connection_name || r.federated.source_connection || '')
       + '（渠道 ' + esc(r.federated.resolved_as || '?') + '，取数 ' + esc(r.federated.fetched_at || '?') + '）</div>' : '')
@@ -6667,7 +7551,7 @@ function capRenderBatch(r) {
       + (it.derived ? ' <span class="text-sky-300">派生</span>' : '') + '</td>' +
       '<td class="p-1.5 font-mono">' + capFmtValue(it.value)
       + (it.source_system ? '<div class="text-slate-600 text-[10px]">' + esc(it.source_system) + '</div>' : '') + '</td>' +
-      '<td class="p-1.5 text-slate-400">' + (it.error_code ? esc(it.error_code) + '<div class="text-slate-600">' + esc(it.error_message || '') + '</div>' : '-') + '</td>' +
+      '<td class="p-1.5 text-slate-400">' + (it.error_code ? capErrFriendlyHtml(it.error_code, it.error_message) : '-') + '</td>' +
       '<td class="p-1.5">' + esc(it.capability_version || '') + '</td>' +
       '<td class="p-1.5 text-slate-400">' + capTraceHtml(it.trace) + '</td></tr>'
   ).join('');
@@ -6867,10 +7751,29 @@ async function loadSession() {
   }
 }
 
+// GAP-10：无权限 tab 不再隐藏 → 显示＋禁点＋工具提示所需权限。
+// 所需权限与后端 permission_matrix（backend/auth/__init__.py）的 tab 白名单分档一一对应。
+const _TAB_ACT_LABEL = { read: '只读', write: '写入', review: '评审', admin: '管理' };
+const _TAB_PERM_REQ = {
+  modeling: ['write'], dictionary: ['write'], capability: ['write'], action: ['write'],
+  mcp: ['write'], orchestration: ['write'],
+  ingest: ['write', 'review'], approvals: ['write', 'review'],
+  users: ['admin'], audit: ['admin'],
+};
+
 function applyPermissionMatrix(perms) {
   const tabs = new Set(perms.tabs || []);
   document.querySelectorAll('.tab[data-tab]').forEach(el => {
-    el.classList.toggle('op-hidden', tabs.size > 0 && !tabs.has(el.dataset.tab));
+    const allowed = tabs.size === 0 || tabs.has(el.dataset.tab);
+    el.classList.remove('op-hidden'); // GAP-10：不再隐藏
+    el.classList.toggle('tab-disabled', !allowed);
+    if (!allowed) {
+      const req = _TAB_PERM_REQ[el.dataset.tab] || [];
+      const why = req.length ? '需要「' + req.map(a => _TAB_ACT_LABEL[a] || a).join(' 或 ') + '」权限' : '无权限';
+      el.title = why + '（当前角色：' + (perms.role_label || perms.role || '-') + '）';
+    } else {
+      el.removeAttribute('title');
+    }
   });
   const actions = new Set(perms.actions || []);
   document.querySelectorAll('button[onclick]').forEach(btn => {

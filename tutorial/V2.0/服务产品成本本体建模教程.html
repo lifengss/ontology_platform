@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>服务产品成本本体建模全流程教程（格物 · 企业业务本体平台 V2.0）</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --panel:#ffffff; --border:#e2e8f0; --text:#1e293b; --muted:#64748b;
+    --accent:#2563eb; --ok:#059669; --warn:#b45309; --bad:#dc2626; --code-bg:#0f172a; --code-text:#e2e8f0;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;line-height:1.75;font-size:15px;}
+  .wrap{max-width:980px;margin:0 auto;padding:32px 28px 80px;}
+  header.doc{background:linear-gradient(135deg,#1d4ed8,#2563eb 60%,#3b82f6);color:#fff;border-radius:14px;padding:30px 34px;margin-bottom:28px;}
+  header.doc h1{margin:0 0 10px;font-size:24px;}
+  header.doc p{margin:4px 0;opacity:.92;font-size:13.5px;}
+  h2.step{font-size:20px;margin:44px 0 14px;padding:10px 16px;background:#eff6ff;border-left:4px solid var(--accent);border-radius:6px;}
+  h3{font-size:16px;margin:22px 0 8px;color:#1e3a8a;}
+  .goal{background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:10px 14px;margin:12px 0;}
+  .goal b{color:var(--ok);}
+  .callout{background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;margin:12px 0;font-size:13.5px;}
+  .callout b{color:var(--warn);}
+  .danger{background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;margin:12px 0;font-size:13.5px;}
+  .danger b{color:var(--bad);}
+  figure.shot{margin:18px 0;background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;box-shadow:0 2px 10px rgba(15,23,42,.06);}
+  figure.shot img{display:block;width:100%;height:auto;}
+  figure.shot figcaption{padding:10px 16px;font-size:12.5px;color:var(--muted);border-top:1px solid var(--border);background:#f8fafc;}
+  figure.shot figcaption b{color:#334155;}
+  table{border-collapse:collapse;width:100%;margin:14px 0;background:var(--panel);font-size:13.5px;}
+  th,td{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:top;}
+  th{background:#eff6ff;color:#1e3a8a;font-weight:600;}
+  tr:nth-child(even) td{background:#f8fafc;}
+  pre{background:var(--code-bg);color:var(--code-text);padding:14px 16px;border-radius:10px;overflow-x:auto;font-size:12.5px;line-height:1.6;font-family:Consolas,"Courier New",monospace;}
+  code{font-family:Consolas,"Courier New",monospace;background:#eef2f7;border-radius:4px;padding:1px 5px;font-size:12.5px;color:#0f172a;}
+  pre code{background:none;color:inherit;padding:0;}
+  nav.toc{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 26px;margin-bottom:8px;}
+  nav.toc ol{margin:8px 0 0;padding-left:22px;}
+  nav.toc a{color:var(--accent);text-decoration:none;}
+  nav.toc a:hover{text-decoration:underline;}
+  .badge{display:inline-block;background:#dbeafe;color:#1d4ed8;border-radius:999px;padding:1px 10px;font-size:12px;margin-right:6px;}
+  .badge.ok{background:#d1fae5;color:#047857;}
+  .badge.warn{background:#fef3c7;color:#92400e;}
+  .shot-note{font-size:12.5px;color:var(--muted);margin-top:-8px;margin-bottom:14px;}
+  footer{margin-top:56px;color:var(--muted);font-size:12.5px;text-align:center;}
+  .kv{color:#334155;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <h1>服务产品成本本体建模全流程教程</h1>
+  <p><b>适用平台</b>：格物 lattice · 企业业务本体平台（Beta V2.0）　<b>教程版本</b>：V2.0</p>
+  <p><b>实战对象</b>：服务产品部-通用服务器原厂维保成本核算（项目 <code>a9572b34…7f202</code>，本体 <code>b0da8871…68af</code> v1.4）</p>
+  <p><b>数据来源</b>：《成本基线.xlsx》（主数据）＋《成本核算逻辑.xlsx》（核算结果，仅用于验证）＋《通用服务器原厂维保_成本核算说明.docx》（建模规范）</p>
+  <p>📎 本教程所有截图均为平台实拍，与文中描述逐一对应；截图对应页面区域已在图注中标明。</p>
+</header>
+
+<nav class="toc">
+  <b>目录</b>
+  <ol>
+    <li><a href="#step0">第 0 步｜登录与鉴权</a></li>
+    <li><a href="#step1">第 1 步｜创建服务产品部用户</a></li>
+    <li><a href="#step2">第 2 步｜创建项目</a></li>
+    <li><a href="#step3">第 3 步｜本体建模（对象/属性/关系/稳定键）</a></li>
+    <li><a href="#step4">第 4 步｜导入基线实例（preview → approve）</a></li>
+    <li><a href="#step5">第 5 步｜定义能力（opl-expr + lookup/ref）</a></li>
+    <li><a href="#step6">第 6 步｜发布本体与能力</a></li>
+    <li><a href="#step7">第 7 步｜发布 MCP 并从 Agent 平台核验</a></li>
+    <li><a href="#step8">第 8 步｜全量核验与比对</a></li>
+    <li><a href="#step9">第 9 步｜源数据口径问题的处理</a></li>
+    <li><a href="#principles">设计原则与坑点清单</a></li>
+    <li><a href="#appendix">附录｜平台功能页与常用 API 速查</a></li>
+  </ol>
+</nav>
+
+<!-- ============ 第 0 步 ============ -->
+<h2 class="step" id="step0">第 0 步｜登录与鉴权</h2>
+<div class="goal">✅ <b>目标</b>：以管理员登录，获得 <code>Bearer token</code>，之后所有 <code>/api/*</code> 请求带 <code>Authorization: Bearer &lt;token&gt;</code>。</div>
+
+<h3>平台侧操作</h3>
+<p>浏览器打开前端地址（如 <code>http://localhost:8090</code>）。未登录时全站只呈现登录卡片，输入管理员账号密码登录（初始管理员 <code>admin</code>）。登录成功后，顶栏右上角显示「当前用户（角色）」，左侧导航按权限矩阵渲染功能页。</p>
+
+<figure class="shot">
+  <img src="images/00-login.png" alt="登录页" />
+  <figcaption><b>图 0-1｜登录页</b>：未登录时的全屏登录卡片「格物 Lattice · 登录」（V2-05 平台自身登录鉴权与 RBAC），含账号/密码输入与登录按钮，左上角为主题切换按钮。</figcaption>
+</figure>
+
+<p class="kv">初始密码来源二选一：① 环境变量 <code>ONTOLOGY_BOOTSTRAP_ADMIN_PASSWORD</code>；② 旧版 <code>backend/secrets/bootstrap_admin.txt</code>（新版已废弃明文密码文件；库内密码哈希在重启后仍有效，旧密码仍可登录）。</p>
+
+<h3>API（脚本侧）</h3>
+<pre><code>POST /api/auth/login?mode=bearer
+→ data.token   # 后续请求带 Authorization: Bearer &lt;token&gt;</code></pre>
+
+<div class="danger">⚠ <b>踩坑</b>：<code>localhost</code> 在 Windows 会解析到 IPv6 <code>::1</code> 导致脚本请求挂起，脚本一律用 <code>http://127.0.0.1:8000</code>。
+（浏览器侧相反：前端页面请用 <code>http://localhost:8090</code> 打开——若用 <code>127.0.0.1:8090</code> 打开而 API 在 <code>localhost:8000</code>，两者属不同站点，<code>SameSite=Lax</code> 的 httpOnly 会话 Cookie 不会随跨站请求发送，会出现「登录状态已失效」循环。）</div>
+
+<!-- ============ 第 1 步 ============ -->
+<h2 class="step" id="step1">第 1 步｜创建服务产品部用户</h2>
+<div class="goal">✅ <b>目标</b>：新建「服务产品部」用户，角色=<b>建模人 modeler</b>，部门=服务产品部。</div>
+
+<h3>平台侧操作</h3>
+<p>左侧导航进入「<b>用户与授权</b>」页 → 右侧「<b>新增用户</b>」表单：账号 <code>svcproduct</code>、角色=建模人（可读可写，适合日常建模/导实例/建能力）、部门=服务产品部、密码 ≥8 位。提交后用户出现在左侧「用户与角色授权」列表，角色修改即时生效（无需重新登录）。</p>
+
+<figure class="shot">
+  <img src="images/01-users.png" alt="用户与授权页" />
+  <figcaption><b>图 1-1｜用户与授权页</b>：左侧「用户与角色授权」表格中已存在 <code>svcproduct</code>（角色=建模人），右侧为「新增用户」表单（账号/初始密码/角色/部门），下方为授权与鉴权审计流水。顶栏项目已切换为「服务产品部-服务器原厂维保成本核算」。</figcaption>
+</figure>
+
+<h3>API</h3>
+<pre><code>POST /api/auth/users
+{username:"svcproduct", password:"≥8位", role:"modeler", department:"服务产品部", tenant_id:"default", grants:[]}</code></pre>
+<p>角色枚举：<code>admin</code>(管理员) / <code>modeler</code>(建模人) / <code>reviewer</code>(审核人) / <code>viewer</code>(查看人)。</p>
+
+<!-- ============ 第 2 步 ============ -->
+<h2 class="step" id="step2">第 2 步｜创建项目</h2>
+<div class="goal">✅ <b>目标</b>：新建归属于「服务产品部」的项目，作为租户边界承载本体/实例/能力。</div>
+
+<h3>平台侧操作</h3>
+<p>「<b>首页</b>」→ 项目管理 →「+ 新建项目」：名称 <code>服务产品部-服务器原厂维保成本核算</code>、所属部门=服务产品部、描述可写「基于成本基线.xlsx（主数据）+ 成本核算逻辑.xlsx（验证基准），按《成本核算说明.docx》构建本体与能力」。创建后顶栏「项目」下拉切换到该项目（多项目隔离：<code>/api/*</code> 一律带 <code>?project_id=</code>）。</p>
+
+<figure class="shot">
+  <img src="images/02-project.png" alt="首页项目管理" />
+  <figcaption><b>图 2-1｜首页 · 项目管理</b>：顶部统计卡（项目总数/本体总数/实例总数/MCP 在线项目），下方项目列表含「所属部门」筛选与「+ 新建项目」按钮；右下角 toast「成功 切换到项目：服务产品部-服务器原厂维保成本核算」，顶栏项目下拉已选中该项目。</figcaption>
+</figure>
+
+<h3>API</h3>
+<pre><code>POST /api/projects   {name, department:"服务产品部", description}</code></pre>
+
+<!-- ============ 第 3 步 ============ -->
+<h2 class="step" id="step3">第 3 步｜本体建模（对象/属性/关系/稳定键）</h2>
+<div class="goal">✅ <b>目标</b>：按 docx 取数关系，构建完整本体（主数据对象 + 结果对象）。</div>
+
+<h3>平台侧操作</h3>
+<p>「<b>建模</b>」页 →「+ 新建」本体：名称、版本、建模方式（manual）。本体卡片进入「编辑本体」后按「表单建模」逐个添加对象：每个对象填对象 ID / 对象名称 / 描述（<b>业务语义定义 ≥5 字</b>）、<b>业务主键 stable_key</b>（指向本对象某 string 属性；组合情况用合成 <code>code</code> 字段）、属性（名称/类型/必填/约束）与关系（目标对象/基数）。提交后本体处于 <code>draft</code>。</p>
+
+<figure class="shot">
+  <img src="images/03-modeling-objects.png" alt="编辑本体：对象定义" />
+  <figcaption><b>图 3-1｜建模页 · 编辑本体（表单建模）</b>：本体「服务产品部-通用服务器原厂维保成本核算」版本 1.4、建模方式 manual；对象 #1 = <code>model</code>（服务产品机型），描述「服务产品部在售/在保的服务器机型型号，决定 U 数（人工基线维度）与整机 BOM 清单」，业务主键=<code>model_code</code>，属性 model_code（主键标识）/remark/u_count；下方为「+ 添加属性」「关系 + 关联」区。右上角「提交变更 (V2-07)」按钮即已发布本体走变更提案的入口。</figcaption>
+</figure>
+
+<h3>本次构建的对象（10 + 后续补齐 = 20 个）</h3>
+<table>
+  <tr><th>对象 id</th><th>名称</th><th>稳定键</th><th>关键属性</th><th>用途</th></tr>
+  <tr><td><code>model</code></td><td>服务产品机型</td><td>model_code</td><td>model_code/u_count/remark</td><td>机型→U数档→人工基线</td></tr>
+  <tr><td><code>labor_baseline</code></td><td>售后人工成本基线</td><td>code</td><td>u_group/customer/product_line/region/service_class/unit_cost</td><td>E=C×D</td></tr>
+  <tr><td><code>onsite_rate_baseline</code></td><td>现场服务率基线</td><td>code</td><td>product_line/customer/region/rate</td><td>现场服务率 D</td></tr>
+  <tr><td><code>spare_aux_baseline</code></td><td>备件辅助成本基线</td><td>code</td><td>country/unit_nd/unit_4h/unit_rma/unit_arma/tax_rate</td><td>K=H×G</td></tr>
+  <tr><td><code>mgmt_cost_baseline</code></td><td>管理成本基线</td><td>code</td><td>customer/phase(实施/售后)/region/value</td><td>N=L×M</td></tr>
+  <tr><td><code>service_level_coeff</code></td><td>服务水平系数基线</td><td>code</td><td>response_class/coeff</td><td>4H×1.15 等</td></tr>
+  <tr><td><code>failure_rate_baseline</code></td><td>部件故障率基线</td><td>code</td><td>part_type/product_line/customer/rate</td><td>F=BOM×故障率</td></tr>
+  <tr><td><code>part_price</code></td><td>备件单价</td><td>part_pn</td><td>factory/part_pn/part_desc/unit_price</td><td>备件成本</td></tr>
+  <tr><td><code>bom</code></td><td>整机BOM</td><td>code</td><td>model_code/part_pn/qty/unit_price/cost</td><td>F 归集输入</td></tr>
+  <tr><td><code>warranty_cost</code></td><td>维保成本核算结果</td><td>code</td><td>region/service_type/E/K/N/O/S/P/Q/R</td><td>结果/验证基准</td></tr>
+  <tr><td><code>onsite_labor_baseline</code> 等 10 个</td><td colspan="3">随需求补充：人天/差旅/驻场/资金占用/现场人工(NBD现场=1940、4H现场=4166)等基线对象 + 人天核算/焕新/单次维修/驻场等结果对象（见第 8 步核算域）</td><td>后续 5 个核算域</td></tr>
+</table>
+<p class="shot-note">版本演进（对象随需求补充，均通过兼容变更提案自动升版本）：v1.0（10 对象）→ v1.1（+人天/差旅/驻场/资金占用基线 + 5 个核算结果对象）→ v1.2 / v1.3 / v1.4（补字段 + 现场人工基线），最终 20 对象、515 实例。</p>
+
+<h3>已发布本体如何再改对象</h3>
+<p>active 本体不可直接编辑。在编辑本体内补充/修改对象后点「<b>提交变更 (V2-07)</b>」（图 3-1 右上角）走<b>变更提案 changeset</b>：兼容变更（新增可选属性/新增对象/放宽取值范围等）直接升小版本并自动发布（v1.0→…→v1.4 均为兼容升版）；不兼容变更（删属性/改类型/主键变化/收窄范围/删对象）须升大版本＋审批，通过前对外仍是旧版本。「变更审批」页可查看兼容性自动判定与状态机。</p>
+
+<h3>API</h3>
+<pre><code>POST /api/ontologies?project_id=...        # 新建 draft
+POST /api/ontologies/{oid}/changesets      # 已发布本体的变更提案（model 为完整新模型，兼容→自动升版）</code></pre>
+
+<div class="callout">⚠ 属性约束 <code>pattern</code> 只认 ASCII；产品线分组 enum 是<b>全角括号</b>（如 <code>服务器（SV、AI、边缘）</code>）；枚举值须与源表完全一致才能命中。</div>
+
+<!-- ============ 第 4 步 ============ -->
+<h2 class="step" id="step4">第 4 步｜导入基线实例（preview → approve）</h2>
+<div class="goal">✅ <b>目标</b>：把《成本基线.xlsx》主数据表导入为实例。走<b>归化铁律</b>：<code>preview → 候选(待审核) → 人工 approve(SHACL) → 落库</code>。</div>
+
+<h3>平台侧操作</h3>
+<p>「<b>实例导入</b>」页：左侧为对象树（每对象显示实例数），选中对象后右侧出现「导入 / 添加实例」入口；「<b>导入与审核</b>」子标签提供多对象批量上传与「<b>候选审核</b>」队列（待审核/已入库/已驳回，支持批量批准/驳回/恢复/删除）。</p>
+
+<figure class="shot">
+  <img src="images/04-ingest-object.png" alt="实例导入·对象视图" />
+  <figcaption><b>图 4-1｜实例导入 · 对象视图</b>：左侧对象树即本次导入清单——服务产品机型 53、售后人工成本基线 60、现场服务率基线 10、备件辅助成本基线 35、管理成本基线 20、服务水平系数基线 7、部件故障率基线 48、备件单价 56、整机BOM 59、维保成本核算结果 33、人天成本基线 42、国内差旅成本 6、人员驻场成本 72、资金占用系数 1、国内单次维修报价 2、焕新服务核算 2、人天核算结果 3……右上角「全部实例 515 条」；右侧为选中对象的实例列表（如 onsite_labor_baseline：4H现场=4166、NBD现场=1940）。</figcaption>
+</figure>
+
+<figure class="shot">
+  <img src="images/04-ingest-approve.png" alt="实例导入·候选审核" />
+  <figcaption><b>图 4-2｜实例导入 · 导入与审核（候选审核队列）</b>：上方「多对象批量导入」按 sheet 名自动匹配对象、命中一次性生成候选、需逐条确认入库；下方候选队列表格（候选 ID/对象/实例数/来源/状态/操作）——model 53、labor_baseline 60、onsite_rate_baseline 10、spare_aux_baseline 35、mgmt_cost_baseline 10、service_level_coeff 等「已入库」批次，共 29 批候选。注意「备件单价 93」为源表行数，入库时按稳定键 part_pn 去重后对象树为 56 条（其余如部件故障率基线 168→48、人天 46→42 同理）。</figcaption>
+</figure>
+
+<h3>导入要点</h3>
+<ul>
+  <li>推荐 <code>field_map</code>：<code>source.records</code> 为 JSON dict 列表，<b>空字段直接省略</b>（避免空串触发 SHACL 枚举/必填报 <code>Value Literal("") not in list</code>）。</li>
+  <li><code>object_type</code> 放 <b>body</b>；<code>field_map</code> 放 <b>body 且必须非空</b>（identity map <code>{k:k}</code> 也行）。</li>
+  <li>读单元格<b>原值</b>而非显示值（0.2189 vs 0.218895427866865 曾致 ~0.01 元偏差）。</li>
+</ul>
+
+<h3>API</h3>
+<pre><code>POST /api/ingest/preview?project_id=..
+ {"ontology_id":"...","object_type":"...","source":{"kind":"field_map","records":[...]},"mapping":{"field_map":{k:k}}}
+POST /api/ingest/candidates/{candidate_id}/approve?project_id=..</code></pre>
+
+<div class="danger">⚠ <b>两个列偏移坑</b>：① 人天成本基线：国家=列1 / 实施主体=列2 / 产品线=列3-5（表头对齐≠实际列位）；② 人员驻场成本：等级=列2 / 服务商从列3起，且服务商表头是多行（如 <code>华夏\n（北京）</code>），<b>勿用 <code>split("\n")[0]</code> 截断</b>，否则会把「华夏(北京)/华夏(津鲁冀)」合并导致 lookup 歧义。</div>
+
+<!-- ============ 第 5 步 ============ -->
+<h2 class="step" id="step5">第 5 步｜定义能力（opl-expr + lookup/ref）</h2>
+<div class="goal">✅ <b>目标</b>：把取数与公式固化为「可解释表达式能力」。</div>
+
+<h3>平台侧操作</h3>
+<p>「<b>能力</b>」页 →「+ 新建能力」：name（小写下划线）、显示名、对象类型、表达式。表达式编辑器内可用 <code>lookup('对象', {维度:值}, '属性')</code>（回指基线实例）、<code>ref('cap_xxx')</code>（引用上游已发布能力）、<code>if / if_null</code>、四则运算；提供「保存」「校验公式（不落库）」「发布」按钮。</p>
+
+<figure class="shot">
+  <img src="images/05-capability-editor.png" alt="能力表达式编辑器" />
+  <figcaption><b>图 5-1｜能力页 · 表达式编辑器</b>：正在编辑 <code>cap_onsite_rate_d</code>（显示名「现场服务率D(含年限上浮)」，对象类型 warranty_cost），表达式为 <code>base = lookup('onsite_rate_baseline', {'product_line': this.onsite_product_line, 'customer': this.onsite_customer, 'region': this.region}, 'rate')</code> + 年限系数分支 <code>if(this.term=='4年', base*1.4, if(this.term=='5年', base*1.88, base))</code>；下方按钮为 保存 / 校验公式（不落库） / 取消。</figcaption>
+</figure>
+
+<h3>本次构建的能力链</h3>
+<pre><code>cap_onsite_rate_d  = 现场服务率基线(产线SV×客户非BATZ×区域).rate × 年限系数
+                     年限系数：3年=1.0；4年=×1.4；5年=×1.88
+cap_labor_cost_e   = ref(cap_onsite_rate_d) × 售后人工成本基线(u_group×客户×区域×服务等级).unit_cost
+cap_spare_aux_k    = ref(cap_onsite_rate_d) × 备件辅助成本基线(国家).unit_nd/unit_4h/unit_rma/unit_arma
+cap_mgmt_cost_n    = ref(cap_onsite_rate_d) × 管理成本基线(客户×售后×区域).value
+cap_total_o        = cap_labor_cost_e + spare_direct(F) + cap_spare_aux_k + cap_mgmt_cost_n
+cap_ratio_s        = ref(cap_total_o) / machine_cost(R=37672)</code></pre>
+<p>后续 5 个核算域能力：<code>cap_man_day_cost</code>（人天×天数）、<code>cap_station_cost</code>（月成本×数量）、<code>cap_overseas_trip_cost</code>（差旅+服务商人天）、<code>cap_renew_cost</code>（平均价+备件辅助+×0.8%）、<code>cap_repair_cost</code>（人工+备件F+单件辅助+实施管理+资金占用）。</p>
+
+<h3>API</h3>
+<pre><code>POST /api/capabilities?project_id=..  {name, object_type, expression, ...}
+POST /api/capabilities/{cap_id}/publish   # 锁定版本（下游 ref 才能解析）</code></pre>
+
+<div class="danger">⚠ <b>三条必记</b>：① <code>binds</code>（<code>a = this.x</code>）是<b>无条件预求值</b>，键缺失即 <code>MISSING_INPUT_ATTR</code>；可选属性要内联进 <code>if()</code>。② 表达式<b>最后位置</b>避免多行嵌套 <code>if()</code>，先 bind 变量、final 只放单层选择。③ <b>下游 ref 上游，必须先 publish 上游能力</b>，否则报 <code>REF_NOT_RESOLVED</code>。</div>
+
+<!-- ============ 第 6 步 ============ -->
+<h2 class="step" id="step6">第 6 步｜发布本体与能力</h2>
+<div class="goal">✅ <b>目标</b>：让本体 <code>active</code>、能力 <code>active</code>（引用被锁定），才能被 MCP/图谱/能力消费。</div>
+
+<h3>平台侧操作</h3>
+<p>「<b>建模</b>」页 → 本体卡片「发布」：<code>draft → active</code>，卡片显示「已发布」徽标与版本号（图 3-1 左上本体列表中该本体即「已发布 · v1.4 · 20 对象」）。「<b>能力</b>」页 → 每行「发布」：能力由草稿→active，状态列显示「已发布」+版本 v1.0.0；已发布能力内容变更自动发新版（minor+1，旧版可溯源），点行内「版本」可查看版本历史与逐版表达式。</p>
+
+<figure class="shot">
+  <img src="images/05-capability-total-o.png" alt="能力列表：全部已发布" />
+  <figcaption><b>图 6-1｜能力页 · 能力列表（派生型·公式）</b>：11 个能力全部「已发布」v1.0.0（cap_repair_cost / cap_renew_cost 为 1.1.0），操作列提供 编辑/版本/依赖/删除；右侧为「执行」面板（能力 name/id、实例 record_id、批量 limit、dry_run 复选框、单实例执行/批量执行/成本预览按钮）与「执行结果（四要素溯源）」区。</figcaption>
+</figure>
+
+<figure class="shot">
+  <img src="images/06-capability-versions.png" alt="能力版本历史" />
+  <figcaption><b>图 6-2｜能力页 · 版本历史面板</b>：<code>cap_repair_cost</code> 共 2 版、最新在前——v1.1.0 active（修客户端「其他」为 <code>this.customer</code> 通用化取数）与 v1.0.0 active（初版，customer 硬编码"其他"），每版完整保留表达式，可溯源。</figcaption>
+</figure>
+
+<h3>API</h3>
+<pre><code>POST /api/ontologies/{oid}/publish?project_id=..
+POST /api/capabilities/{cap_id}/publish?project_id=..</code></pre>
+
+<!-- ============ 第 7 步 ============ -->
+<h2 class="step" id="step7">第 7 步｜发布 MCP 并从 Agent 平台核验</h2>
+<div class="goal">✅ <b>目标</b>：把本体通过 MCP 暴露给外部 Agent，并证明「从 agent 平台取数+核算」可用。</div>
+
+<h3>平台侧操作</h3>
+<p>「<b>MCP</b>」页 → 本体发布清单 →「发布」：界面显示端点在线状态、Streamable HTTP / SSE 双传输说明、「接入 token」（生成/轮换/吊销，旧 token 立即失效）、以及可直接粘贴到 AI 平台的 <code>mcpServers</code> 配置 JSON。发布粒度是「单个本体」，同一项目多个已发布本体共享端点。</p>
+
+<figure class="shot">
+  <img src="images/07-mcp-publish.png" alt="MCP发布页" />
+  <figcaption><b>图 7-1｜MCP 页</b>：「● 端点在线 <code>/mcp/a9572b3412414ab688ad53fdcfb7f202</code>（已发布 1 个本体，共享该端点）」；接入 token 生成/轮换/吊销说明；Streamable HTTP（initialize / tools/list / tools/call，响应头带 Mcp-Session-Id）与 SSE 端点说明；「本体发布清单」中本体 <code>b0da8871…68af</code>（20 对象 / 515 实例）状态「已发布」；下方「MCP Server 接入配置」JSON 可直接复制到 Claude Desktop / CodeBuddy / Cursor 等 AI 平台。</figcaption>
+</figure>
+
+<p>外部 Agent 侧：<code>initialize</code>（响应头取 <code>Mcp-Session-Id</code> 回传）→ <code>tools/list</code> → <code>tools/call capability_call</code>。本端点实际暴露 13 个工具：</p>
+<pre><code>ontology_query, inference_trace, instance_get, lineage_get, quality_health,
+connection_health, action_invoke, term_lookup, capability_call,
+alignment_candidates, alignment_declarations, fusion_requests, fusion_query</code></pre>
+
+<h3>Agent 平台实测（capability_call 溯源四要素节选）</h3>
+<pre><code>{ "capability_name": "cap_total_o", "capability_version": "1.0.0",
+  "execution_channel": "mcp",            // 证明确走 agent/MCP 通道
+  "status": "success", "value": 209.8305397178371,
+  "trace": {
+    "inputs":  [ {"attr":"onsite_product_line","value":"SV"}, {"attr":"onsite_customer","value":"非BATZ"},
+                 {"attr":"region","value":"国内"}, {"attr":"term","value":"3年"}, {"attr":"u_group","value":"1U/2U"},
+                 {"attr":"customer","value":"其他"}, {"attr":"service_class","value":"NBD"},
+                 {"attr":"spare_direct","value":17.0815949673332}, {"attr":"aux_country","value":"国内"} ],
+    "lookups": [ {"object_type":"onsite_rate_baseline","dims":{"product_line":"SV","customer":"非BATZ","region":"国内"},
+                  "attr":"rate","matched_record_id":"onsite_rate_baseline_13e72041ed4c4f78a27be9b22731f17b",
+                  "value":0.218895427866865,"matched_count":1,"selection_rule":"strict"},
+                 {"object_type":"labor_baseline","dims":{"u_group":"1U/2U","customer":"其他","region":"国内",
+                  "service_class":"NBD","product_line":"通用服务器"},"attr":"unit_cost",
+                  "matched_record_id":"labor_baseline_cb361b252e134ad3b6d20589de5d3a70",
+                  "value":208.240380617387,"matched_count":1} ],   // 共 6 条 lookup 命中
+    "refs":    [ {"name":"cap_onsite_rate_d","value":0.218895427866865},
+                 {"name":"cap_labor_cost_e","value":45.582867214401745},
+                 {"name":"cap_spare_aux_k","value":19.425729337792795},
+                 {"name":"cap_mgmt_cost_n","value":127.74034819830935},
+                 {"name":"cap_total_o","value":209.8305397178371} ]   // 共 6 条 ref 链
+  } }</code></pre>
+<p class="kv">返回 <code>209.8305397</code> 与结果表 <b>209.8305 精确一致</b>，<code>execution_channel=mcp</code>。lookup 每条带 <code>matched_record_id</code> 可回指，评委可手算复核（45.5829 + 17.0816 + 19.4257 + 127.7403 = 209.8305）。</p>
+
+<h3>API</h3>
+<pre><code>POST /api/mcp/server/publish?project_id=&lt;pid&gt;&amp;ontology_id=&lt;oid&gt;
+POST /api/mcp/server/token?project_id=&lt;pid&gt;   → data.token
+POST /mcp/{project_id}    # initialize → tools/list → tools/call capability_call</code></pre>
+
+<div class="callout">⚠ 发布后<b>首次调用可能返回 503「MCP 端点启动中」</b>，轮询重试（每 2s，1~3 次）即可。REST 内部校验/问数<b>不需要</b>发布 MCP；但<b>对外/agent 验收必须发布 MCP</b>。另注意：JSON-RPC 请求体必须以 UTF-8 发送（Windows 下 curl 直接内联中文会报 Parse error，先把 body 写入 UTF-8 文件再 <code>--data-binary @file</code>）。</div>
+
+<!-- ============ 第 8 步 ============ -->
+<h2 class="step" id="step8">第 8 步｜全量核验与比对</h2>
+<div class="goal">✅ <b>目标</b>：用能力在 <code>warranty_cost</code> 实例上 <code>dry_run</code>，与《成本核算逻辑.xlsx》逐行比对，并<b>不把待测结果落为实例</b>。</div>
+
+<h3>平台侧操作</h3>
+<p>「<b>能力</b>」页右侧「执行」面板：能力 name/id 填 <code>cap_total_o</code>、实例 record_id 填目标实例（如 WC-3 国内·三年5×10×NBD），勾选「dry_run（不写回）」→ 单实例执行。执行结果区展示：状态 success/error、value、lookup 命中记录（matched_record_id 与原始值）、ref 链与 inputs 明细。</p>
+
+<figure class="shot">
+  <img src="images/08-execute-trace.png" alt="能力执行与四要素溯源" />
+  <figcaption><b>图 8-1｜能力页 · 执行（dry_run）四要素溯源</b>：能力 <code>cap_total_o</code> v1.0.0、实例 <code>warranty_cost_a42378f…dbb03</code>（WC-3），已勾选 dry_run；执行结果 <code>value = 209.8305397178371</code>，下方逐条列出 lookup 命中（onsite_rate_baseline 现场服务率 0.218895427866865、labor_baseline NBD unit_cost 208.240380617387、spare_aux_baseline unit_nd 88.7443357181849、mgmt_cost_baseline 售后 583.56791388079 等，均含 matched record_id 与原始值）与 inputs 覆盖明细（onsite_product_line=SV、onsite_customer=非BATZ、term=3年…）。</figcaption>
+</figure>
+
+<h3>核验结果（与《成本核算逻辑.xlsx》逐行比对）</h3>
+<table>
+  <tr><th>核算域</th><th>内容</th><th>结果</th></tr>
+  <tr><td>通用服务器原厂维保</td><td>国内 15 行 A~S 全列（9 核心 E/K/N/O/S + 6 介质保留 O=F/S + P/Q 公式 <code>P=O−O(3年NBD=209.8305)、Q=P(N)−P(N−1)</code>）</td><td>✅ 精确（O 差≈1e-13）</td></tr>
+  <tr><td>国内单次维修</td><td>2 行</td><td>✅ 428.6732 / 402.2519</td></tr>
+  <tr><td>焕新服务</td><td>2 行</td><td>✅ 102.816 / 163.136</td></tr>
+  <tr><td>人天核算</td><td>3 行</td><td>✅</td></tr>
+  <tr><td>海外出差</td><td>2 行</td><td>✅ 421912 / 33336.24</td></tr>
+  <tr><td>人员驻场核算</td><td>2 行</td><td>✅ 江苏 120000 / 北京 156000（基准表为准）</td></tr>
+</table>
+
+<h3>API</h3>
+<pre><code>POST /api/capabilities/{cap_id}/execute  {instance_id, inputs, dry_run:true}</code></pre>
+
+<div class="danger">⚠ <b>两条铁律（务必遵守）</b>：① <b>结果对象只承载「输入维度」</b>，输出由能力 computed；《成本核算逻辑.xlsx》的目标值<b>永不作为实例导入</b>（只在比对层读取 Excel）。② <b>拒绝直接取数</b>：任何数值都必须经能力 <code>lookup + 计算式</code> 产出，不能读预存结果。</div>
+
+<!-- ============ 第 9 步 ============ -->
+<h2 class="step" id="step9">第 9 步｜源数据口径问题的处理</h2>
+<div class="goal">✅ <b>目标</b>：识别并处理源表自身不一致（非建模/取数问题），<b>以基准表为准、不迁就错误公式</b>。</div>
+
+<h3>本次发现的 3 处源数据口径问题（已写入联测报告第七节）</h3>
+<table>
+  <tr><th>#</th><th>问题</th><th>判定</th></tr>
+  <tr><td>1</td><td>驻场「北京」核算表月成本引用 <code>人员驻场成本!$C$10</code>（STR·<b>初级</b>=9000），与其标注「STR<b>中级</b>驻场」错位，应为 <code>$C$11</code>（STR·中级=13000）</td><td>源表<b>引用行号偏移（差一行）</b>→ 按基准表=13000×12=<b>156000</b></td></tr>
+  <tr><td>2</td><td>单次维修 F 取备件成本「工厂=<b>1600</b>」单价（内存146/主板190），与 1100 厂（102/142）不同</td><td>反算确认 F 口径=工厂1600</td></tr>
+  <tr><td>3</td><td>海外（德国）现场服务率 D 4/5 年=0.3065/0.4115，<b>不从海外基数 0.2157 按 ×1.4/×1.88 递增</b>，反而等于国内基数 0.2189 递增值</td><td>源表口径矛盾，<b>需业务裁定</b></td></tr>
+</table>
+
+<h3>平台侧处理</h3>
+<p>数据口径不一致的处理原则是「<b>本体保留源表原值，映射/归一放数据字典与比对层</b>」：</p>
+<ul>
+  <li>「<b>数据字典</b>」页是规范术语/同义词映射的登记入口（精确 → 同义词 → 确定性语义近似，歧义列候选交人工确认），并提供 term_lookup 联邦查询与查询审计；</li>
+  <li>在「实例导入」页用 <b>PATCH（字段级）</b>修正被截断/合并的取值（如保留供应商全名，勿截断）；</li>
+  <li>在「能力」编辑器里按正确口径改表达式（如 <code>part_price</code> 按 <code>factory='1600'</code> 取数、<code>cap_station_cost</code> 按基准表中级取值）。</li>
+</ul>
+
+<figure class="shot">
+  <img src="images/09-dictionary.png" alt="数据字典页" />
+  <figcaption><b>图 9-1｜数据字典页</b>：左侧「数据字典词条」（规范术语/对象属性/同义词/系统绑定/权威来源/操作）与「+ 新建词条」；右侧 term_lookup 联邦查询（词/同义词、键值、limit、限资源系统）与成本预览（dry_run）、field_map 来源盘点（explicit/dictionary 双向绑定）、查询审计（term_lookup_audit）。本项目词条区为空——本次实战采取「本体 1:1 保留源表原值」策略，供应商全名/字段口径差异在能力表达式与比对层处理，未新增词条；当需要跨系统别名归一时在此登记。</figcaption>
+</figure>
+
+<!-- ============ 设计原则 ============ -->
+<h2 class="step" id="principles">设计原则与坑点清单</h2>
+
+<h3>设计原则（这次践行的四条）</h3>
+<ol>
+  <li><b>本体/实例 = 源表原值</b>：字段 1:1 保留，不截断、不合并、不去重丢失维度。</li>
+  <li><b>数据字典 = 映射</b>：值归一化/别名/口径映射放字典（term/term_lookup），不改数据。</li>
+  <li><b>结果对象只承载输入维度</b>：输出由能力 computed，目标值永不落实例。</li>
+  <li><b>拒绝直接取数</b>：一切数值经 <code>lookup + 计算式</code> 产出。</li>
+</ol>
+
+<h3>坑点清单（实战高频）</h3>
+<table>
+  <tr><th>坑</th><th>规避</th></tr>
+  <tr><td>localhost → IPv6 挂起（脚本）</td><td>脚本用 <code>http://127.0.0.1:8000</code>；浏览器前端用 <code>http://localhost:8090</code>（保证会话 Cookie 同站）</td></tr>
+  <tr><td>导入显示值 vs 精确值</td><td>读单元格<b>原值</b>（0.2189 vs 0.218895427866865 曾致 ~0.01 元偏差）</td></tr>
+  <tr><td>列偏移</td><td>逐列核对（人天表/驻场表列位≠表头视觉）</td></tr>
+  <tr><td>多行表头截断</td><td>服务商/供应商名用全名，勿 <code>split("\n")[0]</code></td></tr>
+  <tr><td>下游 ref 上游未发布</td><td>先 <code>POST /api/capabilities/{id}/publish</code></td></tr>
+  <tr><td><code>binds</code> 无条件预求值</td><td>可选属性内联 <code>if()</code></td></tr>
+  <tr><td>尾位多行嵌套 if</td><td>先 bind 变量，final 只放单层选择</td></tr>
+  <tr><td>空字段导入</td><td>用 <code>preview</code>（records dict）而非 <code>upload</code>（csv 空串）</td></tr>
+  <tr><td>MCP 首调 503 / 中文请求体 Parse error</td><td>503 轮询重试；中文 body 写 UTF-8 文件后 <code>--data-binary @file</code></td></tr>
+  <tr><td>F 备件直接成本</td><td>依赖 docx §4.3 精细模型 + 各厂商返修政策条件分支，非统一模板（当前以 <code>spare_direct</code> 承载）</td></tr>
+  <tr><td>海外 D 口径</td><td>源表矛盾，需业务裁定</td></tr>
+</table>
+
+<!-- ============ 附录 ============ -->
+<h2 class="step" id="appendix">附录｜平台功能页与常用 API 速查</h2>
+<p><b>功能页</b>：首页 / 建模 / 实例导入 / 图谱 / 推理 / 业务动作 / 编排 / 数据字典 / 能力 / 数据健康度 / 跨本体对齐 / MCP / 日志 / 设置 / 凭据映射 / 用户与授权 / 变更审批 / 审计日志。</p>
+
+<table>
+  <tr><th>操作</th><th>页</th><th>API</th></tr>
+  <tr><td>登录</td><td>设置</td><td><code>POST /api/auth/login?mode=bearer</code></td></tr>
+  <tr><td>建用户</td><td>用户与授权</td><td><code>POST /api/auth/users</code></td></tr>
+  <tr><td>建项目</td><td>首页/项目</td><td><code>POST /api/projects</code></td></tr>
+  <tr><td>建本体</td><td>建模</td><td><code>POST /api/ontologies</code></td></tr>
+  <tr><td>已发布本体改版</td><td>建模→提交变更 / 变更审批</td><td><code>POST /api/ontologies/{id}/changesets</code></td></tr>
+  <tr><td>发布本体</td><td>建模</td><td><code>POST /api/ontologies/{id}/publish</code></td></tr>
+  <tr><td>导实例</td><td>实例导入</td><td><code>POST /api/ingest/preview</code> → <code>/candidates/{id}/approve</code></td></tr>
+  <tr><td>建能力</td><td>能力</td><td><code>POST /api/capabilities</code></td></tr>
+  <tr><td>执行能力</td><td>能力→执行面板</td><td><code>POST /api/capabilities/{id}/execute</code></td></tr>
+  <tr><td>发布能力</td><td>能力</td><td><code>POST /api/capabilities/{id}/publish</code></td></tr>
+  <tr><td>发布 MCP</td><td>MCP</td><td><code>POST /api/mcp/server/publish</code></td></tr>
+  <tr><td>MCP 令牌</td><td>MCP</td><td><code>POST /api/mcp/server/token</code></td></tr>
+  <tr><td>MCP 消费</td><td>外部 Agent</td><td><code>/mcp/{project_id}</code>（initialize → tools/list → capability_call 等）</td></tr>
+</table>
+
+<div class="callout">📌 <b>约定</b>：所有查询带 <code>?project_id=</code>；能力按 <b>cap_id</b> 调用（按 name 会 NOT_FOUND，UI 面板填 name 会自动解析为 id）；脚本端 HTTP 客户端注意平台返回的 <code>(status, dict)</code> 结构。</div>
+
+<footer>格物 lattice · 企业业务本体平台 ｜ 服务产品成本本体建模教程 V2.0 ｜ 截图均为平台实拍（2026-11-18）</footer>
+</div>
+</body>
+</html>
